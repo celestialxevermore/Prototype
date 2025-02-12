@@ -54,6 +54,7 @@ def get_args():
     parser.add_argument('--llm_model', type=str, default='gpt2')
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
+    parser.add_argument('--base_dir', type=str, required=True)
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--graph_path', type=str, default="/storage/personal/eungyeop/dataset/graph")
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    

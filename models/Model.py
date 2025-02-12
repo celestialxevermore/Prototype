@@ -420,9 +420,170 @@ class GAT_edge_3(nn.Module):
             layer_outputs.append(x)
         return global_mean_pool(x, data.batch)
 
+class CenterAttention(nn.Module):
+    def __init__(self, input_dim, hidden_dim, attention_type='CA_m'):
+        super().__init__()
+        self.attention_type = attention_type
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        
+    def forward(self, x, edge_index, Z):
+        # center와 연결된 leaf node 찾기
+        center_node = x[0].unsqueeze(0)
+        center_edges = (edge_index[0] == 0)
+        
+        self.query = nn.Linear(self.input_dim, self.hidden_dim)
+        self.key = nn.Linear(self.input_dim, self.hidden_dim)
+        self.value = nn.Linear(self.input_dim, self.hidden_dim)
+        self.scale = self.hidden_dim ** -0.5
+        if self.attention_type == 'CA_m':
+            # 노드 단위 attention
+            leaf_Z = Z[center_edges]  # [num_leaves, feature_dim]
+            leaf_Z = torch.cat([center_node, leaf_Z], dim=0)
+        
+        attention_scores = torch.matmul(self.query(leaf_Z), self.key(leaf_Z).transpose(-2, -1)) * self.scale
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        center_repr = torch.matmul(attention_weights, self.value(leaf_Z))[0]
+        return center_repr
 
+class GAT_edge_4(nn.Module):
+    def __init__(self, args, input_dim, hidden_dim, output_dim, num_layers=4, dropout_rate=0.3, heads=8):
+        super(GAT_edge_4, self).__init__()
+        self.args = args
+        self.input_dim = args.input_dim
+        self.hidden_dim = args.hidden_dim
+        self.output_dim = args.output_dim
 
+        if self.args.center_type in ['CA_m', 'CA_f']:
+            self.center_attention = CenterAttention(input_dim, hidden_dim, args.center_type)
+        self.use_desc = (args.FD == 'ND')
+        if self.use_desc:
+            self.edge_mlp = nn.Sequential(
+                nn.Linear(self.input_dim * 2, self.input_dim),
+                nn.LayerNorm(self.input_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate),
+                
+                nn.Linear(self.input_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
 
+                nn.Linear(self.input_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
+                
+                nn.Linear(self.hidden_dim, self.input_dim)
+            )
+        if 'full' in args.graph_type:
+            self.heads = min(4, heads)
+            self.num_layers = min(3, num_layers)
+            self.dropout_rate = dropout_rate * 1.5
+        else:
+            self.heads = heads
+            self.num_layers = num_layers
+            self.dropout_rate = dropout_rate
+
+        self.edge_dim = self.input_dim
+
+        # GAT 레이어들
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.layer_norms = nn.ModuleList()
+
+        first_hidden = self.hidden_dim // self.heads
+        # 첫 번째
+        self.convs.append(
+            GATConv(
+                in_channels=self.input_dim,
+                out_channels=first_hidden,
+                heads=self.heads,
+                edge_dim=self.edge_dim,
+                concat=True
+            )
+        )
+        self.bns.append(nn.BatchNorm1d(first_hidden * self.heads))
+        self.layer_norms.append(nn.LayerNorm(first_hidden * self.heads))
+
+        # 중간 레이어
+        for _ in range(self.num_layers - 2):
+            self.convs.append(
+                GATConv(
+                    in_channels=first_hidden * self.heads,
+                    out_channels=first_hidden,
+                    heads=self.heads,
+                    edge_dim=self.edge_dim,
+                    concat=True
+                )
+            )
+            self.bns.append(nn.BatchNorm1d(first_hidden * self.heads))
+            self.layer_norms.append(nn.LayerNorm(first_hidden * self.heads))
+
+        # 마지막 레이어
+        self.convs.append(
+            GATConv(
+                in_channels=first_hidden * self.heads,
+                out_channels=hidden_dim,
+                heads=1,
+                edge_dim=self.edge_dim,
+                concat=False
+            )
+        )
+        self.bns.append(nn.BatchNorm1d(hidden_dim))
+        self.layer_norms.append(nn.LayerNorm(hidden_dim))
+
+        # Dropout, Skip proj
+        self.dropout = nn.Dropout(self.dropout_rate)
+        self.skip_projs = nn.ModuleList()
+        for i in range(self.num_layers):
+            if i == 0:
+                self.skip_projs.append(nn.Linear(self.input_dim, first_hidden * self.heads))
+            elif i == self.num_layers - 1:
+                self.skip_projs.append(nn.Linear(first_hidden * self.heads, hidden_dim))
+            else:
+                self.skip_projs.append(nn.Linear(first_hidden * self.heads, first_hidden * self.heads))
+
+    def forward(self, data):
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+
+        # FD=='ND'이면 desc_attr 사용
+        if self.use_desc:
+            desc_attr = data.desc_attr
+            new_edge_attr = self.edge_mlp(torch.cat([edge_attr, desc_attr], dim=-1))
+        else:
+            new_edge_attr = edge_attr
+
+        for i in range(self.num_layers):
+            # (A) center node 업데이트
+            if hasattr(self, 'center_attention'):
+                # Z: [num_edges, input_dim]
+                Z = torch.mul(new_edge_attr, x[edge_index[1]])
+                # 수정된 signature: center_attention(x, edge_index, Z)
+                center_repr = self.center_attention(x, edge_index, Z)
+                # center_repr shape: [hidden_dim] (CA_m) or [input_dim] (CA_f)
+                # 최종적으로 x[0]에 할당
+                if center_repr.size(0) == self.hidden_dim:
+                    # GATConv에 들어갈 때는 모든 노드가 같은 차원이면 좋음
+                    # CA_m 결과가 hidden_dim이면, x도 hidden_dim이어야 하는데
+                    # 초기 x의 차원은 input_dim이므로 -> 필요 시 차원 맞춤 or 그냥 덮어씀
+                    pass  
+                x[0] = center_repr
+
+            # (B) GATConv
+            current = x
+            x = self.convs[i](x, edge_index, edge_attr=new_edge_attr)
+            x = self.bns[i](x)
+            x = self.layer_norms[i](x)
+
+            # Skip connection
+            skip = self.skip_projs[i](current)
+            x = x + skip
+
+            x = F.elu(x)
+            x = self.dropout(x)
+
+        # (C) Pooling
+        out = global_mean_pool(x, data.batch)
+        return out
 
 class Model(nn.Module):
     def __init__(self, args, input_dim, hidden_dim, output_dim, num_layers=4):
@@ -442,6 +603,9 @@ class Model(nn.Module):
         elif args.model_type == 'GAT_edge_3':
             self.gnn = GAT_edge_3(args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, heads)
             gnn_out_dim = hidden_dim  # GAT_edge_3의 출력 차원
+        elif args.model_type == 'GAT_edge_4':
+            self.gnn = GAT_edge_4(args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, heads)
+            gnn_out_dim = hidden_dim  # GAT_edge_4의 출력 차원
         else:  # NORM_GNN
             self.gnn = NORM_GNN(args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate)
             gnn_out_dim = hidden_dim  # NORM_GNN의 출력 차원
@@ -452,11 +616,13 @@ class Model(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
+
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim // 2, 1)
+            
+            nn.Linear(hidden_dim, 1)
         )
         
 

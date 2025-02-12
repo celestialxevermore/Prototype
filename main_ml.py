@@ -41,6 +41,7 @@ def get_args():
     parser.add_argument('--train_epochs', type=int, default=200)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--patience', type=int, default=10)
+    parser.add_argument('--base_dir', type=str, required=True)
     parser.add_argument('--baseline', nargs='*', 
                        default=['lr', 'xgb', 'mlp', 'cat', 'rf'],
                        choices=['lr', 'xgb', 'mlp', 'cat', 'rf'],

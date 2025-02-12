@@ -18,3 +18,48 @@ images/*.png
 *.cost
 *.delay
 *.group
+
+# Pretrained models
+pretrained_models/
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.model
+*.h5
+
+# Experiment results
+experiments/
+results/
+logs/
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
