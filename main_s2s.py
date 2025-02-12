@@ -16,12 +16,14 @@ from sklearn.preprocessing import label_binarize
 from utils.util import setup_logger, format_time, fix_seed
 from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
-from utils.metrics import get_best_performance
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_graph_dataloaders, prepare_tabular_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from models.Model import Model
 from models.XGBoost import xgboost_benchmark
 from models.LogReg import logistic_regression_benchmark
 import psutil 
+from torch_geometric.data import Batch
 p = psutil.Process()
 
 p.cpu_affinity(range(20, 80))
@@ -268,6 +270,63 @@ def main():
         sampler=optuna.samplers.TPESampler(seed=args.random_seed)
     )
     
+    # def objective(trial):
+    #     # 하이퍼파라미터 정의
+    #     args.num_layers = trial.suggest_int('num_layers', 1, 4)
+    #     args.heads = trial.suggest_categorical('heads', [4, 8, 16])
+    #     args.dropout_rate = trial.suggest_categorical('dropout_rate', [0.1, 0.2, 0.3, 0.4, 0.5])
+    #     args.source_lr = trial.suggest_float('source_lr', 1e-5, 1e-3, log=True)
+        
+    #     # Stratified K-Fold 설정
+    #     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=args.random_seed)
+    #     best_val_auc = 0
+        
+    #     # 전체 데이터셋 가져오기
+    #     dataset = train_loader_full_s.dataset
+    #     labels = [data.y.item() for data in dataset]
+        
+    #     # 그래프 단위로 K-Fold 수행
+    #     for fold, (train_idx, val_idx) in enumerate(skf.split(range(len(dataset)), labels)):
+    #         # 현재 fold의 데이터 분할
+    #         train_data = [dataset[i] for i in train_idx]
+    #         val_data = [dataset[i] for i in val_idx]
+            
+    #         # PyTorch Geometric용 DataLoader 생성
+    #         train_loader_fold = DataLoader(
+    #             train_data, 
+    #             batch_size=args.batch_size, 
+    #             shuffle=True,
+    #             collate_fn=Batch.from_data_list
+    #         )
+    #         val_loader_fold = DataLoader(
+    #             val_data, 
+    #             batch_size=args.batch_size,
+    #             collate_fn=Batch.from_data_list
+    #         )
+            
+    #         # 모델 및 optimizer 초기화
+    #         is_binary = (num_classes == 2)
+    #         criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+    #         model = Model(args, args.input_dim, args.hidden_dim, num_classes).to(device)
+    #         optimizer = optim.Adam(model.parameters(), lr=args.source_lr)
+            
+    #         # 현재 fold에서 학습 및 검증
+    #         results = train_and_validate(
+    #             model, train_loader_fold, val_loader_fold,
+    #             criterion, optimizer, device,
+    #             args.train_epochs, is_binary,
+                
+    #         )
+            
+    #         val_auc = results[12]  # 현재 fold의 validation AUC
+    #         if val_auc > best_val_auc:
+    #             best_val_auc = val_auc
+        
+    #     return best_val_auc
+    
+    # # 최적화 실행
+    # logger.info("Starting hyperparameter optimization...")
+    # study.optimize(objective, n_trials=30)
     def objective(trial):
         # 하이퍼파라미터 정의
         args.num_layers = trial.suggest_int('num_layers', 1, 4)
@@ -294,27 +353,31 @@ def main():
     # 최적화 실행
     logger.info("Starting hyperparameter optimization...")
     study.optimize(objective, n_trials=30)
-    
     # 결과 시각화 및 저장
     try:
         import plotly
         import os
         
-        os.makedirs("results/optuna", exist_ok=True)
+        optuna_dir = os.path.join(
+            f'experiments/source_to_source_{args.base_dir}',
+            args.source_dataset_name,
+            f"args_seed:{args.random_seed}",
+            "optuna",
+            args.model_type,
+            f"{args.graph_type}_{args.FD}_{args.center_type}"
+        )
+        os.makedirs(optuna_dir, exist_ok=True)
         
         # 1. 최적화 히스토리
         history_fig = optuna.visualization.plot_optimization_history(study)
-        history_fig.write_html(f"results/optuna/{study_name}_history.html")
         history_fig.write_image(f"results/optuna/{study_name}_history.png", scale=2)
         
         # 2. 파라미터 중요도
         param_importance_fig = optuna.visualization.plot_param_importances(study)
-        param_importance_fig.write_html(f"results/optuna/{study_name}_param_importance.html")
         param_importance_fig.write_image(f"results/optuna/{study_name}_param_importance.png", scale=2)
         
         # 3. 파라미터 간 상관관계
         parallel_coord_fig = optuna.visualization.plot_parallel_coordinate(study)
-        parallel_coord_fig.write_html(f"results/optuna/{study_name}_parallel_coord.html")
         parallel_coord_fig.write_image(f"results/optuna/{study_name}_parallel_coord.png", scale=2)
         
         logger.info(f"Visualization results saved in results/optuna/")

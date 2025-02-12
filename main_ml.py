@@ -93,7 +93,16 @@ def main():
             # Label Encoding (RF 전용)
             for col in categorical_columns:
                 le = LabelEncoder()
-                X_train_rf[col] = le.fit_transform(X_train_rf[col])
+                # 모든 데이터셋의 unique 값을 합쳐서 fit
+                all_values = pd.concat([
+                    X_train_rf[col],
+                    X_val_rf[col],
+                    X_test_rf[col]
+                ]).unique()
+                le.fit(all_values)
+                
+                # transform 적용
+                X_train_rf[col] = le.transform(X_train_rf[col])
                 X_val_rf[col] = le.transform(X_val_rf[col])
                 X_test_rf[col] = le.transform(X_test_rf[col])
             

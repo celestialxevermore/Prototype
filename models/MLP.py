@@ -17,16 +17,18 @@ class MLPClassifier(nn.Module):
         # is_binary=False일 때 out_features=num_classes -> softmax 사용
         output_dim = 1 if is_binary else num_classes
         
-        self.mlp = nn.Sequential(
+        self.mlp1 = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
+
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim // 2, output_dim)
+            
+            nn.Linear(hidden_dim, 1)
         )
         self.is_binary = is_binary
 

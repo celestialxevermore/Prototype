@@ -161,17 +161,13 @@ class GAT_edge_2(nn.Module):
                 nn.Linear(self.input_dim, self.hidden_dim),
                 nn.LayerNorm(self.hidden_dim),
                 nn.ReLU(),
-                nn.Linear(self.hidden_dim, self.hidden_dim // 2),
-                nn.LayerNorm(self.hidden_dim // 2),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
-                
-                nn.Linear(self.hidden_dim // 2, self.hidden_dim),
+
+                nn.Linear(self.input_dim, self.hidden_dim),
                 nn.LayerNorm(self.hidden_dim),
                 nn.ReLU(),
+                
                 nn.Linear(self.hidden_dim, self.input_dim)
             )
-
         # graph_type=='full'인 경우 heads 등 자동 조정
         if 'full' in args.graph_type:
             self.heads = min(4, heads)
