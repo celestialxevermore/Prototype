@@ -143,7 +143,7 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     model = MLPClassifier(input_dim, args.hidden_dim, num_classes, args.dropout_rate, is_binary).to(device)
     
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.source_lr)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     
     # 학습 설정
     n_epochs = args.train_epochs

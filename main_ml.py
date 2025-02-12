@@ -37,7 +37,7 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--hidden_dim', type = int, default = 128)
     parser.add_argument('--dropout_rate', type=float, default=0.3)
-    parser.add_argument('--source_lr', type=float, default=0.0001)
+    parser.add_argument('--learning_rate', type=float, default=0.0001)
     parser.add_argument('--train_epochs', type=int, default=200)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--patience', type=int, default=10)

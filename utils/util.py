@@ -481,6 +481,83 @@ def save_results_st(args, results_s, results_t):
 
 
 
+def prepare_ml_results(args, full_results, few_results):
+    results = {'Best_results': {'full': {}, 'few': {}}}
+    
+    # 모델별 결과 키 매핑 (소문자로 수정)
+    key_mapping = {
+        'lr': 'lr',
+        'xgb': 'xgb',
+        'mlp': 'mlp',
+        'cat': 'cat',
+        'rf': 'rf'
+    }
+    
+    # 선택된 baseline 모델들에 대해서만 결과 저장
+    for model in args.baseline:
+        model_key = key_mapping[model]
+        
+        # Full dataset results
+        results['Best_results']['full'][model] = {
+            f'{model}_best_full_auc': full_results[model][f'test_{model_key}_auc'],
+            f'{model}_best_full_acc': full_results[model][f'test_{model_key}_acc'],
+            f'{model}_best_full_precision': full_results[model][f'test_{model_key}_precision'],
+            f'{model}_best_full_recall': full_results[model][f'test_{model_key}_recall'],
+            f'{model}_best_full_f1': full_results[model][f'test_{model_key}_f1']
+        }
+        
+        # Few-shot results
+        results['Best_results']['few'][model] = {
+            f'{model}_best_few_auc': few_results[model][f'test_{model_key}_auc'],
+            f'{model}_best_few_acc': few_results[model][f'test_{model_key}_acc'],
+            f'{model}_best_few_precision': few_results[model][f'test_{model_key}_precision'],
+            f'{model}_best_few_recall': few_results[model][f'test_{model_key}_recall'],
+            f'{model}_best_few_f1': few_results[model][f'test_{model_key}_f1']
+        }
+    
+    return results
+
+def save_ml_results(args, results):
+    # baseline 모델들의 이름을 정렬해서 폴더명 생성
+    model_dir = '_'.join(sorted(args.baseline))
+    
+    exp_dir = os.path.join(
+        'experiments/ml_baselines_SEEDS',
+        args.source_dataset_name,
+        f"args_seed:{args.random_seed}",
+        model_dir
+    )
+    os.makedirs(exp_dir, exist_ok=True)
+
+    dataset_file_path = os.path.join('/storage/personal/eungyeop/dataset/table', 
+                                   f"{args.source_dataset_name}.csv")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"f{args.few_shot}_b{args.batch_size}_{timestamp}.json"
+    filepath = os.path.join(exp_dir, filename)
+
+    data = {
+        "Experimental Memo": args.des,
+        "dataset": args.source_dataset_name,
+        "dataset_file_path": dataset_file_path,
+        "timestamp": timestamp,
+        "hyperparameters": {
+            "seed": args.random_seed,
+            "batch_size": args.batch_size,
+            "train_epochs": args.train_epochs,
+            "learning_rate": args.learning_rate,
+            "hidden_dim": args.hidden_dim,
+            "dropout_rate": args.dropout_rate,
+            "few_shot": args.few_shot,
+            "threshold": args.threshold
+        },
+        "results": results
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+    print(f"Results saved to {filepath}")
 
 
 

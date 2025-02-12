@@ -69,13 +69,13 @@ def catboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test,
     test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = compute_overall_accuracy(y_test_pred_proba, y_test, num_class, threshold=args.threshold, activation=False)
     
     total_results = {
-        'test_catboost_loss': test_loss,
-        'test_catboost_acc': test_acc,
-        'test_catboost_auc': test_auc,
-        'test_catboost_auprc': test_auprc,
-        'test_catboost_f1': test_f1,
-        'test_catboost_recall': test_recall,
-        'test_catboost_precision': test_precision,
+        'test_cat_loss': test_loss,
+        'test_cat_acc': test_acc,
+        'test_cat_auc': test_auc,
+        'test_cat_auprc': test_auprc,
+        'test_cat_f1': test_f1,
+        'test_cat_recall': test_recall,
+        'test_cat_precision': test_precision,
         'best_depth': best_depth,
         'best_iterations': best_iterations
     }

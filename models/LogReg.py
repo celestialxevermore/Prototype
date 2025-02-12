@@ -102,16 +102,16 @@ def logistic_regression_benchmark(args, X_train, X_valid, X_test, y_train, y_val
     )
     
     total_results = {
-        'test_LR_loss': test_loss,
-        'test_LR_acc': test_acc,
-        'test_LR_auc': test_auc,
-        'test_LR_auprc': test_auprc,
-        'test_LR_f1': test_f1,
-        'test_LR_recall': test_recall,
-        'test_LR_precision': test_precision,
-        'best_LR_c': best_params['C'],
-        'best_LR_penalty': best_params['penalty'],
-        'best_LR_loss': best_loss,
+        'test_lr_loss': test_loss,
+        'test_lr_acc': test_acc,
+        'test_lr_auc': test_auc,
+        'test_lr_auprc': test_auprc,
+        'test_lr_f1': test_f1,
+        'test_lr_recall': test_recall,
+        'test_lr_precision': test_precision,
+        'best_lr_c': best_params['C'],
+        'best_lr_penalty': best_params['penalty'],
+        'best_lr_loss': best_loss,
     }
 
     return total_results
