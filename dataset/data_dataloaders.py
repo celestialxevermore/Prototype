@@ -1,0 +1,976 @@
+import torch
+import torch.nn as nn 
+import pandas as pd
+import numpy as np
+import sys
+import pdb
+sys.path.append('..')
+from dataset.data import get_dataset
+from utils.table_to_graph import Table2GraphTransformer
+import torch.optim as optim
+from sklearn.preprocessing import LabelEncoder 
+from sklearn.model_selection import train_test_split
+#from torch_geometric.data import DataLoader
+#from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset
+from collections import Counter
+from torch_geometric.loader import DataLoader as PyGDataLoader
+from torch_geometric.loader import DataLoader
+import os, pickle
+import os, pickle
+import random
+import warnings
+def preprocessing_heart_datasets(DATASETS: pd.DataFrame, data_name: str):
+    """
+    cleveland, hungarian, switzerland, heart_statlog 데이터셋을 위한 전처리 함수
+    """
+    heart_datasets = ['cleveland', 'hungarian', 'switzerland', 'heart_statlog']
+    assert data_name in heart_datasets, f"{data_name} is not a valid heart dataset name"
+    
+    # target_binary 컬럼이 이미 'no'/'yes'로 되어있음
+    X = DATASETS[data_name][0].drop('target_binary', axis=1)
+    X = X.reset_index(drop=True)
+
+    y = DATASETS[data_name][0]['target_binary']
+    # 'no'/'yes'를 0/1로 변환
+    y = (y == 'yes').astype(int)
+    y = y.reset_index(drop=True)
+    
+    return X, y
+
+def preprocessing(DATASETS : pd.DataFrame, data_name : str):
+    # 기존 데이터셋을 위한 전처리
+    dataset_and_class = {
+            "adult" : ['income', ['no','yes']],
+            "bank" : ['Class', ['no','yes']],
+            "blood" : ['Class',['no','yes']],
+            "car" : ['class',['unacceptable','acceptable','good','very good']],
+            "communities" : ['ViolentCrimesPerPop',['high','medium','low']],
+            "credit-g" : ['class', ['no','yes']],
+            "diabetes": ['Outcome',['no','yes']],
+            "myocardial" : ['ZSN',['no','yes']],
+            "cleveland": ['target_binary', ['no','yes']],
+            "hungarian": ['target_binary', ['no','yes']],
+            "switzerland": ['target_binary', ['no','yes']],
+            "heart_statlog": ['target_binary', ['no','yes']],
+            "heart": ['target_binary', ['no','yes']]
+        }
+    
+    # heart 데이터셋들은 새로운 전처리 함수로 처리
+    heart_datasets = ['cleveland', 'hungarian', 'switzerland', 'heart_statlog']
+    if data_name in heart_datasets:
+        return preprocessing_heart_datasets(DATASETS, data_name)
+        
+    assert data_name in dataset_and_class, f"{data_name} is not a valid dataset name"
+
+    class_name = dataset_and_class[data_name][0]
+    class_values = dataset_and_class[data_name][1]
+    
+    class_mapping = {label: idx for idx, label in enumerate(class_values)}
+    
+    X = DATASETS[data_name][0].drop(class_name, axis=1)
+    X = X.reset_index()
+
+    y = DATASETS[data_name][0][class_name]
+    y = y.map(class_mapping).astype(int)
+    y = y.reset_index(drop=True)
+    
+    return X, y
+
+'''
+    Prepare each datasets 
+    Table -> Graph
+'''
+def prepare_tabular_dataloaders(args, dataset_name, random_seed):
+    """데이터셋을 로드하고 train/val/test로 분할"""
+    DATASETS = {} 
+    DATASETS[dataset_name] = get_dataset(args, dataset_name, random_seed)
+
+    # heart 데이터셋들 처리
+    heart_datasets = ['cleveland', 'hungarian', 'switzerland', 'heart_statlog']
+    if dataset_name in heart_datasets:
+        X = DATASETS[dataset_name][0].drop('target_binary', axis=1)
+        y = (DATASETS[dataset_name][0]['target_binary'] == 'yes').astype(int)
+    else:
+        X, y = preprocessing(DATASETS, dataset_name)
+
+    le = LabelEncoder()
+    y = le.fit_transform(y)
+    num_classes = len(le.classes_)
+    
+    # Train/val/test split
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, 
+        test_size=0.2, 
+        random_state=args.random_seed, 
+        stratify=y
+    )
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, 
+        test_size=0.25,  # 0.25 * 0.8 = 0.2 for validation
+        random_state=args.random_seed, 
+        stratify=y_temp
+    )
+    
+    return (X_train, X_val, X_test, y_train, y_val, y_test), num_classes
+
+def get_few_shot_tabular_samples(X_train, y_train, args):
+    """이미 분할된 train set에서 few-shot 샘플링을 수행"""
+    #np.random.seed(4)
+    num_classes = len(np.unique(y_train))
+    shot = args.few_shot
+    samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+    
+    support_X, support_y = [], []
+    for cls in range(num_classes):
+        cls_indices = np.where(y_train == cls)[0]
+        sample_num = samples_per_class + (1 if remainder > 0 else 0)
+        if remainder > 0:
+            remainder -= 1
+        
+        selected_indices = np.random.choice(
+            cls_indices, 
+            size=min(sample_num, len(cls_indices)), 
+            replace=len(cls_indices) < sample_num
+        )
+        
+        support_X.append(X_train.iloc[selected_indices])
+        support_y.extend([cls] * len(selected_indices))
+    
+    X_train_few = pd.concat(support_X, ignore_index=True)
+    y_train_few = np.array(support_y)
+    
+    print(f"Few-shot 학습 데이터 크기: {len(X_train_few)}")
+    print(f"클래스별 분포: {Counter(y_train_few)}")
+    
+    return X_train_few, y_train_few
+
+
+def get_few_shot_graph_samples(train_loader, args):
+    """train_loader에서 few-shot 샘플링을 수행"""
+    np.random.seed(args.random_seed)
+    dataset = train_loader.dataset
+    labels = [data.y.item() for data in dataset]
+    num_classes = len(set(labels))
+    
+    shot = args.few_shot
+    base_samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+    
+    # 남은 샘플을 랜덤하게 분배
+    extra_samples = random.sample(range(num_classes), remainder)
+    
+    support_data = []
+    for cls in range(num_classes):
+        cls_data = [data for data in dataset if data.y.item() == cls]
+        sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
+        
+        if len(cls_data) < sample_num:
+            warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({sample_num}). Using replacement sampling.")
+            selected = random.choices(cls_data, k=sample_num)
+        else:
+            selected = random.sample(cls_data, k=sample_num)
+        
+        support_data.extend(selected)
+    
+    print(f"Few-shot training data size: {len(support_data)}")
+    class_dist = Counter([data.y.item() for data in support_data])
+    print(f"Class distribution in few-shot data: {dict(class_dist)}")
+    #pdb.set_trace() #이상 없음
+    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
+
+
+
+# def prepare_graph_dataloaders(args, dataset_name, few_shot=False):
+#     # 완벽한 재현성을 위한 설정
+#     os.environ['PYTHONHASHSEED'] = str(args.random_seed)
+#     torch.backends.cudnn.deterministic = True
+#     torch.backends.cudnn.benchmark = False
+#     torch.use_deterministic_algorithms(True)
+    
+#     # 기존 seed 설정
+#     torch.manual_seed(args.random_seed)
+#     np.random.seed(args.random_seed)
+#     random.seed(args.random_seed)
+#     if torch.cuda.is_available():
+#         torch.cuda.manual_seed(args.random_seed)
+#         torch.cuda.manual_seed_all(args.random_seed)
+    
+#     # 파일 경로 설정 - args에서 직접 경로 사용
+#     if args.label:
+#         file_path = os.path.join(args.graph_path, f"{args.graph_type}_{args.FD}_label_{dataset_name}.pkl")
+#     else:
+#         file_path = os.path.join(args.graph_path, f"{args.graph_type}_{args.FD}_{dataset_name}.pkl")
+
+#     print(f"Loading data from: {file_path}")
+#     if not os.path.exists(file_path):
+#         raise FileNotFoundError(f"File not found: {file_path}")
+   
+#     # 데이터셋 로드
+#     with open(file_path, "rb") as f:
+#         dataset = pickle.load(f)
+   
+#     # 클래스 레이블 추출
+#     class_labels = [data.y.item() for data in dataset]
+#     num_classes = len(set(class_labels))
+
+#     # Stratified split으로 train/val/test 분리하면서 인덱스 저장
+#     indices = list(range(len(dataset)))
+#     train_val_idx, test_idx = train_test_split(
+#         indices, test_size=0.2, 
+#         stratify=class_labels, 
+#         random_state=args.random_seed
+#     )
+    
+#     train_val_data = [dataset[i] for i in train_val_idx]
+#     test_data = [dataset[i] for i in test_idx]
+    
+#     train_labels = [data.y.item() for data in train_val_data]
+#     train_idx, val_idx = train_test_split(
+#         train_val_idx, 
+#         test_size=0.25, 
+#         stratify=train_labels, 
+#         random_state=args.random_seed
+#     )
+    
+#     train_data = [dataset[i] for i in train_idx]
+#     val_data = [dataset[i] for i in val_idx]
+
+#     if few_shot:
+#         print("Preparing Few-shot Dataset...")
+#         shot = args.few_shot
+#         base_samples_per_class = shot // num_classes
+#         remainder = shot % num_classes
+        
+#         # 남은 샘플을 랜덤하게 분배
+#         extra_samples = random.sample(range(num_classes), remainder)
+        
+#         support_data = []
+#         few_shot_indices = []  # few-shot 인덱스 저장용
+        
+#         for cls in range(num_classes):
+#             cls_data_with_idx = [(data, idx) for data, idx in zip(train_data, train_idx) if data.y.item() == cls]
+#             sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
+            
+#             if len(cls_data_with_idx) < sample_num:
+#                 warnings.warn(f"Class {cls} has fewer samples ({len(cls_data_with_idx)}) than required ({sample_num}). Using replacement sampling.")
+#                 selected = random.choices(cls_data_with_idx, k=sample_num)
+#             else:
+#                 selected = random.sample(cls_data_with_idx, k=sample_num)
+            
+#             support_data.extend([d for d, _ in selected])
+#             few_shot_indices.extend([i for _, i in selected])
+        
+#         train_data = support_data
+#         train_idx = few_shot_indices
+#         print(f"Few-shot training data size: {len(train_data)}")
+        
+#         class_dist = Counter([data.y.item() for data in train_data])
+#         print(f"Class distribution in few-shot data: {dict(class_dist)}")
+#     else:
+#         print("Using full training dataset.")
+#         print(f"Training data size: {len(train_data)}")
+
+#     # DataLoader 생성
+#     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
+#     val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False)
+#     test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+
+#     split_indices = (train_idx, val_idx, test_idx)
+#     return train_loader, val_loader, test_loader, num_classes, split_indices
+
+def prepare_graph_dataloaders(args, dataset_name):
+    # 완벽한 재현성을 위한 설정
+    os.environ['PYTHONHASHSEED'] = str(args.random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    
+    # 기존 seed 설정
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
+    random.seed(args.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.random_seed)
+        torch.cuda.manual_seed_all(args.random_seed)
+    
+    # 파일 경로 설정 - args에서 직접 경로 사용
+    if args.label:
+        file_path = os.path.join(args.graph_path, f"{args.graph_type}_{args.FD}_{args.center_type}_label_{dataset_name}.pkl")
+    else:
+        file_path = os.path.join(args.graph_path, f"{args.graph_type}_{args.FD}_{args.center_type}_{dataset_name}.pkl")
+
+    print(f"Loading data from: {file_path}")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+   
+    # 데이터셋 로드
+    with open(file_path, "rb") as f:
+        dataset = pickle.load(f)
+   
+    # 클래스 레이블 추출
+    class_labels = [data.y.item() for data in dataset]
+    num_classes = len(set(class_labels))
+
+    # Stratified split으로 train/val/test 분리
+    indices = list(range(len(dataset)))
+    train_val_idx, test_idx = train_test_split(
+        indices, test_size=0.2, 
+        stratify=class_labels, 
+        random_state=args.random_seed
+    )
+    
+    train_val_data = [dataset[i] for i in train_val_idx]
+    test_data = [dataset[i] for i in test_idx]
+    
+    train_labels = [data.y.item() for data in train_val_data]
+    train_idx, val_idx = train_test_split(
+        train_val_idx, 
+        test_size=0.25, 
+        stratify=train_labels, 
+        random_state=args.random_seed
+    )
+    
+    train_data = [dataset[i] for i in train_idx]
+    val_data = [dataset[i] for i in val_idx]
+
+    print(f"Training data size: {len(train_data)}")
+
+    # DataLoader 생성
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+
+    #pdb.set_trace()
+    return train_loader, val_loader, test_loader, num_classes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def load_tabular_and_split(args, DATASETS, dataset_name, few_shot=False):
+    """
+    기존 DATASETS(딕셔너리 형태: DATASETS[dataset_name] = (DataFrame, ...))에서
+    찾고자 하는 dataset_name의 데이터를 꺼내어, (X, y) 형태로 만든 뒤,
+    train / val / test로 나눠주는 함수.
+    
+    - preprocessing(DATASETS, dataset_name)를 통해 (X, y) 얻기
+    - heart_datasets는 별도 함수( preprocessing_heart_datasets )에서 처리
+    - few_shot=True일 경우, train 데이터의 클래스를 shot 만큼만 추출
+    """
+
+    # --------------------------------------------------------------------------------
+    # 1) 재현성을 위한 설정
+    # --------------------------------------------------------------------------------
+    os.environ['PYTHONHASHSEED'] = str(args.random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
+    random.seed(args.random_seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.random_seed)
+        torch.cuda.manual_seed_all(args.random_seed)
+
+    # --------------------------------------------------------------------------------
+    # 2) (X, y) 만들기: heart 데이터셋이면 preprocessing_heart_datasets, 아니면 preprocessing
+    # --------------------------------------------------------------------------------
+    from .data_dataloaders import preprocessing  # 본인 실제 경로에 따라 조정
+    X, y = preprocessing(DATASETS, dataset_name)
+
+    # --------------------------------------------------------------------------------
+    # 3) 클래스로부터 학습/검증/테스트 split
+    # --------------------------------------------------------------------------------
+    class_labels = y.values
+    num_classes = len(set(class_labels))
+
+    # 8:2 (train_val:test) split
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, 
+        test_size=0.2, 
+        stratify=class_labels, 
+        random_state=args.random_seed
+    )
+
+    # train_val에서 25%를 val로 나누어 최종 train:val:test = 60%:20%:20%
+    class_labels_train_val = y_train_val.values
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val,
+        test_size=0.25,
+        stratify=class_labels_train_val,
+        random_state=args.random_seed
+    )
+
+    # --------------------------------------------------------------------------------
+    # 4) Few-shot이면, train 데이터를 클래스별 shot만큼 뽑아 subset으로 만든다
+    # --------------------------------------------------------------------------------
+    if few_shot:
+        print("Preparing Few-shot Dataset...")
+        shot = args.few_shot
+        base_samples_per_class = shot // num_classes
+        remainder = shot % num_classes
+        extra_samples = random.sample(range(num_classes), remainder)
+
+        X_train_few = []
+        y_train_few = []
+        for cls in range(num_classes):
+            cls_indices = np.where(y_train == cls)[0]
+            sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
+
+            if len(cls_indices) < sample_num:
+                warnings.warn(f"Class {cls} has fewer samples ({len(cls_indices)}) than required ({sample_num}). Using replacement sampling.")
+                selected_indices = random.choices(cls_indices, k=sample_num)
+            else:
+                selected_indices = random.sample(list(cls_indices), k=sample_num)
+
+            X_train_few.append(X_train.iloc[selected_indices])
+            y_train_few.append(y_train.iloc[selected_indices])
+
+        X_train = pd.concat(X_train_few, axis=0)
+        y_train = pd.concat(y_train_few, axis=0)
+
+        print(f"Few-shot training data size: {len(X_train)}")
+        class_dist = Counter(y_train)
+        print(f"Class distribution in few-shot data: {dict(class_dist)}")
+    else:
+        print("Using full training dataset.")
+        print(f"Training data size: {len(X_train)}")
+
+    # --------------------------------------------------------------------------------
+    # 5) PyTorch Dataset 정의
+    # --------------------------------------------------------------------------------
+    class TabularDataset(Dataset):
+        def __init__(self, X_df, y_df):
+            self.X = X_df.values
+            self.y = y_df.values
+        def __len__(self):
+            return len(self.X)
+        def __getitem__(self, idx):
+            # float32로 변환
+            X_item = torch.tensor(self.X[idx], dtype=torch.float32)
+            y_item = torch.tensor(self.y[idx], dtype=torch.long)
+            return X_item, y_item
+
+    # 데이터셋 구성
+    train_dataset = TabularDataset(X_train, y_train)
+    val_dataset   = TabularDataset(X_val,   y_val)
+    test_dataset  = TabularDataset(X_test,  y_test)
+
+    # --------------------------------------------------------------------------------
+    # 6) DataLoader 생성
+    # --------------------------------------------------------------------------------
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False)
+    test_loader  = DataLoader(test_dataset,  batch_size=args.batch_size, shuffle=False)
+
+    pdb.set_trace()
+    return train_loader, val_loader, test_loader, num_classes
+
+
+
+
+
+
+
+
+
+
+# def prepare_graph_dataloaders(args, dataset_name, few_shot=False, train_valid_test_split=False):
+    
+#     torch.manual_seed(args.random_seed)
+#     np.random.seed(args.random_seed)
+#     torch.cuda.manual_seed(args.random_seed) if torch.cuda.is_available() else None
+#     file_path = os.path.join(args.graph_path, f"{dataset_name}.pkl")
+#     print(file_path)
+#     if not os.path.exists(file_path):
+#         raise FileNotFoundError(f"file No!")
+    
+#     with open(file_path, "rb") as f:
+#         dataset = pickle.load(f)
+    
+#     class_labels = [data.y.item() for data in dataset]
+#     num_classes = len(set(class_labels))
+    
+#     if few_shot:
+#         shot_per_class = args.dataset_shot // num_classes
+#         selected_indices = []
+        
+#         for cls in range(num_classes):
+#             cls_indices = [i for i, label in enumerate(class_labels) if label == cls]
+#             if cls_indices:
+#                 selected = np.random.choice(cls_indices, shot_per_class, replace=True)
+#                 selected_indices.extend(selected)
+        
+#         train_dataset = [dataset[i] for i in selected_indices]
+#         _, test_data = train_test_split(dataset, test_size=0.2, random_state=args.random_seed)
+#     else:
+#         train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=args.random_seed)
+#         train_dataset = train_data
+    
+#     if train_valid_test_split:
+#         if few_shot:
+#             train_data, valid_data = train_test_split(train_dataset, test_size=0.2, random_state=args.random_seed)
+#             train_loader = DataLoader(train_data, batch_size=min(4, len(train_data)), shuffle=True, drop_last=False)
+#             valid_loader = DataLoader(valid_data, batch_size=min(4, len(valid_data)), shuffle=False)
+#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+#         else:
+#             train_valid_data, test_data = train_test_split(dataset, test_size=0.2, random_state=args.random_seed)
+#             train_data, valid_data = train_test_split(train_valid_data, test_size=0.2, random_state=args.random_seed)
+#             train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, drop_last=True)
+#             valid_loader = DataLoader(valid_data, batch_size=args.batch_size, shuffle=False)
+#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+#         return train_loader, valid_loader, test_loader, num_classes
+#     else:
+#         if few_shot:
+#             train_loader = DataLoader(train_dataset, batch_size=min(4, len(train_dataset)), shuffle=True, drop_last=False)
+#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+#         else:
+#             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+#      s   return train_loader, test_loader, num_classes
+
+
+
+
+# class CombinedDataLoader:
+#     def __init__(self, args: Namespace, source_dataset_names, phase='train', train_valid_test_split=False):
+#         self.train_loaders = {}
+#         self.test_loaders = {}
+#         self.valid_loaders = {}
+#         self.num_classes = {}
+
+#         for dataset_name in source_dataset_names:
+#             if train_valid_test_split:
+#                 train_loader, valid_loader, test_loader, num_classes = prepare_graph_dataloaders(args, dataset_name, train_valid_test_split)
+#                 self.train_loaders[dataset_name] = PyGDataLoader(
+#                     train_loader.dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.use_cpu_num
+#                 )
+#                 self.valid_loaders[dataset_name] = PyGDataLoader(
+#                     valid_loader.dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.use_cpu_num
+#                 )
+#                 self.test_loaders[dataset_name] = PyGDataLoader(
+#                     test_loader.dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.use_cpu_num
+#                 )
+#                 self.num_classes[dataset_name] = num_classes
+
+#                 self.train_iterators = {name: iter(loader) for name, loader in self.train_loaders.items()}
+#                 self.valid_iterators = {name: iter(loader) for name, loader in self.valid_loaders.items()}
+#                 self.test_iterators = {name: iter(loader) for name, loader in self.test_loaders.items()}
+#             else:
+#                 train_loader, test_loader, num_classes = prepare_graph_dataloaders(args, dataset_name, train_valid_test_split)
+            
+#                 self.train_loaders[dataset_name] = PyGDataLoader(
+#                     train_loader.dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.use_cpu_num
+#                 )
+#                 self.test_loaders[dataset_name] = PyGDataLoader(
+#                     test_loader.dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.use_cpu_num
+#                 )
+#                 self.num_classes[dataset_name] = num_classes
+
+#                 self.train_iterators = {name: iter(loader) for name, loader in self.train_loaders.items()}
+#                 self.test_iterators = {name: iter(loader) for name, loader in self.test_loaders.items()}
+
+#         # phase에 따라 현재 사용할 iterator 설정
+#         self.current_iterators = self.train_iterators if phase == 'train' else self.test_iterators if phase == 'test' else self.valid_iterators
+
+#     def _reset_iterator(self, iterator_dict, name):
+#         iterator_dict[name] = iter(self.train_loaders[name])
+
+#     def get_batch(self, phase='train'):
+#         """
+#         Get the mini batches from all the source datasets
+#         """
+#         loaders = self.train_iterators if phase == 'train' else self.test_iterators if phase == 'test' else self.valid_iterators
+#         batch_data = {}
+#         for name, iterator in loaders.items():
+#             try:
+#                 batch_data[name] = next(iterator)
+#             except StopIteration:
+#                 self._reset_iterator(loaders, name)
+#                 batch_data[name] = next(loaders[name])
+#         return batch_data
+
+#     def get_loader_lengths(self, phase='train'):
+#         """
+#         Get the lengths of all loaders for the specified phase.
+#         """
+#         loaders = self.train_loaders if phase == 'train' else self.test_loaders if phase == 'test' else self.valid_loaders
+#         return {name: len(loader) for name, loader in loaders.items()}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
+
+    Newly added code : 2024.12.18.
+
+'''
+
+
+'''
+    for few shot settings
+'''
+
+def prepare_fewshot_source_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
+    np.random.seed(random_state)
+    num_classes = len(np.unique(y_train_full))
+    
+    shot = args.dataset_shot
+    samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+
+    support_X, support_y = [], []
+    for cls in range(num_classes):
+        cls_indices = np.where(y_train_full == cls)[0]
+        sample_num = samples_per_class + (1 if remainder > 0 else 0)
+        if remainder > 0:
+            remainder -= 1
+        
+        if len(cls_indices) < sample_num:
+            selected_indices = np.random.choice(cls_indices, sample_num, replace=True)
+        else:
+            selected_indices = np.random.choice(cls_indices, sample_num, replace=False)
+        
+        support_X.append(X_train_full.iloc[selected_indices])
+        support_y.extend([cls] * sample_num)
+
+    X_train_few = pd.concat(support_X, ignore_index=True)
+    y_train_few = np.array(support_y)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    maker.fit(X_train_few, y_train_few)
+    train_graphs = maker.transform(X_train_few, y_train_few)
+    test_graphs = maker.transform(X_test, y_test)
+
+    for graph, label in zip(train_graphs + test_graphs, list(y_train_few) + list(y_test)):
+        graph.y = torch.tensor([label], dtype=torch.long)
+
+    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+
+    return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
+def prepare_fewshot_target_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
+    np.random.seed(random_state)
+    num_classes = len(np.unique(y_train_full))
+    
+    shot = args.dataset_shot
+    samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+
+    support_X, support_y = [], []
+    for cls in range(num_classes):
+        cls_indices = np.where(y_train_full == cls)[0]
+        sample_num = samples_per_class + (1 if remainder > 0 else 0)
+        if remainder > 0:
+            remainder -= 1
+        
+        if len(cls_indices) < sample_num:
+            selected_indices = np.random.choice(cls_indices, sample_num, replace=True)
+        else:
+            selected_indices = np.random.choice(cls_indices, sample_num, replace=False)
+        
+        support_X.append(X_train_full.iloc[selected_indices])
+        support_y.extend([cls] * sample_num)
+
+    X_train_few = pd.concat(support_X, ignore_index=True)
+    y_train_few = np.array(support_y)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    maker.fit(X_train_few, y_train_few)
+    train_graphs = maker.transform(X_train_few, y_train_few)
+    test_graphs = maker.transform(X_test, y_test)
+
+    for graph, label in zip(train_graphs + test_graphs, list(y_train_few) + list(y_test)):
+        graph.y = torch.tensor([label], dtype=torch.long)
+
+    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+
+    return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
+
+
+'''
+    Old ones 2024.12.05
+'''
+def prepare_full_dataset(args):
+    DATASETS = {} 
+    DATASETS[args.dataset_name] = get_dataset(args.dataset_name, args.dataset_shot, args.dataset_seed)
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    X,y = preprocessing(DATASETS,args.dataset_name)
+    le = LabelEncoder()
+    y = le.fit_transform(y)
+    num_classes = len(le.classes_)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    maker.fit(X_train,y_train)
+    train_graphs = maker.transform(X_train,y_train)
+    test_graphs = maker.transform(X_test, y_test)
+    
+    for graph, label in zip(test_graphs, y_test):
+        graph.y = torch.tensor([label],dtype = torch.long)
+    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+    return (X_train, X_test, y_train, y_test), train_loader, test_loader , num_classes
+def prepare_fewshot_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
+    np.random.seed(random_state)
+    num_classes = len(np.unique(y_train_full))
+    
+    shot = args.dataset_shot
+    samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+
+    support_X, support_y = [], []
+    for cls in range(num_classes):
+        cls_indices = np.where(y_train_full == cls)[0]
+        sample_num = samples_per_class + (1 if remainder > 0 else 0)
+        if remainder > 0:
+            remainder -= 1
+        
+        if len(cls_indices) < sample_num:
+            selected_indices = np.random.choice(cls_indices, sample_num, replace=True)
+        else:
+            selected_indices = np.random.choice(cls_indices, sample_num, replace=False)
+        
+        support_X.append(X_train_full.iloc[selected_indices])
+        support_y.extend([cls] * sample_num)
+
+    X_train_few = pd.concat(support_X, ignore_index=True)
+    y_train_few = np.array(support_y)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    maker.fit(X_train_few, y_train_few)
+    train_graphs = maker.transform(X_train_few, y_train_few)
+    test_graphs = maker.transform(X_test, y_test)
+
+    for graph, label in zip(train_graphs + test_graphs, list(y_train_few) + list(y_test)):
+        graph.y = torch.tensor([label], dtype=torch.long)
+
+    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+
+    return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
+def prepare_full_source_dataset(args):
+    DATASETS = {} 
+    DATASETS[args.source_dataset_name] = get_dataset(args.source_dataset_name, args.dataset_shot, args.dataset_seed)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    X,y = preprocessing(DATASETS,args.source_dataset_name)
+    le = LabelEncoder()
+    y = le.fit_transform(y)
+    num_classes = len(le.classes_)
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    maker.fit(X_train,y_train)
+    train_graphs = maker.transform(X_train,y_train)
+    test_graphs = maker.transform(X_test)
+    
+    for graph, label in zip(test_graphs, y_test):
+        graph.y = torch.tensor([label],dtype = torch.long)
+    '''
+        train_graphs = maker.transform(X_train)
+        test_graphs = maker.transform(X_test)
+    
+    for graph, label in zip(train_graphs, y_train):
+        graph.y = torch.tensor([label],dtype = torch.long)
+    for graph, label in zip(test_graphs, y_test):
+        graph.y = torch.tensor([label],dtype = torch.long)
+    
+    '''
+    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+    return (X_train, X_test, y_train, y_test), train_loader, test_loader , num_classes
+def prepare_full_target_dataset(args):
+    DATASETS = {} 
+    DATASETS[args.target_dataset_name] = get_dataset(args.target_dataset_name, args.dataset_shot, args.dataset_seed)
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    X,y = preprocessing(DATASETS,args.target_dataset_name)
+    le = LabelEncoder()
+    y = le.fit_transform(y)
+    num_classes = len(le.classes_)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+    maker.fit(X_train,y_train)
+    train_graphs = maker.transform(X_train,y_train)
+    test_graphs = maker.transform(X_test, y_test)
+    
+    for graph, label in zip(test_graphs, y_test):
+        graph.y = torch.tensor([label],dtype = torch.long)
+    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+    return (X_train, X_test, y_train, y_test) , train_loader, test_loader , num_classes
+def prepare_multiple_datasets_old(args):
+    source_dataset_names = args.source_datasets
+    target_dataset_name = args.target_dataset 
+    
+
+    all_loaders = {}
+    num_classes = {}
+    original_tabular = {}
+    feature_names = {}
+    models = {}
+    optimizers = {}
+    criterions = {}
+
+
+    '''
+       1. Source dataset Preparation
+    '''
+
+    for source_dataset_name in source_dataset_names:
+        #args.source_dataset_name = dataset
+        (X_train, X_test, y_train, y_test), train_loader, test_loader, num_class = prepare_dataloaders(args, source_dataset_name)
+        all_loaders[source_dataset_name] = {
+            'train':train_loader,
+            'test':test_loader
+        }
+        num_classes[source_dataset_name] = num_class
+        original_tabular[source_dataset_name] = {
+            'X_train' : X_train,
+            'X_test' : X_test, 
+            'y_train' : y_train, 
+            'y_test' : y_test
+        }
+        feature_names[source_dataset_name] = X_train.columns.tolist()
+
+        is_binary = num_class == 2 
+        output_dim = 1 if is_binary else num_class
+
+        device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+        model = select_model(args, device, output_dim)
+        models[source_dataset_name] = model
+
+        criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+        criterions[source_dataset_name] = criterion
+
+        optimizer = optim.Adam(model.parameters(), lr=args.source_lr, weight_decay=1e-5)
+        optimizers[source_dataset_name] = optimizer
+
+    '''
+        2. Target dataset Preparation
+    '''
+
+    (X_train, X_test, y_train, y_test), train_loader, test_loader, num_class = prepare_dataloaders(args, target_dataset_name)
+    all_loaders[target_dataset_name] = {
+        'train':train_loader,
+        'test':test_loader
+    }
+    num_classes[target_dataset_name] = num_class
+    original_tabular[target_dataset_name] = {
+        'X_train' : X_train,
+        'X_test' : X_test,
+        'y_train' : y_train,
+        'y_test' : y_test
+    }
+    feature_names[target_dataset_name] = X_train.columns.tolist()
+    is_binary = num_classes = 2
+    output_dim = 1 if is_binary else num_class
+
+    device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+    model = select_model(args, device, output_dim)
+    models[target_dataset_name] = model
+    optimizer = optim.Adam(model.parameters(), lr=args.target_lr, weight_decay=1e-5)
+    optimizers[target_dataset_name] = optimizer
+
+    return source_dataset_names, target_dataset_name, all_loaders, num_classes, original_tabular, feature_names, models, optimizers
+def prepare_multiple_datasets(args):
+    source_dataset_names = args.source_datasets
+    target_dataset_name = args.target_dataset 
+
+    meta_info = {
+        "all_loaders": {},
+        "num_classes": {},
+        "original_tabular": {},
+        "feature_names": {},
+        "models": {},
+        "optimizers": {},
+        "criterions": {}
+    }
+
+    '''
+       1. Source dataset Preparation
+    '''
+    for source_dataset_name in source_dataset_names:
+        (X_train, X_test, y_train, y_test), train_loader, test_loader, num_class = prepare_dataloaders(args, source_dataset_name)
+        
+        meta_info["all_loaders"][source_dataset_name] = {
+            'train': train_loader,
+            'test': test_loader
+        }
+        meta_info["num_classes"][source_dataset_name] = num_class
+        meta_info["original_tabular"][source_dataset_name] = {
+            'X_train': X_train,
+            'X_test': X_test, 
+            'y_train': y_train, 
+            'y_test': y_test
+        }
+        meta_info["feature_names"][source_dataset_name] = X_train.columns.tolist()
+
+        is_binary = num_class == 2 
+        output_dim = 1 if is_binary else num_class
+        device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+        model = select_model(args, device, output_dim)
+        meta_info["models"][source_dataset_name] = model
+        meta_info["criterions"][source_dataset_name] = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+        meta_info["optimizers"][source_dataset_name] = optim.Adam(model.parameters(), lr=args.source_lr, weight_decay=1e-5)
+
+    '''
+        2. Target dataset Preparation
+    '''
+    (X_train, X_test, y_train, y_test), train_loader, test_loader, num_class = prepare_dataloaders(args, target_dataset_name)
+    
+    meta_info["all_loaders"][target_dataset_name] = {
+        'train': train_loader,
+        'test': test_loader
+    }
+    meta_info["num_classes"][target_dataset_name] = num_class
+    meta_info["original_tabular"][target_dataset_name] = {
+        'X_train': X_train,
+        'X_test': X_test,
+        'y_train': y_train,
+        'y_test': y_test
+    }
+    meta_info["feature_names"][target_dataset_name] = X_train.columns.tolist()
+
+    is_binary = num_class == 2
+    output_dim = 1 if is_binary else num_class
+    device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+    model = select_model(args, device, output_dim)
+    meta_info["models"][target_dataset_name] = model
+    meta_info["criterions"][target_dataset_name] = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+    meta_info["optimizers"][target_dataset_name] = optim.Adam(model.parameters(), lr=args.target_lr, weight_decay=1e-5)
+
+    return meta_info

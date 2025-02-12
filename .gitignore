@@ -1,0 +1,20 @@
+# JSON 파일 무시
+*.json
+
+# PNG 파일 무시
+*.png
+*.data
+*.doc
+*.txt
+*.mod
+*.csv
+# 특정 디렉토리 내의 JSON과 PNG만 무시하고 싶다면
+results/*.json
+results/*.png
+images/*.png
+*.pyc
+*.pkl
+*.expense
+*.cost
+*.delay
+*.group
