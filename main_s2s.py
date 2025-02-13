@@ -41,6 +41,7 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
     parser.add_argument('--input_dim', type = int, default = 768)
     parser.add_argument('--hidden_dim', type = int, default = 128)
+    parser.add_argument('--output_dim', type = int, default = 1)
     parser.add_argument('--num_layers', type = int, default = 4)
     parser.add_argument('--dropout_rate', type = float, default = 0.3)
     parser.add_argument('--threshold', type = float, default = 0.5)
@@ -60,7 +61,7 @@ def get_args():
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--graph_path', type=str, default="/storage/personal/eungyeop/dataset/graph")
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
-    parser.add_argument('--model_type', type=str, default='GAT_edge_2', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3'])
+    parser.add_argument('--model_type', type=str, default='GAT_edge_2', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4'])
     parser.add_argument('--graph_type', type=str, default='star', 
                        choices=['star', 'full_one', 'full_mean'],
                        help='star: star graph, full_one: leaf-to-leaf with ones, full_mean: leaf-to-leaf with mean embeddings')
@@ -345,7 +346,6 @@ def main():
             model, train_loader_full_s, val_loader_full_s, 
             criterion, optimizer, device, 
             args.train_epochs, is_binary,
-            early_stopping_patience=5
         )
         
         return results[12]  # best_val_auc 반환
@@ -370,15 +370,15 @@ def main():
         
         # 1. 최적화 히스토리
         history_fig = optuna.visualization.plot_optimization_history(study)
-        history_fig.write_image(f"results/optuna/{study_name}_history.png", scale=2)
+        history_fig.write_image(f"{optuna_dir}/{study_name}_history.png", scale=2)
         
         # 2. 파라미터 중요도
         param_importance_fig = optuna.visualization.plot_param_importances(study)
-        param_importance_fig.write_image(f"results/optuna/{study_name}_param_importance.png", scale=2)
+        param_importance_fig.write_image(f"{optuna_dir}/{study_name}_param_importance.png", scale=2)
         
         # 3. 파라미터 간 상관관계
         parallel_coord_fig = optuna.visualization.plot_parallel_coordinate(study)
-        parallel_coord_fig.write_image(f"results/optuna/{study_name}_parallel_coord.png", scale=2)
+        parallel_coord_fig.write_image(f"{optuna_dir}/{study_name}_parallel_coord.png", scale=2)
         
         logger.info(f"Visualization results saved in results/optuna/")
         

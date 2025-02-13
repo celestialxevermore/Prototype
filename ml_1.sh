@@ -19,7 +19,7 @@ for dataset in $datasets; do
         --source_dataset_name $dataset \
         --few_shot $shot \
         --baseline $baselines \
-        --base_dir 'ML_results_20250213' \
+        --base_dir 'ML_results_20250214' \
         --random_seed $seed \
         --train_epochs 200 \
         --batch_size 32 \

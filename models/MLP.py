@@ -17,7 +17,7 @@ class MLPClassifier(nn.Module):
         # is_binary=False일 때 out_features=num_classes -> softmax 사용
         output_dim = 1 if is_binary else num_classes
         
-        self.mlp1 = nn.Sequential(
+        self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
@@ -28,7 +28,7 @@ class MLPClassifier(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, output_dim)
         )
         self.is_binary = is_binary
 
@@ -169,11 +169,13 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
         with torch.no_grad():
             valid_outputs = model(X_valid_tensor)
             valid_loss = criterion(valid_outputs, y_valid_tensor)
-            valid_probs = torch.softmax(valid_outputs, dim=1).cpu().numpy()
+            #valid_probs = torch.softmax(valid_outputs, dim=1).cpu().numpy()
             
             if num_classes == 2:
-                valid_preds = (valid_probs[:, 1] >= 0.5).astype(int)
+                valid_probs = torch.sigmoid(valid_outputs).cpu().numpy()
+                valid_preds = (valid_probs >= 0.5).astype(int)
             else:
+                valid_probs = torch.softmax(valid_outputs, dim=1).cpu().numpy()
                 valid_preds = np.argmax(valid_probs, axis=1)
             
             valid_acc, valid_auc, valid_auprc, valid_f1, valid_recall, valid_precision = compute_overall_accuracy(
@@ -203,12 +205,14 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     with torch.no_grad():
         test_outputs = model(X_test_tensor)
         test_loss = criterion(test_outputs, y_test_tensor)
-        test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
+        #test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
         
         # 확률을 클래스로 변환
         if num_classes == 2:
-            test_preds = (test_probs[:, 1] >= 0.5).astype(int)
+            test_probs = torch.sigmoid(test_outputs).cpu().numpy()
+            test_preds = (test_probs >= 0.5).astype(int)
         else:
+            test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
             test_preds = np.argmax(test_probs, axis=1)
             
         test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = compute_overall_accuracy(
