@@ -14,8 +14,9 @@ from sklearn.model_selection import train_test_split
 #from torch.utils.data import DataLoader, Dataset
 from torch.utils.data import DataLoader, Dataset
 from collections import Counter
-from torch_geometric.loader import DataLoader as PyGDataLoader
-from torch_geometric.loader import DataLoader
+# from torch_geometric.loader import DataLoader as PyGDataLoader
+# from torch_geometric.loader import DataLoader
+from torch.utils.data import DataLoader
 import os, pickle
 import os, pickle
 import random
@@ -81,7 +82,7 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
     Prepare each datasets 
     Table -> Graph
 '''
-def prepare_tabular_dataloaders(args, dataset_name, random_seed):
+def ml_prepare_tabular_dataloaders(args, dataset_name, random_seed):
     """데이터셋을 로드하고 train/val/test로 분할"""
     DATASETS = {} 
     DATASETS[dataset_name] = get_dataset(args, dataset_name, random_seed)
@@ -148,38 +149,7 @@ def get_few_shot_tabular_samples(X_train, y_train, args):
     return X_train_few, y_train_few
 
 
-def get_few_shot_graph_samples(train_loader, args):
-    """train_loader에서 few-shot 샘플링을 수행"""
-    np.random.seed(args.random_seed)
-    dataset = train_loader.dataset
-    labels = [data.y.item() for data in dataset]
-    num_classes = len(set(labels))
-    
-    shot = args.few_shot
-    base_samples_per_class = shot // num_classes
-    remainder = shot % num_classes
-    
-    # 남은 샘플을 랜덤하게 분배
-    extra_samples = random.sample(range(num_classes), remainder)
-    
-    support_data = []
-    for cls in range(num_classes):
-        cls_data = [data for data in dataset if data.y.item() == cls]
-        sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
-        
-        if len(cls_data) < sample_num:
-            warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({sample_num}). Using replacement sampling.")
-            selected = random.choices(cls_data, k=sample_num)
-        else:
-            selected = random.sample(cls_data, k=sample_num)
-        
-        support_data.extend(selected)
-    
-    print(f"Few-shot training data size: {len(support_data)}")
-    class_dist = Counter([data.y.item() for data in support_data])
-    print(f"Class distribution in few-shot data: {dict(class_dist)}")
-    #pdb.set_trace() #이상 없음
-    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
+
 
 
 
@@ -280,6 +250,155 @@ def get_few_shot_graph_samples(train_loader, args):
 
 #     split_indices = (train_idx, val_idx, test_idx)
 #     return train_loader, val_loader, test_loader, num_classes, split_indices
+
+
+def collate_fn(batch):
+    # batch에서 X와 y를 분리
+    X = pd.DataFrame([item[0] for item in batch])  # Series들을 DataFrame으로 변환
+    y = torch.stack([item[1] for item in batch])
+    return X, y
+
+class TabularDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = X  # DataFrame 그대로 저장
+        self.y = torch.tensor(y.values, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        # DataFrame row를 Series로 반환
+        return self.X.iloc[idx], self.y[idx]
+
+def prepare_tabular_dataloaders(args, dataset_name, random_seed):
+    """데이터셋을 로드하고 train/val/test로 분할한 뒤 DataLoader로 변환"""
+    
+    # --------------------------------------------------------------------------------
+    # 1) 재현성을 위한 설정
+    # --------------------------------------------------------------------------------
+    os.environ['PYTHONHASHSEED'] = str(random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+    torch.manual_seed(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+
+    # --------------------------------------------------------------------------------
+    # 2) (X, y) 만들기: heart 데이터셋이면 preprocessing_heart_datasets, 아니면 preprocessing
+    # --------------------------------------------------------------------------------
+    DATASETS = {}
+    DATASETS[dataset_name] = get_dataset(args, dataset_name, random_seed)
+    
+    # 데이터 전처리
+    if dataset_name in ['cleveland', 'hungarian', 'switzerland', 'heart_statlog']:
+        X = DATASETS[dataset_name][0].drop('target_binary', axis=1)
+        y = (DATASETS[dataset_name][0]['target_binary'] == 'yes').astype(int)
+    else:
+        X, y = preprocessing(DATASETS, dataset_name)
+
+    # Train/Val/Test Split (60/20/20)
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=random_seed
+    )
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=0.25, stratify=y_train_val, random_state=random_seed
+    )
+
+    # 인덱스 리셋
+    X_train = X_train.reset_index(drop=True)
+    X_val = X_val.reset_index(drop=True)
+    X_test = X_test.reset_index(drop=True)
+    
+    # numpy array로 변환 후 tensor로 변환될 수 있게
+    y_train = pd.Series(y_train).reset_index(drop=True)
+    y_val = pd.Series(y_val).reset_index(drop=True)
+    y_test = pd.Series(y_test).reset_index(drop=True)
+
+    # Dataset과 DataLoader 생성
+    train_dataset = TabularDataset(X_train, y_train)
+    val_dataset = TabularDataset(X_val, y_val)
+    test_dataset = TabularDataset(X_test, y_test)
+
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False,
+        collate_fn=collate_fn
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False,
+        collate_fn=collate_fn
+    )
+
+    return {
+        'data': (X_train, X_val, X_test, y_train, y_val, y_test),
+        'loaders': (train_loader, val_loader, test_loader),
+        'num_classes': len(np.unique(y))
+    }
+
+def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_loader, args):
+    """Few-shot 데이터에 대한 DataLoader 생성"""
+    
+    train_loader_few = DataLoader(
+        list(zip(X_train_few, y_train_few)),
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn  # 커스텀 collate_fn 사용
+    )
+    
+    return {
+        'train': train_loader_few,
+        'val': val_loader,
+        'test': test_loader
+    }
+
+
+def get_few_shot_graph_samples(train_loader, args):
+    """train_loader에서 few-shot 샘플링을 수행"""
+    np.random.seed(args.random_seed)
+    dataset = train_loader.dataset
+    labels = [data.y.item() for data in dataset]
+    num_classes = len(set(labels))
+    
+    shot = args.few_shot
+    base_samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+    
+    # 남은 샘플을 랜덤하게 분배
+    extra_samples = random.sample(range(num_classes), remainder)
+    
+    support_data = []
+    for cls in range(num_classes):
+        cls_data = [data for data in dataset if data.y.item() == cls]
+        sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
+        
+        if len(cls_data) < sample_num:
+            warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({sample_num}). Using replacement sampling.")
+            selected = random.choices(cls_data, k=sample_num)
+        else:
+            selected = random.sample(cls_data, k=sample_num)
+        
+        support_data.extend(selected)
+    
+    print(f"Few-shot training data size: {len(support_data)}")
+    class_dist = Counter([data.y.item() for data in support_data])
+    print(f"Class distribution in few-shot data: {dict(class_dist)}")
+    #pdb.set_trace() #이상 없음
+    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 
 def prepare_graph_dataloaders(args, dataset_name):
     # 완벽한 재현성을 위한 설정

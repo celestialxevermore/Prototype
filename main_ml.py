@@ -4,7 +4,7 @@ import argparse
 import numpy as np
 from utils.util import setup_logger, format_time, fix_seed
 from utils.util import prepare_ml_results, save_ml_results
-from dataset.data_dataloaders import prepare_tabular_dataloaders, get_few_shot_tabular_samples
+from dataset.data_dataloaders import ml_prepare_tabular_dataloaders, get_few_shot_tabular_samples
 from models.XGBoost import xgboost_benchmark
 from models.LogReg import logistic_regression_benchmark
 from models.MLP import mlp_benchmark
@@ -61,7 +61,7 @@ def main():
 
     # 데이터셋 준비
     (X_train_full, X_val_full, X_test_full, 
-     y_train_full, y_val_full, y_test_full), _ = prepare_tabular_dataloaders(
+     y_train_full, y_val_full, y_test_full), _ = ml_prepare_tabular_dataloaders(
         args, args.source_dataset_name, args.random_seed
     )
 

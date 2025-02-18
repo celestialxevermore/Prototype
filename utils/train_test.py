@@ -6,14 +6,16 @@ import numpy as np
 def binary_train(model, train_loader, criterion, optimizer, device):
     model.train()
     total_loss = 0 
-    for step, data in enumerate(train_loader):
-        data = data.to(device)
+    for step, batch in enumerate(train_loader):
+        X, y = batch
+        
+
         optimizer.zero_grad()
-        loss = model(data)
+        loss = model(X,y)
         #output = model(data.x, data.edge_index, data.edge_attr, data.batch)
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * data.num_graphs 
+        total_loss += loss.item() * len(y)
         #print(f"Step [{step+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
     return total_loss / len(train_loader.dataset)
 
@@ -25,13 +27,13 @@ def binary_evaluate(model, loader, criterion, device):
     #print(f"Dataloader length: {len(loader)}")
     
     with torch.no_grad():
-        for data in loader:
-            data = data.to(device)
-            loss = model(data)
-            pred = model.predict(data)
-            test_loss += loss.item() * data.num_graphs
+        for batch in loader:
+            X,y = batch
+            loss = model(X,y)
+            pred = model.predict(X)
+            test_loss += loss.item() * len(y)
             
-            y_true.extend(data.y.cpu().numpy())
+            y_true.extend(y.cpu().numpy())
             y_pred.extend(torch.sigmoid(pred).cpu().numpy())
             
             #print(f"Current batch - y_true: {len(y_true)}, y_pred: {len(y_pred)}")

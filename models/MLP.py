@@ -149,7 +149,10 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     
     # 학습 설정
     n_epochs = args.train_epochs
-    best_valid_loss = float('inf')
+    best_valid_metrics = {
+        'loss': float('inf'),
+        'f1': 0
+    }
     best_model = None
     patience = 10
     counter = 0
@@ -157,46 +160,48 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     # 학습
     for epoch in range(n_epochs):
         model.train()
+        train_loss = 0
         for batch_X, batch_y in train_loader:
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
+            train_loss += loss.item()
         
         # 검증
         model.eval()
         with torch.no_grad():
             valid_outputs = model(X_valid_tensor)
             valid_loss = criterion(valid_outputs, y_valid_tensor)
-            #valid_probs = torch.softmax(valid_outputs, dim=1).cpu().numpy()
             
-            if num_classes == 2:
+            if is_binary:
                 valid_probs = torch.sigmoid(valid_outputs).cpu().numpy()
-                valid_preds = (valid_probs >= 0.5).astype(int)
             else:
                 valid_probs = torch.softmax(valid_outputs, dim=1).cpu().numpy()
-                valid_preds = np.argmax(valid_probs, axis=1)
             
             valid_acc, valid_auc, valid_auprc, valid_f1, valid_recall, valid_precision = compute_overall_accuracy(
-                valid_probs[:, 1] if num_classes == 2 else valid_probs, 
+                valid_probs, 
                 y_valid, 
-                num_classes, 
+                1 if is_binary else num_classes, 
                 threshold=args.threshold, 
                 activation=False
             )
             
-            logging.info(f"Epoch {epoch+1}, Valid Loss: {valid_loss:.4f}, Valid ACC: {valid_acc:.4f}, Valid AUC: {valid_auc:.4f}")
+            logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(train_loader):.4f}, "
+                        f"Valid Loss: {valid_loss:.4f}, Valid F1: {valid_f1:.4f}")
             
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
+            # Early stopping 조건 개선 (손실과 F1 점수 모두 고려)
+            if valid_loss < best_valid_metrics['loss'] and valid_f1 >= best_valid_metrics['f1']:
+                best_valid_metrics['loss'] = valid_loss
+                best_valid_metrics['f1'] = valid_f1
                 best_model = model.state_dict().copy()
                 counter = 0
             else:
                 counter += 1
                 
             if counter >= patience:
-                logging.info("Early stopping!")
+                logging.info("Early stopping triggered!")
                 break
     
     # 최종 평가
@@ -205,43 +210,22 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     with torch.no_grad():
         test_outputs = model(X_test_tensor)
         test_loss = criterion(test_outputs, y_test_tensor)
-        #test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
         
-        # 확률을 클래스로 변환
-        if num_classes == 2:
+        if is_binary:
             test_probs = torch.sigmoid(test_outputs).cpu().numpy()
-            test_preds = (test_probs >= 0.5).astype(int)
+            test_preds = (test_probs >= args.threshold).astype(int)
         else:
             test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
             test_preds = np.argmax(test_probs, axis=1)
             
         test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = compute_overall_accuracy(
-            test_probs[:, 1] if num_classes == 2 else test_probs,
+            test_probs,
             y_test,
-            num_classes,
+            1 if is_binary else num_classes,
             threshold=args.threshold,
             activation=False
         )
     
-    # threshold를 조정 (예: 0.5 -> 0.3)
-    if is_binary:
-        threshold = 0.5  # 또는 다른 적절한 값
-        y_pred_binary = (test_preds >= threshold).astype(int)
-        
-        # 예측 분포 확인
-        print("Prediction distribution:", np.bincount(y_pred_binary))
-        
-        precision = precision_score(y_test, y_pred_binary, zero_division=1)
-        recall = recall_score(y_test, y_pred_binary, zero_division=1)
-        f1 = f1_score(y_test, y_pred_binary, zero_division=1)
-    
-    # 레이블이 제대로 인코딩되었는지 확인
-    print("Unique values in y_train:", np.unique(y_train))
-    print("Unique values in y_test:", np.unique(y_test))
-    
-    # 모델 예측값의 분포 확인
-    print("Raw prediction range:", np.min(test_preds), np.max(test_preds))
-    print("Prediction distribution after threshold:", np.bincount(y_pred_binary))
     
     total_results = {
         'test_mlp_loss': test_loss.item(),

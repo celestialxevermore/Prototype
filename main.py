@@ -1,7 +1,5 @@
 import torch
-import os
-
-torch.use_deterministic_algorithms(False)
+#torch.use_deterministic_algorithms(False)
 import os
 import random,time
 import argparse
@@ -18,19 +16,17 @@ from sklearn.preprocessing import label_binarize
 from utils.util import setup_logger, format_time, fix_seed
 from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
-from utils.metrics import get_best_performance
-from dataset.data_dataloaders import prepare_graph_dataloaders, prepare_tabular_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
-from models.Model import Model
-from models.XGBoost import xgboost_benchmark
-from models.LogReg import logistic_regression_benchmark
+from sklearn.model_selection import StratifiedKFold
+from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
+from models.TabularFLM import Model
 import psutil 
+from torch_geometric.data import Batch
 p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-#os.environ["CUDA_VISIBLE_DEVICES"]="5"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-
 
 
 logger = setup_logger()
@@ -60,30 +56,14 @@ def get_args():
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
-    parser.add_argument('--graph_path', type=str, default="/storage/personal/eungyeop/dataset/graph")
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
-    parser.add_argument('--model_type', type=str, default='GAT_edge_4', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5'])
-    parser.add_argument('--graph_type', type=str, default='star', 
-                       choices=['star', 'full_one', 'full_mean'],
-                       help='star: star graph, full_one: leaf-to-leaf with ones, full_mean: leaf-to-leaf with mean embeddings')
-    parser.add_argument('--FD', type=str, default='N',
-                       choices=['P', 'N', 'D', 'ND'],
-                       help='N: Name embeddings, D: Description embeddings, ND: Name and Description embeddings')
-    parser.add_argument('--center_type', type=str,default='CM',choices=['CM','CP','CA_m','CA_f'])
+    parser.add_argument('--model_type', type=str, default='GAT_edge_2', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5'])
     parser.add_argument('--label', action='store_true', help='Use Label Decoded Dataset')
+    parser.add_argument('--scaler_type', type=str, default='pow', choices=['pow'])
     args = parser.parse_args()
-    
-    # 그래프 경로 설정
-    args.graph_path = f"/storage/personal/eungyeop/dataset/test2_graph/seed:{args.random_seed}"
-    
-    # graph_type과 FD에 따른 하위 경로 설정
-    graph_subdir = f"{args.graph_type}_{args.FD}_{args.center_type}"
-    if args.label:
-        graph_subdir += "_label"
-    
-    args.graph_path = os.path.join(args.graph_path, graph_subdir)
-    
-    return args
+
+    args.table_path = f"/storage/personal/eungyeop/dataset/table/"
+    return args 
 
 def find_optimal_threshold(y_true, y_pred_proba):
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
@@ -92,7 +72,7 @@ def find_optimal_threshold(y_true, y_pred_proba):
     return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
 def train_and_validate(model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10):
-    
+    #pdb.set_trace()
     """
     Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
     마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
@@ -250,7 +230,6 @@ def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretr
         return model_path
     return None
 
-
 def main():
     start_time = time.time()
     args  = get_args()
@@ -260,69 +239,98 @@ def main():
     logger.info(f"Starting experiment with dataset: {args.source_dataset_name}")
     logger.info(f"Device: {device}")
 
-    logger.info("Preparing Graph datasets...")
+    logger.info("Preparing Tabular datasets...")
 
-    args.is_pretrained = False
-    pretrained_model_dir_full = os.path.join('pretrained_models','s2s',
-                                        args.source_dataset_name,
-                                        f'random_seed:{args.random_seed}', args.model_type,
-                                        f'b{args.batch_size}_l{args.num_layers}_h{args.heads}')
-    os.makedirs(pretrained_model_dir_full, exist_ok=True)
-    pretrained_model_path_full = os.path.join(pretrained_model_dir_full, f'{args.graph_type}_{args.FD}_{args.center_type}')
-    train_loader_full_s, val_loader_full_s, test_loader_s, num_classes = prepare_graph_dataloaders(args, args.source_dataset_name)
-    #pdb.set_trace() #이상 없음
-    if args.few_shot:
-        train_loader_few_s = get_few_shot_graph_samples(train_loader_full_s, args)
-        val_loader_few_s = val_loader_full_s
-        test_loader_few_s = test_loader_s
-        #pdb.set_trace() #이상 없음
-    else:
-        train_loader_few_s = train_loader_full_s
-        val_loader_few_s = val_loader_full_s
-        test_loader_few_s = test_loader_s
-    #pdb.set_trace() #이상 없음 train_loader_few_s, train_loader_full_s 검토
+
+    # 데이터셋 준비
+    results = prepare_tabular_dataloaders(
+        args, args.source_dataset_name, args.random_seed
+    )
+
+    X_train, X_val, X_test, y_train, y_val, y_test = results['data']
+    train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
+    num_classes = results['num_classes']
+    X_train_few, y_train_few = get_few_shot_tabular_samples(X_train, y_train, args)
+    #X_train_few, y_train_few, val_loader, test_loader, args
+    few_results = prepare_few_shot_dataloaders(
+        X_train_few, y_train_few, val_loader_full_s, test_loader_full_s, args
+    )
+    train_loader_few_s, val_loader_few_s, test_loader_few_s = few_results['train'], few_results['val'], few_results['test']
+    logger.info(f"Datasets prepared, source dataset names : {args.source_dataset_name}")
+
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
-    
-    logger.info("# --------------------- 2) Source Full Model Checkpoint가 이미 있는지 확인 ---------------------")
-    if os.path.isfile(pretrained_model_path_full):
-        logger.info(f"Pretrained source model found at {pretrained_model_path_full}. Skipping full training...")
-        
-        model_full = Model(args, args.input_dim, args.hidden_dim, num_classes).to(device)
-        model_full.load_state_dict(torch.load(pretrained_model_path_full, map_location=device))
-        model_few = Model(args, args.input_dim, args.hidden_dim, num_classes).to(device)
-        optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-        optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
-        args.is_pretrained = True
-    else:
-        logger.info(f"Pretrained source model not found at {pretrained_model_path_full}. Training from scratch...")
-        model_full = Model(args, args.input_dim, args.hidden_dim, num_classes).to(device)
-        model_few = Model(args, args.input_dim, args.hidden_dim, num_classes).to(device)
-        optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-        optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
+    #self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
+    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model)
+    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model)
+    model_full = model_full.to(device)
+    model_few = model_few.to(device)
+    optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
+    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
+
+    logger.info(f"[Source-Only: Full] Start Training..")
+
+    (train_losses_full, val_losses_full,
+     train_aucs_full, val_aucs_full,
+     train_precisions_full, val_precisions_full,
+     train_recalls_full, val_recalls_full,
+     train_f1s_full, val_f1s_full,
+     train_accs_full, val_accs_full,
+     best_epoch_full, best_val_auc_full, best_threshold_full
+    ) = train_and_validate(model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
+                           device, args.train_epochs, is_binary)
+
+    logger.info("[Full-shot] Final Testing with best threshold from Validation")
+    (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
+     test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
+                                                             threshold=best_threshold_full)
 
     # 4-2) 최종 Test - Few
     logger.info("[Few-shot] Start Training...")
     (train_losses_few, val_losses_few,
-    train_aucs_few, val_aucs_few,
-    train_precisions_few, val_precisions_few,
-    train_recalls_few, val_recalls_few,
-    train_f1s_few, val_f1s_few,
-    train_accs_few, val_accs_few,
-    best_epoch_few, best_val_auc_few, best_threshold_few
+     train_aucs_few, val_aucs_few,
+     train_precisions_few, val_precisions_few,
+     train_recalls_few, val_recalls_few,
+     train_f1s_few, val_f1s_few,
+     train_accs_few, val_accs_few,
+     best_epoch_few, best_val_auc_few, best_threshold_few
     ) = train_and_validate(model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary)
+                           device, args.train_epochs, is_binary)
 
     logger.info("[Few-shot] Final Testing with best threshold from Validation")
     (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
-    test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
-                                                        threshold=best_threshold_few)
-    
-    
-    torch.save(model_few.state_dict(), os.path.join(pretrained_model_dir_full, f'{args.graph_type}_{args.FD}_{args.center_type}_fewshot.pth'))
-  
-    full_ours_results = None
-    
+     test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
+                                                           threshold=best_threshold_few)
+
+    # wrap_up_results_ 등 기존 함수로 결과 정리
+    full_ours_results = wrap_up_results_(
+        train_losses=train_losses_full, 
+        val_losses=val_losses_full,
+        test_losses=[],  # 필요하면 test_loss 리스트 넣기
+        train_aucs=train_aucs_full,
+        val_aucs=val_aucs_full,
+        test_aucs=[test_auc_full], 
+        train_precisions=train_precisions_full,
+        val_precisions=val_precisions_full,
+        test_precisions=[test_precision_full],
+        train_recalls=train_recalls_full,
+        val_recalls=val_recalls_full,
+        test_recalls=[test_recall_full],
+        train_f1s=train_f1s_full,
+        val_f1s=val_f1s_full,
+        test_f1s=[test_f1_full],
+        all_y_true=[all_y_true_full],
+        all_y_pred=[all_y_pred_full],
+        best_epoch=best_epoch_full,
+        best_ours_auc=test_auc_full,
+        best_ours_acc=test_acc_full,
+        best_ours_precision=test_precision_full,
+        best_ours_recall=test_recall_full,
+        best_ours_f1=test_f1_full,
+        train_accs=train_accs_full,
+        val_accs=val_accs_full,
+        test_accs=[test_acc_full]
+        )
     few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
     train_losses_few, val_losses_few, [],
     train_aucs_few, val_aucs_few, [test_auc_few],
