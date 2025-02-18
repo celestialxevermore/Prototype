@@ -248,15 +248,16 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 desc_emb = self.llm_model(**desc_input).last_hidden_state.mean(dim=1)
                 desc_embeddings.append(desc_emb)
             # Value embeddings
-            values = X_categorical[feature_name].values
-            value_inputs = self.tokenizer([str(v) for v in values], return_tensors="pt", padding=True, truncation=True)
+            values = X_categorical[feature_name].values[0]
+            
+            value_input = self.tokenizer(values, return_tensors="pt", padding=True, truncation=True)
             with torch.no_grad():
-                value_emb = self.llm_model(**value_inputs).last_hidden_state.mean(dim=1)
+                value_emb = self.llm_model(**value_input).last_hidden_state.mean(dim=1)
                 value_embeddings.append(value_emb)
-        
+            
         name_embeddings = torch.stack(name_embeddings, dim=0)
         desc_embeddings = torch.stack(desc_embeddings, dim=0)
-        value_embeddings = torch.stack(value_embeddings, dim=1)
+        value_embeddings = torch.stack(value_embeddings, dim=0)
         return name_embeddings, desc_embeddings, value_embeddings
     
 
