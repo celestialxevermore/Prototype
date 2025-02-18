@@ -7,6 +7,7 @@ import pdb
 sys.path.append('..')
 from dataset.data import get_dataset
 from utils.table_to_graph import Table2GraphTransformer
+from utils.table_to_embedding import Table2EmbeddingTransformer
 import torch.optim as optim
 from sklearn.preprocessing import LabelEncoder 
 from sklearn.model_selection import train_test_split
@@ -149,107 +150,41 @@ def get_few_shot_tabular_samples(X_train, y_train, args):
     return X_train_few, y_train_few
 
 
+# def prepare_full_source_dataset(args):
+#     DATASETS = {} 
+#     DATASETS[args.source_dataset_name] = get_dataset(args.source_dataset_name, args.dataset_shot, args.dataset_seed)
 
-
-
-
-# def prepare_graph_dataloaders(args, dataset_name, few_shot=False):
-#     # 완벽한 재현성을 위한 설정
-#     os.environ['PYTHONHASHSEED'] = str(args.random_seed)
-#     torch.backends.cudnn.deterministic = True
-#     torch.backends.cudnn.benchmark = False
-#     torch.use_deterministic_algorithms(True)
+#     maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+#     X,y = preprocessing(DATASETS,args.source_dataset_name)
+#     le = LabelEncoder()
+#     y = le.fit_transform(y)
+#     num_classes = len(le.classes_)
     
-#     # 기존 seed 설정
-#     torch.manual_seed(args.random_seed)
-#     np.random.seed(args.random_seed)
-#     random.seed(args.random_seed)
-#     if torch.cuda.is_available():
-#         torch.cuda.manual_seed(args.random_seed)
-#         torch.cuda.manual_seed_all(args.random_seed)
+#     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+#     #maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+#     maker = Table2EmbeddingTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
+#     maker.fit(X_train,y_train)
+#     train_graphs = maker.transform(X_train,y_train)
+#     test_graphs = maker.transform(X_test)
     
-#     # 파일 경로 설정 - args에서 직접 경로 사용
-#     if args.label:
-#         file_path = os.path.join(args.graph_path, f"{args.graph_type}_{args.FD}_label_{dataset_name}.pkl")
-#     else:
-#         file_path = os.path.join(args.graph_path, f"{args.graph_type}_{args.FD}_{dataset_name}.pkl")
-
-#     print(f"Loading data from: {file_path}")
-#     if not os.path.exists(file_path):
-#         raise FileNotFoundError(f"File not found: {file_path}")
-   
-#     # 데이터셋 로드
-#     with open(file_path, "rb") as f:
-#         dataset = pickle.load(f)
-   
-#     # 클래스 레이블 추출
-#     class_labels = [data.y.item() for data in dataset]
-#     num_classes = len(set(class_labels))
-
-#     # Stratified split으로 train/val/test 분리하면서 인덱스 저장
-#     indices = list(range(len(dataset)))
-#     train_val_idx, test_idx = train_test_split(
-#         indices, test_size=0.2, 
-#         stratify=class_labels, 
-#         random_state=args.random_seed
-#     )
+#     for graph, label in zip(test_graphs, y_test):
+#         graph.y = torch.tensor([label],dtype = torch.long)
+#     '''
+#         train_graphs = maker.transform(X_train)
+#         test_graphs = maker.transform(X_test)
     
-#     train_val_data = [dataset[i] for i in train_val_idx]
-#     test_data = [dataset[i] for i in test_idx]
+#     for graph, label in zip(train_graphs, y_train):
+#         graph.y = torch.tensor([label],dtype = torch.long)
+#     for graph, label in zip(test_graphs, y_test):
+#         graph.y = torch.tensor([label],dtype = torch.long)
     
-#     train_labels = [data.y.item() for data in train_val_data]
-#     train_idx, val_idx = train_test_split(
-#         train_val_idx, 
-#         test_size=0.25, 
-#         stratify=train_labels, 
-#         random_state=args.random_seed
-#     )
-    
-#     train_data = [dataset[i] for i in train_idx]
-#     val_data = [dataset[i] for i in val_idx]
+#     '''
+#     train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
+#     test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
+#     return (X_train, X_test, y_train, y_test), train_loader, test_loader , num_classes
 
-#     if few_shot:
-#         print("Preparing Few-shot Dataset...")
-#         shot = args.few_shot
-#         base_samples_per_class = shot // num_classes
-#         remainder = shot % num_classes
-        
-#         # 남은 샘플을 랜덤하게 분배
-#         extra_samples = random.sample(range(num_classes), remainder)
-        
-#         support_data = []
-#         few_shot_indices = []  # few-shot 인덱스 저장용
-        
-#         for cls in range(num_classes):
-#             cls_data_with_idx = [(data, idx) for data, idx in zip(train_data, train_idx) if data.y.item() == cls]
-#             sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
-            
-#             if len(cls_data_with_idx) < sample_num:
-#                 warnings.warn(f"Class {cls} has fewer samples ({len(cls_data_with_idx)}) than required ({sample_num}). Using replacement sampling.")
-#                 selected = random.choices(cls_data_with_idx, k=sample_num)
-#             else:
-#                 selected = random.sample(cls_data_with_idx, k=sample_num)
-            
-#             support_data.extend([d for d, _ in selected])
-#             few_shot_indices.extend([i for _, i in selected])
-        
-#         train_data = support_data
-#         train_idx = few_shot_indices
-#         print(f"Few-shot training data size: {len(train_data)}")
-        
-#         class_dist = Counter([data.y.item() for data in train_data])
-#         print(f"Class distribution in few-shot data: {dict(class_dist)}")
-#     else:
-#         print("Using full training dataset.")
-#         print(f"Training data size: {len(train_data)}")
 
-#     # DataLoader 생성
-#     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-#     val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False)
-#     test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-
-#     split_indices = (train_idx, val_idx, test_idx)
-#     return train_loader, val_loader, test_loader, num_classes, split_indices
 
 
 def collate_fn(batch):
@@ -310,40 +245,34 @@ def prepare_tabular_dataloaders(args, dataset_name, random_seed):
         X_train_val, y_train_val, test_size=0.25, stratify=y_train_val, random_state=random_seed
     )
 
-    # 인덱스 리셋
-    X_train = X_train.reset_index(drop=True)
-    X_val = X_val.reset_index(drop=True)
-    X_test = X_test.reset_index(drop=True)
-    
-    # numpy array로 변환 후 tensor로 변환될 수 있게
-    y_train = pd.Series(y_train).reset_index(drop=True)
-    y_val = pd.Series(y_val).reset_index(drop=True)
-    y_test = pd.Series(y_test).reset_index(drop=True)
+    maker = Table2EmbeddingTransformer(args, args.source_dataset_name)
+    maker.fit(X_train, y_train)
+    train_dataset = maker.transform(X_train, y_train)
+    val_dataset = maker.transform(X_val)
+    test_dataset = maker.transform(X_test)
 
-    # Dataset과 DataLoader 생성
-    train_dataset = TabularDataset(X_train, y_train)
-    val_dataset = TabularDataset(X_val, y_val)
-    test_dataset = TabularDataset(X_test, y_test)
+    for emb, label in zip(val_dataset, y_val):
+        emb['y'] = torch.tensor([label], dtype = torch.long)
+    for emb, label in zip(test_dataset, y_test):
+        emb['y'] = torch.tensor([label], dtype = torch.long)
+    
 
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True,
-        collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=args.batch_size, 
         shuffle=False,
-        collate_fn=collate_fn
     )
     test_loader = DataLoader(
         test_dataset, 
         batch_size=args.batch_size, 
         shuffle=False,
-        collate_fn=collate_fn
     )
-
+    
     return {
         'data': (X_train, X_val, X_test, y_train, y_val, y_test),
         'loaders': (train_loader, val_loader, test_loader),
@@ -353,13 +282,21 @@ def prepare_tabular_dataloaders(args, dataset_name, random_seed):
 def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_loader, args):
     """Few-shot 데이터에 대한 DataLoader 생성"""
     
+    # Table2EmbeddingTransformer 인스턴스 생성 및 학습
+    maker = Table2EmbeddingTransformer(args, args.source_dataset_name)
+    maker.fit(X_train_few, y_train_few)
+    
+    # Few-shot 학습 데이터 변환
+    train_dataset_few = maker.transform(X_train_few, y_train_few)
+    
+    # Few-shot 학습 데이터용 DataLoader 생성
     train_loader_few = DataLoader(
-        list(zip(X_train_few, y_train_few)),
+        train_dataset_few,
         batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=collate_fn  # 커스텀 collate_fn 사용
+        shuffle=True
     )
     
+    # validation과 test loader는 그대로 사용
     return {
         'train': train_loader_few,
         'val': val_loader,
@@ -464,19 +401,6 @@ def prepare_graph_dataloaders(args, dataset_name):
 
     #pdb.set_trace()
     return train_loader, val_loader, test_loader, num_classes
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -612,140 +536,6 @@ def load_tabular_and_split(args, DATASETS, dataset_name, few_shot=False):
 
 
 
-# def prepare_graph_dataloaders(args, dataset_name, few_shot=False, train_valid_test_split=False):
-    
-#     torch.manual_seed(args.random_seed)
-#     np.random.seed(args.random_seed)
-#     torch.cuda.manual_seed(args.random_seed) if torch.cuda.is_available() else None
-#     file_path = os.path.join(args.graph_path, f"{dataset_name}.pkl")
-#     print(file_path)
-#     if not os.path.exists(file_path):
-#         raise FileNotFoundError(f"file No!")
-    
-#     with open(file_path, "rb") as f:
-#         dataset = pickle.load(f)
-    
-#     class_labels = [data.y.item() for data in dataset]
-#     num_classes = len(set(class_labels))
-    
-#     if few_shot:
-#         shot_per_class = args.dataset_shot // num_classes
-#         selected_indices = []
-        
-#         for cls in range(num_classes):
-#             cls_indices = [i for i, label in enumerate(class_labels) if label == cls]
-#             if cls_indices:
-#                 selected = np.random.choice(cls_indices, shot_per_class, replace=True)
-#                 selected_indices.extend(selected)
-        
-#         train_dataset = [dataset[i] for i in selected_indices]
-#         _, test_data = train_test_split(dataset, test_size=0.2, random_state=args.random_seed)
-#     else:
-#         train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=args.random_seed)
-#         train_dataset = train_data
-    
-#     if train_valid_test_split:
-#         if few_shot:
-#             train_data, valid_data = train_test_split(train_dataset, test_size=0.2, random_state=args.random_seed)
-#             train_loader = DataLoader(train_data, batch_size=min(4, len(train_data)), shuffle=True, drop_last=False)
-#             valid_loader = DataLoader(valid_data, batch_size=min(4, len(valid_data)), shuffle=False)
-#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-#         else:
-#             train_valid_data, test_data = train_test_split(dataset, test_size=0.2, random_state=args.random_seed)
-#             train_data, valid_data = train_test_split(train_valid_data, test_size=0.2, random_state=args.random_seed)
-#             train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, drop_last=True)
-#             valid_loader = DataLoader(valid_data, batch_size=args.batch_size, shuffle=False)
-#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-#         return train_loader, valid_loader, test_loader, num_classes
-#     else:
-#         if few_shot:
-#             train_loader = DataLoader(train_dataset, batch_size=min(4, len(train_dataset)), shuffle=True, drop_last=False)
-#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-#         else:
-#             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-#             test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-#      s   return train_loader, test_loader, num_classes
-
-
-
-
-# class CombinedDataLoader:
-#     def __init__(self, args: Namespace, source_dataset_names, phase='train', train_valid_test_split=False):
-#         self.train_loaders = {}
-#         self.test_loaders = {}
-#         self.valid_loaders = {}
-#         self.num_classes = {}
-
-#         for dataset_name in source_dataset_names:
-#             if train_valid_test_split:
-#                 train_loader, valid_loader, test_loader, num_classes = prepare_graph_dataloaders(args, dataset_name, train_valid_test_split)
-#                 self.train_loaders[dataset_name] = PyGDataLoader(
-#                     train_loader.dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.use_cpu_num
-#                 )
-#                 self.valid_loaders[dataset_name] = PyGDataLoader(
-#                     valid_loader.dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.use_cpu_num
-#                 )
-#                 self.test_loaders[dataset_name] = PyGDataLoader(
-#                     test_loader.dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.use_cpu_num
-#                 )
-#                 self.num_classes[dataset_name] = num_classes
-
-#                 self.train_iterators = {name: iter(loader) for name, loader in self.train_loaders.items()}
-#                 self.valid_iterators = {name: iter(loader) for name, loader in self.valid_loaders.items()}
-#                 self.test_iterators = {name: iter(loader) for name, loader in self.test_loaders.items()}
-#             else:
-#                 train_loader, test_loader, num_classes = prepare_graph_dataloaders(args, dataset_name, train_valid_test_split)
-            
-#                 self.train_loaders[dataset_name] = PyGDataLoader(
-#                     train_loader.dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.use_cpu_num
-#                 )
-#                 self.test_loaders[dataset_name] = PyGDataLoader(
-#                     test_loader.dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.use_cpu_num
-#                 )
-#                 self.num_classes[dataset_name] = num_classes
-
-#                 self.train_iterators = {name: iter(loader) for name, loader in self.train_loaders.items()}
-#                 self.test_iterators = {name: iter(loader) for name, loader in self.test_loaders.items()}
-
-#         # phase에 따라 현재 사용할 iterator 설정
-#         self.current_iterators = self.train_iterators if phase == 'train' else self.test_iterators if phase == 'test' else self.valid_iterators
-
-#     def _reset_iterator(self, iterator_dict, name):
-#         iterator_dict[name] = iter(self.train_loaders[name])
-
-#     def get_batch(self, phase='train'):
-#         """
-#         Get the mini batches from all the source datasets
-#         """
-#         loaders = self.train_iterators if phase == 'train' else self.test_iterators if phase == 'test' else self.valid_iterators
-#         batch_data = {}
-#         for name, iterator in loaders.items():
-#             try:
-#                 batch_data[name] = next(iterator)
-#             except StopIteration:
-#                 self._reset_iterator(loaders, name)
-#                 batch_data[name] = next(loaders[name])
-#         return batch_data
-
-#     def get_loader_lengths(self, phase='train'):
-#         """
-#         Get the lengths of all loaders for the specified phase.
-#         """
-#         loaders = self.train_loaders if phase == 'train' else self.test_loaders if phase == 'test' else self.valid_loaders
-#         return {name: len(loader) for name, loader in loaders.items()}
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -798,6 +588,9 @@ def prepare_fewshot_source_dataset(args, X_train_full, y_train_full, X_test, y_t
     test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
 
     return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
+
+
+
 def prepare_fewshot_target_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
     np.random.seed(random_state)
     num_classes = len(np.unique(y_train_full))
@@ -861,6 +654,11 @@ def prepare_full_dataset(args):
     train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
     return (X_train, X_test, y_train, y_test), train_loader, test_loader , num_classes
+
+
+
+
+
 def prepare_fewshot_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
     np.random.seed(random_state)
     num_classes = len(np.unique(y_train_full))
@@ -899,38 +697,7 @@ def prepare_fewshot_dataset(args, X_train_full, y_train_full, X_test, y_test, ra
     test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
 
     return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
-def prepare_full_source_dataset(args):
-    DATASETS = {} 
-    DATASETS[args.source_dataset_name] = get_dataset(args.source_dataset_name, args.dataset_shot, args.dataset_seed)
 
-    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
-    X,y = preprocessing(DATASETS,args.source_dataset_name)
-    le = LabelEncoder()
-    y = le.fit_transform(y)
-    num_classes = len(le.classes_)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
-    maker.fit(X_train,y_train)
-    train_graphs = maker.transform(X_train,y_train)
-    test_graphs = maker.transform(X_test)
-    
-    for graph, label in zip(test_graphs, y_test):
-        graph.y = torch.tensor([label],dtype = torch.long)
-    '''
-        train_graphs = maker.transform(X_train)
-        test_graphs = maker.transform(X_test)
-    
-    for graph, label in zip(train_graphs, y_train):
-        graph.y = torch.tensor([label],dtype = torch.long)
-    for graph, label in zip(test_graphs, y_test):
-        graph.y = torch.tensor([label],dtype = torch.long)
-    
-    '''
-    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
-    return (X_train, X_test, y_train, y_test), train_loader, test_loader , num_classes
 def prepare_full_target_dataset(args):
     DATASETS = {} 
     DATASETS[args.target_dataset_name] = get_dataset(args.target_dataset_name, args.dataset_shot, args.dataset_seed)

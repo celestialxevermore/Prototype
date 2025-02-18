@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from typing import Dict, List, Tuple
+import os
+import sys
+import pickle, torch, random
+import argparse
+from utils.table_to_embedding import Table2EmbeddingTransformer
+
+class TabularToEmbeddingDataset:
+    def __init__(self, args, base_path: str = "/storage/personal/eungyeop/dataset/table/"):
+        self.base_path = base_path
+        self.args = args
+        self.data_source = "label_table" if args.label else "origin_table"
+        self.dataset_and_class = {
+            "heart": ['target_binary', ['no','yes']],
+            "cleveland": ['target_binary', ['no','yes']],
+            "hungarian": ['target_binary', ['no','yes']],
+            "switzerland": ['target_binary', ['no','yes']],
+            "heart_statlog": ['target_binary', ['no','yes']]
+        }
+
+    def preprocessing(self, DATASETS: pd.DataFrame, data_name: str) -> Tuple[pd.DataFrame, np.ndarray]:
+        """데이터셋 전처리"""
+        assert data_name in self.dataset_and_class, f"{data_name} is not a valid dataset name"
+        
+        class_name = self.dataset_and_class[data_name][0]
+        class_values = self.dataset_and_class[data_name][1]
+        
+        class_mapping = {label: idx for idx, label in enumerate(class_values)}
+        
+        X = DATASETS.drop(class_name, axis=1)
+        X = X.reset_index(drop=True)
+        
+        y = DATASETS[class_name]
+        y = y.map(class_mapping).astype(int)
+        y = y.reset_index(drop=True)
+        
+        return X, y
+
+    def convert_to_embedding(self, data_name: str) -> None:
+        """테이블 데이터를 임베딩으로 변환"""
+        # 데이터 로드
+        file_path = os.path.join(self.base_path, self.data_source, f"{data_name}.csv")
+        df = pd.read_csv(file_path)
+        
+        # 전처리
+        X, y = self.preprocessing(df, data_name)
+        
+        
+        # 임베딩 변환
+        maker = Table2EmbeddingTransformer(
+            args = self.args,
+            source_dataset_name = data_name
+        )
+        data = maker.fit_transform(X, y)
+        
+        # 저장 경로 설정
+        base_save_path = "/storage/personal/eungyeop/dataset/embedding"
+        sub_dir = "tabular_embeddings"
+        
+        save_dir = os.path.join(base_save_path, sub_dir)
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 파일명 생성
+        emb_name = f"embedding_{data_name}.pkl"
+        if self.args.label:
+            emb_name = f"embedding_label_{data_name}.pkl"
+        
+        # 임베딩 저장
+        emb_path = os.path.join(save_dir, emb_name)
+        with open(emb_path, 'wb') as f:
+            pickle.dump({
+                'embeddings': data,
+                'feature_names': list(X.columns),
+                'random_seed': self.args.random_seed,
+                'num_classes': len(set(y))
+            }, f)
+        
+        print(f"Completed {data_name}")
+        #print(f"- Train samples: {len(data)}")
+        print(f"- Num classes: {len(set(y))}")
+        print(f"- Saved to: {emb_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--random_seed', type=int, default=42)
+    parser.add_argument('--input_dim', type=int, default=768)
+    parser.add_argument('--label', action='store_true',
+                       help='If True, uses label_table. If False, uses origin_table.')
+    parser.add_argument('--model_name', type=str, default='gpt2',
+                       help='Name of the language model to use')
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--scaler_type', type=str, 
+                       default='pow',
+                       choices=['std', 'pow'],
+                       help='Type of scaler to use for numerical features.')
+    parser.add_argument('--llm_model', type = str, default='gpt2')
+    #parser.add_argument('--source_dataset_name', type = str, default='heart')
+    args = parser.parse_args()
+    
+    # 재현성을 위한 설정
+    os.environ['PYTHONHASHSEED'] = str(args.random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
+    random.seed(args.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.random_seed)
+        torch.cuda.manual_seed_all(args.random_seed)
+    
+    converter = TabularToEmbeddingDataset(args)
+    datasets_to_process = [
+        "heart",
+        # "cleveland",
+        # "hungarian",
+        # "switzerland",
+        # "heart_statlog",
+    ]
+    
+    for dataset_name in datasets_to_process:
+        print(f"\nProcessing {dataset_name}")
+        converter.convert_to_embedding(data_name=dataset_name)
