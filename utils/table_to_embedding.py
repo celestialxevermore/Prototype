@@ -174,13 +174,12 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         X_ = X_.replace("\n", " ", regex=True)
         num_data = X_.shape[0]
 
+
+        y_ = None 
+        if self.y_ is not None:
+            y_ = np.array(self.y_)
+            y_ = torch.tensor(y_).reshape((num_data, 1))
         
-        if y is not None:
-            if isinstance(y, pd.Series):
-                y = y.values
-            y_ = torch.tensor(y).reshape((num_data, 1))
-        else:
-            y_ = None
 
         # Separate categorical and numerical columns
         X_categorical = X_.select_dtypes(include="object").copy()
@@ -218,7 +217,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 X_numerical_raw,
                 self.cat_name_to_description,
                 self.num_name_to_description,
-                y_,
+                y_[i] if y_ is not None else None,
                 idx=i,
             )
             for i in range(num_data)
@@ -293,6 +292,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 name_embeddings.append(name_emb)
             # Description embedding
             desc = num_name_to_desriptions.get(col_name, col_name)
+            
             desc_input = self.tokenizer(desc, return_tensors="pt", padding=True, truncation=True)
             with torch.no_grad():
                 desc_emb = self.llm_model(**desc_input).last_hidden_state.mean(dim=1)
@@ -306,7 +306,8 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
 
             prompt = (
                 f"<|start_prompt|>"
-                f"Column Name: {col_name}. "
+                f"The distribution of the column {col_name} is as follows: "
+                f"Column Name: {col_name}."
                 f"Statistics: Min = {min_val:.2f}, Max = {max_val:.2f}, "
                 f"Mean = {mean_val:.2f}, Std = {std_val:.2f}. "
                 "<|end_prompt|>"
@@ -342,51 +343,59 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         -------
         Embedding
         """
-        data_cat = X_categorical.iloc[idx]
-        data_cat = data_cat.dropna()
-        num_cat = len(data_cat)
-        if num_cat != 0:
-            data_cat = data_cat.str.replace("\n", " ", regex=True).str.lower()
-        
-        data_num = X_numerical.iloc[idx]
-        data_num = data_num.dropna()
-        num_num = len(data_num)
-        
-        data_num_raw = X_numerical_raw.iloc[idx]
-        data_num_raw = data_num_raw.dropna()
-        
-        cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings = self._transform_cat(
-            pd.DataFrame(data_cat).T,
-            cat_name_to_description)
-        
-        num_name_embeddings, num_desc_embeddings, num_prompt_embeddings = self._transform_num_raw(
-            pd.DataFrame(data_num_raw).T,
-            num_name_to_description
-        )
-        
-        x_num_ = torch.tensor(np.array(data_num).astype("float32"))
-        num_prompt_embeddings = x_num_.view(-1, 1, 1) * num_prompt_embeddings
-
-        num_prompt_embeddings = num_prompt_embeddings.clone().detach()
-        if num_prompt_embeddings.size(0) == 0:
-            num_prompt_embeddings = num_prompt_embeddings.reshape(0, self.n_components)
-
         if y is not None:
-            y_ = y[idx].clone()
+            y_ = y.clone()
         else:
             y_ = torch.tensor([])
         s_idx = idx 
 
-        
         data = {
-        'cat_name_embeddings': cat_name_embeddings,
-        'cat_desc_embeddings': cat_desc_embeddings,
-        'cat_value_embeddings': cat_value_embeddings,
-        'num_name_embeddings': num_name_embeddings,
-        'num_desc_embeddings': num_desc_embeddings,
-        'num_prompt_embeddings': num_prompt_embeddings,
-        'y': y_,
-        's_idx': s_idx
+            'label_description_embeddings': self.label_embedding,
+            'y': y_,
+            's_idx': s_idx
         }
+
+        # Categorical features exist
+        if len(X_categorical.columns) > 0:
+            data_cat = X_categorical.iloc[idx]
+            data_cat = data_cat.dropna()
+            num_cat = len(data_cat)
+            if num_cat != 0:
+                data_cat = data_cat.str.replace("\n", " ", regex=True).str.lower()
+                cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings = self._transform_cat(
+                    pd.DataFrame(data_cat).T,
+                    cat_name_to_description)
+                
+                data.update({
+                    'cat_name_embeddings': cat_name_embeddings,
+                    'cat_desc_embeddings': cat_desc_embeddings,
+                    'cat_value_embeddings': cat_value_embeddings,
+                })
+
+        # Numerical features exist
+        if len(X_numerical.columns) > 0:
+            data_num = X_numerical.iloc[idx]
+            data_num = data_num.dropna()
+            num_num = len(data_num)
+            
+            data_num_raw = X_numerical_raw.iloc[idx]
+            data_num_raw = data_num_raw.dropna()
+            num_name_embeddings, num_desc_embeddings, num_prompt_embeddings = self._transform_num_raw(
+                pd.DataFrame(data_num_raw).T,
+                num_name_to_description
+            )
+        
+            x_num_ = torch.tensor(np.array(data_num).astype("float32"))
+            num_prompt_embeddings = x_num_.view(-1, 1, 1) * num_prompt_embeddings
+
+            num_prompt_embeddings = num_prompt_embeddings.clone().detach()
+            if num_prompt_embeddings.size(0) == 0:
+                num_prompt_embeddings = num_prompt_embeddings.reshape(0, self.n_components)
+            
+            data.update({
+                'num_name_embeddings': num_name_embeddings,
+                'num_desc_embeddings': num_desc_embeddings,
+                'num_prompt_embeddings': num_prompt_embeddings,
+            })
         
         return data

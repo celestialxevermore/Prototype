@@ -185,14 +185,15 @@ def prepare_results_(full_ours_results, few_ours_results):
                 "Ours": "The results of source are already given. Check the initial results.",
                 "Ours_few": {
                     "Ours_train_few_auc": few_ours_results['train_aucs'],
-                    "Ours_test_few_auc": few_ours_results['test_aucs'],
+                    "Ours_val_few_auc": few_ours_results['val_aucs'],
                     "Ours_train_few_losses": few_ours_results['train_losses'],
-                    "Ours_test_few_losses": few_ours_results['test_losses'],
+                    "Ours_val_few_losses": few_ours_results['val_losses'],
                     "Ours_train_few_precisions": few_ours_results.get('train_precisions'),
-                    "Ours_test_few_precisions": few_ours_results.get('test_precisions'),
+                    "Ours_val_few_precisions": few_ours_results.get('val_precisions'),
                     "Ours_train_few_recalls": few_ours_results.get('train_recalls'),
-                    "Ours_test_few_recalls": few_ours_results.get('test_recalls'),
+                    "Ours_val_few_recalls": few_ours_results.get('val_recalls'),
                     "Ours_train_few_f1s": few_ours_results.get('train_f1s'),
+                    "Ours_val_few_f1s": few_ours_results.get('val_f1s'),
                 }
             }
         }
@@ -217,26 +218,27 @@ def prepare_results_(full_ours_results, few_ours_results):
             "Full_results": {
                 "Ours": {
                     "Ours_train_full_auc": full_ours_results['train_aucs'],
-                    "Ours_test_full_auc": full_ours_results['test_aucs'],
+                    "Ours_val_full_auc": full_ours_results['val_aucs'],
                     "Ours_train_full_losses": full_ours_results['train_losses'],
-                    "Ours_test_full_losses": full_ours_results['test_losses'],
+                    "Ours_val_full_losses": full_ours_results['val_losses'],
                     "Ours_train_full_precisions": full_ours_results.get('train_precisions'),
-                    "Ours_test_full_precisions": full_ours_results.get('test_precisions'),
+                    "Ours_val_full_precisions": full_ours_results.get('val_precisions'),
                     "Ours_train_full_recalls": full_ours_results.get('train_recalls'),
-                    "Ours_test_full_recalls": full_ours_results.get('test_recalls'),
+                    "Ours_val_full_recalls": full_ours_results.get('val_recalls'),
                     "Ours_train_full_f1s": full_ours_results.get('train_f1s'),
-                    "Ours_test_full_f1s": full_ours_results.get('test_f1s'),
+                    "Ours_val_full_f1s": full_ours_results.get('val_f1s'),
                 },
                 "Ours_few": {
                     "Ours_train_few_auc": few_ours_results['train_aucs'],
-                    "Ours_test_few_auc": few_ours_results['test_aucs'],
+                    "Ours_val_few_auc": few_ours_results['val_aucs'],
                     "Ours_train_few_losses": few_ours_results['train_losses'],
-                    "Ours_test_few_losses": few_ours_results['test_losses'],
+                    "Ours_val_few_losses": few_ours_results['val_losses'],
                     "Ours_train_few_precisions": few_ours_results.get('train_precisions'),
-                    "Ours_test_few_precisions": few_ours_results.get('test_precisions'),
+                    "Ours_val_few_precisions": few_ours_results.get('val_precisions'),
                     "Ours_train_few_recalls": few_ours_results.get('train_recalls'),
-                    "Ours_test_few_recalls": few_ours_results.get('test_recalls'),
+                    "Ours_val_few_recalls": few_ours_results.get('val_recalls'),
                     "Ours_train_few_f1s": few_ours_results.get('train_f1s'),
+                    "Ours_val_few_f1s": few_ours_results.get('val_f1s'),
                 }
             }
         }
@@ -372,17 +374,22 @@ def prepare_results_ss(full_ours_results, few_ours_results):
 
 
 def save_results_(args, results):
+    # exp_dir = os.path.join(
+    #     f'experiments/source_to_source_{args.base_dir}',
+    #     args.source_dataset_name,f"args_seed:{args.random_seed}",
+    #     args.model_type,
+    #     f"{args.graph_type}_{args.FD}_{args.center_type}"
+    # )
+    # os.makedirs(exp_dir, exist_ok=True)
     exp_dir = os.path.join(
         f'experiments/source_to_source_{args.base_dir}',
         args.source_dataset_name,f"args_seed:{args.random_seed}",
-        args.model_type,
-        f"{args.graph_type}_{args.FD}_{args.center_type}"
+        args.model_type, f"{args.mode}_{args.label}"
     )
     os.makedirs(exp_dir, exist_ok=True)
-
     # 데이터셋 파일 경로 구성
     dataset_file_path = os.path.join(
-        args.graph_path,  # 이미 완전한 경로가 구성되어 있음
+        args.table_path,  # 이미 완전한 경로가 구성되어 있음
         f"{args.source_dataset_name}.pkl"
     )
 
@@ -400,16 +407,19 @@ def save_results_(args, results):
             "batch_size": args.batch_size,
             "train_epochs": args.train_epochs,
             "full dataset learning_rate": args.source_lr,
+            "few dataset learning_rate": args.source_lr_few,
             "llm_models": args.llm_model,
             "dropout_rate": args.dropout_rate,
             "num_layers": args.num_layers,
             "heads": args.heads,
+            "meta_heads": args.meta_heads,
+            "meta_num_layers": args.meta_num_layers,
             "few_shot": args.few_shot,
             "threshold": args.threshold
         },
         "model_type": args.model_type,
-        "graph_type": args.graph_type,
-        "center_type": args.center_type,
+        #"graph_type": args.graph_type,
+        #s"center_type": args.center_type,
         "results": results['Best_results']
     }
     
@@ -417,7 +427,7 @@ def save_results_(args, results):
         json.dump(data, f, indent=4)
     
     print(f"Results saved to {filepath}")
-    #visualize_results(args, results, exp_dir, args.baseline)
+    visualize_results(args, results, exp_dir)
 
 
 def save_results_st(args, results_s, results_t):

@@ -18,6 +18,7 @@ from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
+from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
 from models.TabularFLM import Model
 import psutil 
 from torch_geometric.data import Batch
@@ -25,7 +26,7 @@ p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="4"
+#os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
@@ -42,7 +43,7 @@ def get_args():
     parser.add_argument('--num_layers', type = int, default = 4)
     parser.add_argument('--dropout_rate', type = float, default = 0.3)
     parser.add_argument('--threshold', type = float, default = 0.5)
-    parser.add_argument('--heads', type = int, default = 8)
+    parser.add_argument('--heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_dataset_name', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland'])
@@ -51,15 +52,20 @@ def get_args():
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
+    parser.add_argument('--source_lr_few', type=float, default=0.00001)
     parser.add_argument('--llm_model', type=str, default='gpt2')
+    parser.add_argument('--meta_heads', type=int, default= 2)
+    parser.add_argument('--meta_num_layers', type=int, default= 2)
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
-    parser.add_argument('--model_type', type=str, default='GAT_edge_2', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5'])
-    parser.add_argument('--label', action='store_true', help='Use Label Decoded Dataset')
+    parser.add_argument('--model_type', type=str, default='TabularFLM', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5', 'TabularFLM'])
     parser.add_argument('--scaler_type', type=str, default='pow', choices=['pow'])
+
+    parser.add_argument('--mode', type = str, choices= ['sa','mean'])
+    parser.add_argument('--label', type = str, choices = ['add', 'no'])
     args = parser.parse_args()
 
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
@@ -243,19 +249,28 @@ def main():
 
 
     # 데이터셋 준비
-    results = prepare_tabular_dataloaders(
-        args, args.source_dataset_name, args.random_seed
-    )
+    # results = prepare_tabular_dataloaders(
+    #     args, args.source_dataset_name, args.random_seed
+    # )
     
-    X_train, X_val, X_test, y_train, y_val, y_test = results['data']
+    # X_train, X_val, X_test, y_train, y_val, y_test = results['data']
+    # train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
+    # num_classes = results['num_classes']
+    # X_train_few, y_train_few = get_few_shot_tabular_samples(X_train, y_train, args)
+    # #X_train_few, y_train_few, val_loader, test_loader, args
+    # few_results = prepare_few_shot_dataloaders(
+    #     X_train_few, y_train_few, val_loader_full_s, test_loader_full_s, args
+    # )
+    # train_loader_few_s, val_loader_few_s, test_loader_few_s = few_results['train'], few_results['val'], few_results['test']
+    results = prepare_embedding_dataloaders(args, args.source_dataset_name)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
-    X_train_few, y_train_few = get_few_shot_tabular_samples(X_train, y_train, args)
-    #X_train_few, y_train_few, val_loader, test_loader, args
-    few_results = prepare_few_shot_dataloaders(
-        X_train_few, y_train_few, val_loader_full_s, test_loader_full_s, args
-    )
-    train_loader_few_s, val_loader_few_s, test_loader_few_s = few_results['train'], few_results['val'], few_results['test']
+    
+    if args.few_shot > 0:
+        logger.info(f"Preparing few-shot samples (K={args.few_shot})...")
+        train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
+        val_loader_few_s = val_loader_full_s
+        test_loader_few_s = test_loader_full_s
     logger.info(f"Datasets prepared, source dataset names : {args.source_dataset_name}")
 
     is_binary = (num_classes == 2)

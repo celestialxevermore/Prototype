@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 import os
 import sys
 import pickle, torch, random
-import argparse
+import argparse, pdb
 from utils.table_to_embedding import Table2EmbeddingTransformer
 
 class TabularToEmbeddingDataset:
@@ -18,12 +18,22 @@ class TabularToEmbeddingDataset:
             "cleveland": ['target_binary', ['no','yes']],
             "hungarian": ['target_binary', ['no','yes']],
             "switzerland": ['target_binary', ['no','yes']],
-            "heart_statlog": ['target_binary', ['no','yes']]
+            "heart_statlog": ['target_binary', ['no','yes']],
+            "adult": ['target_binary', ['no','yes']],
+            "diabetes": ['target_binary', ['no','yes']]
         }
 
     def preprocessing(self, DATASETS: pd.DataFrame, data_name: str) -> Tuple[pd.DataFrame, np.ndarray]:
         """데이터셋 전처리"""
         assert data_name in self.dataset_and_class, f"{data_name} is not a valid dataset name"
+        
+        # 데이터셋별 원래 label 이름을 target_binary로 변경
+        if data_name == 'adult' and 'income' in DATASETS.columns:
+            DATASETS['target_binary'] = DATASETS['income']
+            DATASETS = DATASETS.drop('income', axis=1)
+        elif data_name == 'diabetes' and 'Outcome' in DATASETS.columns:
+            DATASETS['target_binary'] = DATASETS['Outcome']
+            DATASETS = DATASETS.drop('Outcome', axis=1)
         
         class_name = self.dataset_and_class[data_name][0]
         class_values = self.dataset_and_class[data_name][1]
@@ -54,6 +64,7 @@ class TabularToEmbeddingDataset:
             args = self.args,
             source_dataset_name = data_name
         )
+        #pdb.set_trace()
         data = maker.fit_transform(X, y)
         
         # 저장 경로 설정
@@ -115,7 +126,10 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
-        "heart",
+        #"heart",
+        #"diabetes",
+        "adult"
+        
         # "cleveland",
         # "hungarian",
         # "switzerland",

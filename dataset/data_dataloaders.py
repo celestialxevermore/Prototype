@@ -304,11 +304,102 @@ def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_load
     }
 
 
-def get_few_shot_graph_samples(train_loader, args):
-    """train_loader에서 few-shot 샘플링을 수행"""
+
+
+
+
+
+def prepare_embedding_dataloaders(args, dataset_name):
+    """저장된 embedding 데이터를 로드하고 train/val/test로 분할한 뒤 DataLoader로 변환"""
+    
+    # 재현성을 위한 설정
+    os.environ['PYTHONHASHSEED'] = str(args.random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
+    random.seed(args.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.random_seed)
+        torch.cuda.manual_seed_all(args.random_seed)
+    
+    # 파일 경로 설정
+    base_path = "/storage/personal/eungyeop/dataset/embedding"
+    sub_dir = "tabular_embeddings"
+    emb_name =  f"embedding_{dataset_name}.pkl"
+    file_path = os.path.join(base_path, sub_dir, emb_name)
+    
+    print(f"Loading embeddings from: {file_path}")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+    
+    # 데이터 로드
+    with open(file_path, 'rb') as f:
+        data = pickle.load(f)
+    
+    embeddings = data['embeddings']
+    labels = [emb['y'].item() for emb in embeddings]
+    num_classes = data['num_classes']
+    
+    # Train/Val/Test Split (60/20/20)
+    indices = list(range(len(embeddings)))
+    train_val_idx, test_idx = train_test_split(
+        indices, test_size=0.2,
+        stratify=labels,
+        random_state=args.random_seed
+    )
+    
+    train_val_embeddings = [embeddings[i] for i in train_val_idx]
+    train_val_labels = [labels[i] for i in train_val_idx]
+    
+    train_idx, val_idx = train_test_split(
+        list(range(len(train_val_embeddings))),
+        test_size=0.25,
+        stratify=train_val_labels,
+        random_state=args.random_seed
+    )
+    
+    # Split datasets
+    train_dataset = [train_val_embeddings[i] for i in train_idx]
+    val_dataset = [train_val_embeddings[i] for i in val_idx]
+    test_dataset = [embeddings[i] for i in test_idx]
+    
+    # DataLoader 생성
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False
+    )
+    
+    print(f"Training data size: {len(train_dataset)}")
+    print(f"Validation data size: {len(val_dataset)}")
+    print(f"Test data size: {len(test_dataset)}")
+    
+    return {
+        'loaders': (train_loader, val_loader, test_loader),
+        'num_classes': num_classes
+    }
+
+
+def get_few_shot_embedding_samples(train_loader, args):
+    """train_loader에서 embedding data의 few-shot 샘플링을 수행"""
     np.random.seed(args.random_seed)
     dataset = train_loader.dataset
-    labels = [data.y.item() for data in dataset]
+    labels = [data['y'].item() for data in dataset]
     num_classes = len(set(labels))
     
     shot = args.few_shot
@@ -320,7 +411,8 @@ def get_few_shot_graph_samples(train_loader, args):
     
     support_data = []
     for cls in range(num_classes):
-        cls_data = [data for data in dataset if data.y.item() == cls]
+        # embedding data는 dictionary 형태이므로 y key로 label 접근
+        cls_data = [data for data in dataset if data['y'].item() == cls]
         sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
         
         if len(cls_data) < sample_num:
@@ -332,11 +424,16 @@ def get_few_shot_graph_samples(train_loader, args):
         support_data.extend(selected)
     
     print(f"Few-shot training data size: {len(support_data)}")
-    class_dist = Counter([data.y.item() for data in support_data])
+    class_dist = Counter([data['y'].item() for data in support_data])
     print(f"Class distribution in few-shot data: {dict(class_dist)}")
-    #pdb.set_trace() #이상 없음
+    
     return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 
+
+''' 
+    GRAPH
+
+'''
 def prepare_graph_dataloaders(args, dataset_name):
     # 완벽한 재현성을 위한 설정
     os.environ['PYTHONHASHSEED'] = str(args.random_seed)
@@ -401,6 +498,42 @@ def prepare_graph_dataloaders(args, dataset_name):
 
     #pdb.set_trace()
     return train_loader, val_loader, test_loader, num_classes
+
+
+def get_few_shot_graph_samples(train_loader, args):
+    """train_loader에서 few-shot 샘플링을 수행"""
+    np.random.seed(args.random_seed)
+    dataset = train_loader.dataset
+    labels = [data.y.item() for data in dataset]
+    num_classes = len(set(labels))
+    
+    shot = args.few_shot
+    base_samples_per_class = shot // num_classes
+    remainder = shot % num_classes
+    
+    # 남은 샘플을 랜덤하게 분배
+    extra_samples = random.sample(range(num_classes), remainder)
+    
+    support_data = []
+    for cls in range(num_classes):
+        cls_data = [data for data in dataset if data.y.item() == cls]
+        sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
+        
+        if len(cls_data) < sample_num:
+            warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({sample_num}). Using replacement sampling.")
+            selected = random.choices(cls_data, k=sample_num)
+        else:
+            selected = random.sample(cls_data, k=sample_num)
+        
+        support_data.extend(selected)
+    
+    print(f"Few-shot training data size: {len(support_data)}")
+    class_dist = Counter([data.y.item() for data in support_data])
+    print(f"Class distribution in few-shot data: {dict(class_dist)}")
+    #pdb.set_trace() #이상 없음
+    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
+
+
 
 
 

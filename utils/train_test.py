@@ -27,12 +27,12 @@ def binary_evaluate(model, loader, criterion, device):
     
     with torch.no_grad():
         for batch in loader:
-            
-            loss = model(batch, batch['y'])
             pred = model.predict(batch)
+            loss = model(batch, batch['y'])
+            
             test_loss += loss.item() * len(batch['y'])
             
-            y_true.extend(y.cpu().numpy())
+            y_true.extend(batch['y'].cpu().numpy())
             y_pred.extend(torch.sigmoid(pred).cpu().numpy())
             
             #print(f"Current batch - y_true: {len(y_true)}, y_pred: {len(y_pred)}")

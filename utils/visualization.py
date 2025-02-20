@@ -53,31 +53,43 @@ def visualize_results(args, results, exp_dir):
     os.makedirs(exp_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
-    # Loss 그래프
-    ax1.plot(results["Full_results"]["Ours"]["Ours_train_full_losses"], label='Ours Train Loss')
-    ax1.plot(results["Full_results"]["Ours"]['Ours_test_full_losses'], label='Ours Test Loss')
-    #ax1.plot(results["Full_results"]["Ours_few"]["Ours_train_few_losses"], label='Ours (few) Train Loss')
-    #ax1.plot(results["Full_results"]["Ours_few"]["Ours_test_few_losses"], label='Ours (few) Test Loss')
-    
+    # Full dataset의 Train vs Valid
+    ax1.plot(results["Full_results"]["Ours"]["Ours_train_full_losses"], label='Train Loss')
+    ax1.plot(results["Full_results"]["Ours"]["Ours_val_full_losses"], label='Valid Loss')
     ax1.set_xlabel('Epochs')
     ax1.set_ylabel('Loss')
-    ax1.set_title(f'Loss Curves - {args.source_dataset_name}')
+    ax1.set_title('Full Dataset: Train vs Valid Loss')
     ax1.legend()
     ax1.grid(True)
 
-    # Ours AUC 그래프
-    ax2.plot(results["Full_results"]["Ours"]["Ours_train_full_auc"], label='Ours train AUC')
-    ax2.plot(results["Full_results"]["Ours"]["Ours_test_full_auc"], label='Ours test AUC')
-    #ax2.plot(results["Full_results"]["Ours_few"]["Ours_train_few_auc"], label='Ours (few) train AUC')
-    #ax2.plot(results["Full_results"]["Ours_few"]["Ours_test_few_auc"], label='Ours (few) test AUC')
+    ax2.plot(results["Full_results"]["Ours"]["Ours_train_full_auc"], label='Train AUC')
+    ax2.plot(results["Full_results"]["Ours"]["Ours_val_full_auc"], label='Valid AUC')
     ax2.set_xlabel('Epochs')
     ax2.set_ylabel('AUC')
-    ax2.set_title(f'Ours AUC Curves - {args.source_dataset_name}')
+    ax2.set_title('Full Dataset: Train vs Valid AUC')
     ax2.legend()
     ax2.grid(True)
 
+    # Few-shot의 Train vs Valid
+    ax3.plot(results["Full_results"]["Ours_few"]["Ours_train_few_losses"], label='Train Loss')
+    ax3.plot(results["Full_results"]["Ours_few"]["Ours_val_few_losses"], label='Valid Loss')
+    ax3.set_xlabel('Epochs')
+    ax3.set_ylabel('Loss')
+    ax3.set_title('Few-shot: Train vs Valid Loss')
+    ax3.legend()
+    ax3.grid(True)
+
+    ax4.plot(results["Full_results"]["Ours_few"]["Ours_train_few_auc"], label='Train AUC')
+    ax4.plot(results["Full_results"]["Ours_few"]["Ours_val_few_auc"], label='Valid AUC')
+    ax4.set_xlabel('Epochs')
+    ax4.set_ylabel('AUC')
+    ax4.set_title('Few-shot: Train vs Valid AUC')
+    ax4.legend()
+    ax4.grid(True)
+
+    plt.suptitle(f'Training Progress - {args.source_dataset_name}', y=1.02, fontsize=16)
     plt.tight_layout()
     metrics_plot_path = os.path.join(exp_dir, f"metrics_plot_{timestamp}.png")
     plt.savefig(metrics_plot_path)
