@@ -1,5 +1,5 @@
 gpu_id=4
-source_datasets="diabetes"
+source_datasets="adult heart diabetes"
 few_shots="4 8 16 32 64"
 model_types="TabularFLM"
 labels="add no"
@@ -12,7 +12,7 @@ for source_dataset in $source_datasets; do
                 CUDA_VISIBLE_DEVICES=$gpu_id python main.py \
                 --random_seed 1234 \
                 --source_dataset_name $source_dataset \
-                --base_dir 'Experiment4' \
+                --base_dir 'Experiment5' \
                 --few_shot $shot \
                 --train_epochs 200 \
                 --label $label \

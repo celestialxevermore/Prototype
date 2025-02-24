@@ -217,18 +217,11 @@ class Model(nn.Module):
             nn.Linear(self.input_dim, self.input_dim),
         ).to(self.device)
 
-        # self.feature_attentions = nn.ModuleList([
-        #     nn.MultiheadAttention(
-        #     embed_dim = self.input_dim,
-        #     num_heads = args.heads,
-        #     batch_first = True,
-        #     dropout = dropout_rate
-        #     ) for _ in range(self.num_layers)])
-                # SimpleAttention layers 대체
-        self.feature_attentions = nn.ModuleList([
-            SimpleAttention(embed_dim=self.input_dim) 
-            for _ in range(self.args.num_layers)
-        ])    
+        if self.args.mode == 'sa':
+            self.feature_attentions = nn.ModuleList([
+                SimpleAttention(embed_dim=self.input_dim) 
+                for _ in range(self.args.num_layers)
+            ])    
         # MLP for final prediction
         self.predictor = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
