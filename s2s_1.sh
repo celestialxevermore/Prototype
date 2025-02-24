@@ -1,22 +1,24 @@
-gpu_id=1
-source_dataset="heart"
+gpu_id=0
+source_datasets="diabetes"
 few_shots="4 8 16 32 64"
 model_types="TabularFLM"
 labels="add no"
 modes="sa mean"
-for shot in $few_shots; do
-    for label in $labels; do
-        for mode in $modes; do 
-            echo "Running experiment for $source_dataset with $shot few-shot samples in random_seed:$random_seed"
-            CUDA_VISIBLE_DEVICES=$gpu_id python main.py \
-            --random_seed 42 \
-            --source_dataset_name $source_dataset \
-            --base_dir 'Experiment' \
-            --few_shot $shot \
-            --train_epochs 200 \
-            --label $label \
-            --mode $mode \
-            --model_type "TabularFLM"
+for source_dataset in $source_datasets; do
+    for shot in $few_shots; do
+        for label in $labels; do
+            for mode in $modes; do 
+                echo "Running experiment for $source_dataset with $shot few-shot samples in random_seed:$random_seed"
+                CUDA_VISIBLE_DEVICES=$gpu_id python main.py \
+                --random_seed 42 \
+                --source_dataset_name $source_dataset \
+                --base_dir 'Experiment4' \
+                --few_shot $shot \
+                --train_epochs 200 \
+                --label $label \
+                --mode $mode \
+                --model_type "TabularFLM"
+            done
         done
     done
 done

@@ -29,7 +29,7 @@ def fix_seed(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    torch.use_deterministic_algorithms(False)
+    torch.use_deterministic_algorithms(True)
 
 
 def save_pretrained_model(args, model, dataset_name):

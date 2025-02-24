@@ -6,7 +6,178 @@ import pandas as pd
 import pdb
 from sklearn.preprocessing import PowerTransformer, StandardScaler
 import json
+import os
 
+seed = 42
+os.environ['PYTHONHASHSEED'] = str(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+torch.use_deterministic_algorithms(True)
+
+
+class SimpleAttention(nn.Module):
+    def __init__(self, embed_dim, use_residual=True):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.scaling = torch.sqrt(torch.tensor(embed_dim).float())
+        self.use_residual = use_residual
+        
+        self.W_q = nn.Linear(embed_dim, embed_dim, bias = False)
+        self.W_k = nn.Linear(embed_dim, embed_dim, bias = False)
+        self.W_v = nn.Linear(embed_dim, embed_dim, bias = False)
+        
+    def forward(self, x):
+        Q = self.W_q(x)
+        K = self.W_k(x)
+        V = self.W_v(x)
+        attention_weights = torch.bmm(Q, K.transpose(1, 2))
+        attention_weights = attention_weights / self.scaling
+        attention_weights = F.softmax(attention_weights, dim=-1)
+        
+        out = torch.bmm(attention_weights, V)
+        if self.use_residual:
+            out = out + x  # residual connection
+            
+        return out, attention_weights
+
+
+
+# class Model(nn.Module):
+#     def __init__(
+#             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
+#         super(Model, self).__init__()
+#         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+#         self.args = args
+
+#         self.llm_model = llm_model
+#         self.input_dim = input_dim
+#         self.source_dataset_name = self.args.source_dataset_name
+#         self.cls_token = nn.Parameter(torch.randn(1, 1, args.input_dim))
+#         num_layers = self.args.num_layers
+#         dropout_rate = self.args.dropout_rate
+#         llm_model = self.args.llm_model
+#         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
+        
+#         # SimpleAttention layers 대체
+#         self.feature_attentions = nn.ModuleList([
+#             SimpleAttention(embed_dim=self.input_dim) 
+#             for _ in range(self.args.num_layers)
+#         ])
+#         # Meta-embedding MLP
+#         self.name_desc_mlp = nn.Sequential(
+#             nn.Linear(2 * self.input_dim, self.input_dim),
+#             nn.LayerNorm(self.input_dim),
+#             nn.ReLU(),
+#             nn.Linear(self.input_dim, self.input_dim),
+#             #nn.Dropout(dropout_rate)
+#         ).to(self.device)
+
+#         self.cat_val_mlp = nn.Sequential(
+#             nn.Linear(2 * self.input_dim, self.input_dim),
+#             nn.ReLU(),
+#             nn.Linear(self.input_dim, self.input_dim),
+#         ).to(self.device)
+
+#         self.num_val_mlp = nn.Sequential(
+#             nn.Linear(2 * self.input_dim, self.input_dim),
+#             nn.ReLU(),
+#             nn.Linear(self.input_dim, self.input_dim),
+#         ).to(self.device)
+
+#         # self.feature_attentions = nn.ModuleList([
+#         #     nn.MultiheadAttention(
+#         #     embed_dim = self.input_dim,
+#         #     num_heads = args.heads,
+#         #     #batch_first = True,
+#         #     dropout = dropout_rate
+#         #     ) for _ in range(self.args.num_layers)])
+        
+#         # MLP for final prediction
+#         self.predictor = nn.Sequential(
+#             nn.Linear(input_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout_rate),
+
+#             nn.Linear(hidden_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout_rate),
+            
+#             nn.Linear(hidden_dim, 1)
+#         ).to(self.device)
+        
+#         # device 설정
+        
+#         # 다른 모듈들도 GPU로
+#         self.name_desc_mlp = self.name_desc_mlp.to(self.device)
+#         self.cat_val_mlp = self.cat_val_mlp.to(self.device)
+#         self.num_val_mlp = self.num_val_mlp.to(self.device)
+    
+#     def forward(self, batch, y):
+#         pred = self.predict(batch)
+#         target = y.to(self.device).view(-1,1).float()
+
+#         loss = self.criterion(pred, target)
+#         return loss
+    
+#     def predict(self, batch):
+#         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
+#         sample_embeddings = []
+
+#         # Categorical features 처리
+#         if all(k in batch for k in ['cat_name_embeddings', 'cat_desc_embeddings', 'cat_value_embeddings']):
+#             cat_name_embeddings = batch['cat_name_embeddings'].to(self.device).squeeze(-2)
+#             cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
+#             cat_value_embeddings = batch['cat_value_embeddings'].to(self.device).squeeze(-2)
+
+#             cat_name_desc_embeddings = torch.cat([cat_name_embeddings, cat_desc_embeddings], dim=-1)
+#             cat_name_desc_embeddings = self.name_desc_mlp(cat_name_desc_embeddings)
+#             cat_value_embeddings = torch.cat([cat_value_embeddings, cat_name_desc_embeddings], dim=-1)
+#             cat_value_embeddings = self.cat_val_mlp(cat_value_embeddings)
+            
+#             sample_embeddings.append(cat_value_embeddings)
+
+#         # Numerical features 처리
+#         if all(k in batch for k in ['num_name_embeddings', 'num_desc_embeddings', 'num_prompt_embeddings']):
+#             num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
+#             num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+#             num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
+
+#             num_name_desc_embeddings = torch.cat([num_name_embeddings, num_desc_embeddings], dim=-1)
+#             num_name_desc_embeddings = self.name_desc_mlp(num_name_desc_embeddings)
+#             num_value_embeddings = torch.cat([num_prompt_embeddings, num_name_desc_embeddings], dim=-1)
+#             num_value_embeddings = self.num_val_mlp(num_value_embeddings)
+            
+#             sample_embeddings.append(num_value_embeddings)
+
+#         # 존재하는 feature embeddings 결합
+#         if len(sample_embeddings) > 0:
+#             sample_embeddings = torch.cat(sample_embeddings, dim=1)
+#         else:
+#             raise ValueError("Neither categorical nor numerical features found in batch")
+
+#         if self.args.label == 'add': 
+#             sample_embeddings = torch.cat([label_description_embeddings, sample_embeddings], dim=1)
+            
+#         if self.args.mode == 'sa':
+#             attention_output = sample_embeddings
+            
+#             for attention_layer in self.feature_attentions:
+#                 attention_output, _ = attention_layer(attention_output)
+#             pred = attention_output.mean(dim=1)
+#         elif self.args.mode == 'mean':
+#             pred = sample_embeddings.mean(dim=1)
+            
+#         pred = self.predictor(pred)
+#         return pred
+#위에가 찐 
+########################################################
 class Model(nn.Module):
     def __init__(
             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
@@ -46,14 +217,18 @@ class Model(nn.Module):
             nn.Linear(self.input_dim, self.input_dim),
         ).to(self.device)
 
+        # self.feature_attentions = nn.ModuleList([
+        #     nn.MultiheadAttention(
+        #     embed_dim = self.input_dim,
+        #     num_heads = args.heads,
+        #     batch_first = True,
+        #     dropout = dropout_rate
+        #     ) for _ in range(self.num_layers)])
+                # SimpleAttention layers 대체
         self.feature_attentions = nn.ModuleList([
-            nn.MultiheadAttention(
-            embed_dim = self.input_dim,
-            num_heads = args.heads,
-            batch_first = True,
-            dropout = dropout_rate
-            ) for _ in range(self.num_layers)])
-        
+            SimpleAttention(embed_dim=self.input_dim) 
+            for _ in range(self.args.num_layers)
+        ])    
         # MLP for final prediction
         self.predictor = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -84,44 +259,63 @@ class Model(nn.Module):
         return loss
     
     def predict(self, batch):
-        cat_name_embeddings = batch['cat_name_embeddings'].to(self.device).squeeze(-2)
-        cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
-        cat_value_embeddings = batch['cat_value_embeddings'].to(self.device).squeeze(-2)
-        num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
-        num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
-        num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
-        #pdb.set_trace()
+        sample_embeddings = []
+        if all(k in batch for k in ['cat_name_embeddings', 'cat_desc_embeddings', 'cat_value_embeddings']):
+            cat_name_embeddings = batch['cat_name_embeddings'].to(self.device).squeeze(-2)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
+            cat_value_embeddings = batch['cat_value_embeddings'].to(self.device).squeeze(-2)
 
-        cat_name_desc_embeddings = torch.cat([cat_name_embeddings, cat_desc_embeddings], dim=-1)
-        cat_name_desc_embeddings = self.name_desc_mlp(cat_name_desc_embeddings)
-        cat_value_embeddings = torch.cat([cat_value_embeddings, cat_name_desc_embeddings], dim=-1)
-        cat_value_embeddings = self.cat_val_mlp(cat_value_embeddings)
+            cat_name_desc_embeddings = torch.cat([cat_name_embeddings, cat_desc_embeddings], dim=-1)
+            cat_name_desc_embeddings = self.name_desc_mlp(cat_name_desc_embeddings)
+            cat_value_embeddings = torch.cat([cat_value_embeddings, cat_name_desc_embeddings], dim=-1)
+            cat_value_embeddings = self.cat_val_mlp(cat_value_embeddings)
+            
+            sample_embeddings.append(cat_value_embeddings)
 
-        num_name_desc_embeddings = torch.cat([num_name_embeddings, num_desc_embeddings], dim=-1)
-        num_name_desc_embeddings = self.name_desc_mlp(num_name_desc_embeddings)
-        num_value_embeddings = torch.cat([num_prompt_embeddings, num_name_desc_embeddings], dim=-1)
-        num_value_embeddings = self.num_val_mlp(num_value_embeddings)
+        # Numerical features 처리
+        if all(k in batch for k in ['num_name_embeddings', 'num_desc_embeddings', 'num_prompt_embeddings']):
+            num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
 
-        sample_embeddings = torch.cat([cat_value_embeddings, num_value_embeddings], dim=1)
-        
+            num_name_desc_embeddings = torch.cat([num_name_embeddings, num_desc_embeddings], dim=-1)
+            num_name_desc_embeddings = self.name_desc_mlp(num_name_desc_embeddings)
+            num_value_embeddings = torch.cat([num_prompt_embeddings, num_name_desc_embeddings], dim=-1)
+            num_value_embeddings = self.num_val_mlp(num_value_embeddings)
+            
+            sample_embeddings.append(num_value_embeddings)
+
+        if len(sample_embeddings) > 0:
+            sample_embeddings = torch.cat(sample_embeddings, dim=1)
+        else:
+            raise ValueError("Neither categorical nor numerical features found in batch")
+
         
         if self.args.label == 'add': 
             sample_embeddings = torch.cat([label_description_embeddings, sample_embeddings], dim=1)
         if self.args.mode =='sa':
             attention_output = sample_embeddings
             for attention_layer in self.feature_attentions:
-                attention_output, _ = attention_layer(
-                    query=label_description_embeddings,
-                    key=attention_output,
-                    value=attention_output
-                )
+                attention_output, _ = attention_layer(attention_output)
             pred = attention_output[:,0]
 
         elif self.args.mode == 'mean':
             pred = sample_embeddings.mean(dim=1)
         pred = self.predictor(pred)
         return pred
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -40,7 +40,7 @@ def get_args():
     parser.add_argument('--input_dim', type = int, default = 768)
     parser.add_argument('--hidden_dim', type = int, default = 128)
     parser.add_argument('--output_dim', type = int, default = 1)
-    parser.add_argument('--num_layers', type = int, default = 4)
+    parser.add_argument('--num_layers', type = int, default = 1)
     parser.add_argument('--dropout_rate', type = float, default = 0.3)
     parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--heads', type = int, default = 4)
@@ -283,69 +283,78 @@ def main():
     optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
     optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
 
-    logger.info(f"[Source-Only: Full] Start Training..")
 
-    (train_losses_full, val_losses_full,
-     train_aucs_full, val_aucs_full,
-     train_precisions_full, val_precisions_full,
-     train_recalls_full, val_recalls_full,
-     train_f1s_full, val_f1s_full,
-     train_accs_full, val_accs_full,
-     best_epoch_full, best_val_auc_full, best_threshold_full
-    ) = train_and_validate(model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
-                           device, args.train_epochs, is_binary)
+    if args.few_shot == 4:
+        logger.info(f"[Source-Only: Full] Start Training..")
 
-    logger.info("[Full-shot] Final Testing with best threshold from Validation")
-    (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
-     test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
-                                                             threshold=best_threshold_full)
+        (train_losses_full, val_losses_full,
+        train_aucs_full, val_aucs_full,
+        train_precisions_full, val_precisions_full,
+        train_recalls_full, val_recalls_full,
+        train_f1s_full, val_f1s_full,
+        train_accs_full, val_accs_full,
+        best_epoch_full, best_val_auc_full, best_threshold_full
+        ) = train_and_validate(model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
+                            device, args.train_epochs, is_binary)
+
+        logger.info("[Full-shot] Final Testing with best threshold from Validation")
+        (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
+        test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
+                                                                threshold=best_threshold_full)
 
     # 4-2) 최종 Test - Few
     logger.info("[Few-shot] Start Training...")
     (train_losses_few, val_losses_few,
-     train_aucs_few, val_aucs_few,
-     train_precisions_few, val_precisions_few,
-     train_recalls_few, val_recalls_few,
-     train_f1s_few, val_f1s_few,
-     train_accs_few, val_accs_few,
-     best_epoch_few, best_val_auc_few, best_threshold_few
+    train_aucs_few, val_aucs_few,
+    train_precisions_few, val_precisions_few,
+    train_recalls_few, val_recalls_few,
+    train_f1s_few, val_f1s_few,
+    train_accs_few, val_accs_few,
+    best_epoch_few, best_val_auc_few, best_threshold_few
     ) = train_and_validate(model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                           device, args.train_epochs, is_binary)
+                        device, args.train_epochs, is_binary)
 
     logger.info("[Few-shot] Final Testing with best threshold from Validation")
     (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
-     test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
-                                                           threshold=best_threshold_few)
+    test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
+                                                        threshold=best_threshold_few)
+
+
 
     # wrap_up_results_ 등 기존 함수로 결과 정리
-    full_ours_results = wrap_up_results_(
-        train_losses=train_losses_full, 
-        val_losses=val_losses_full,
-        test_losses=[],  # 필요하면 test_loss 리스트 넣기
-        train_aucs=train_aucs_full,
-        val_aucs=val_aucs_full,
-        test_aucs=[test_auc_full], 
-        train_precisions=train_precisions_full,
-        val_precisions=val_precisions_full,
-        test_precisions=[test_precision_full],
-        train_recalls=train_recalls_full,
-        val_recalls=val_recalls_full,
-        test_recalls=[test_recall_full],
-        train_f1s=train_f1s_full,
-        val_f1s=val_f1s_full,
-        test_f1s=[test_f1_full],
-        all_y_true=[all_y_true_full],
-        all_y_pred=[all_y_pred_full],
-        best_epoch=best_epoch_full,
-        best_ours_auc=test_auc_full,
-        best_ours_acc=test_acc_full,
-        best_ours_precision=test_precision_full,
-        best_ours_recall=test_recall_full,
-        best_ours_f1=test_f1_full,
-        train_accs=train_accs_full,
-        val_accs=val_accs_full,
-        test_accs=[test_acc_full]
-        )
+    if args.few_shot == 4:
+        full_ours_results = wrap_up_results_(
+            train_losses=train_losses_full, 
+            val_losses=val_losses_full,
+            test_losses=[],  # 필요하면 test_loss 리스트 넣기
+            train_aucs=train_aucs_full,
+            val_aucs=val_aucs_full,
+            test_aucs=[test_auc_full], 
+            train_precisions=train_precisions_full,
+            val_precisions=val_precisions_full,
+            test_precisions=[test_precision_full],
+            train_recalls=train_recalls_full,
+            val_recalls=val_recalls_full,
+            test_recalls=[test_recall_full],
+            train_f1s=train_f1s_full,
+            val_f1s=val_f1s_full,
+            test_f1s=[test_f1_full],
+            all_y_true=[all_y_true_full],
+            all_y_pred=[all_y_pred_full],
+            best_epoch=best_epoch_full,
+            best_ours_auc=test_auc_full,
+            best_ours_acc=test_acc_full,
+            best_ours_precision=test_precision_full,
+            best_ours_recall=test_recall_full,
+            best_ours_f1=test_f1_full,
+            train_accs=train_accs_full,
+            val_accs=val_accs_full,
+            test_accs=[test_acc_full]
+            )
+    else: 
+        full_ours_results = None
+
+
     few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
     train_losses_few, val_losses_few, [],
     train_aucs_few, val_aucs_few, [test_auc_few],

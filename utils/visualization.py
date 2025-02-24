@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 from datetime import datetime
-
+import pdb
 def visualize_gmm_step(gmm, source_embeddings, step, output_dir="visualizations"):
     """
     Visualize GMM's prior, means, covariances, and source-specific embeddings.
@@ -53,46 +53,117 @@ def visualize_results(args, results, exp_dir):
     os.makedirs(exp_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    # few-shot이 8 이상일 때는 few-shot 결과만 시각화
+    if args.few_shot >= 8:
+        fig, (ax3, ax4) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Few-shot의 Train vs Valid
+        ax3.plot(results["Full_results"]["Ours_few"]["Ours_train_few_losses"], label='Train Loss')
+        ax3.plot(results["Full_results"]["Ours_few"]["Ours_val_few_losses"], label='Valid Loss')
+        ax3.set_xlabel('Epochs')
+        ax3.set_ylabel('Loss')
+        ax3.set_title('Few-shot: Train vs Valid Loss')
+        ax3.legend()
+        ax3.grid(True)
 
-    # Full dataset의 Train vs Valid
-    ax1.plot(results["Full_results"]["Ours"]["Ours_train_full_losses"], label='Train Loss')
-    ax1.plot(results["Full_results"]["Ours"]["Ours_val_full_losses"], label='Valid Loss')
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Loss')
-    ax1.set_title('Full Dataset: Train vs Valid Loss')
-    ax1.legend()
-    ax1.grid(True)
+        ax4.plot(results["Full_results"]["Ours_few"]["Ours_train_few_auc"], label='Train AUC')
+        ax4.plot(results["Full_results"]["Ours_few"]["Ours_val_few_auc"], label='Valid AUC')
+        ax4.set_xlabel('Epochs')
+        ax4.set_ylabel('AUC')
+        ax4.set_title('Few-shot: Train vs Valid AUC')
+        ax4.legend()
+        ax4.grid(True)
 
-    ax2.plot(results["Full_results"]["Ours"]["Ours_train_full_auc"], label='Train AUC')
-    ax2.plot(results["Full_results"]["Ours"]["Ours_val_full_auc"], label='Valid AUC')
-    ax2.set_xlabel('Epochs')
-    ax2.set_ylabel('AUC')
-    ax2.set_title('Full Dataset: Train vs Valid AUC')
-    ax2.legend()
-    ax2.grid(True)
+    # few-shot이 4일 때는 full과 few-shot 모두 시각화
+    else:
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # Full dataset의 Train vs Valid
+        ax1.plot(results["Full_results"]["Ours"]["Ours_train_full_losses"], label='Train Loss')
+        ax1.plot(results["Full_results"]["Ours"]["Ours_val_full_losses"], label='Valid Loss')
+        ax1.set_xlabel('Epochs')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Full Dataset: Train vs Valid Loss')
+        ax1.legend()
+        ax1.grid(True)
 
-    # Few-shot의 Train vs Valid
-    ax3.plot(results["Full_results"]["Ours_few"]["Ours_train_few_losses"], label='Train Loss')
-    ax3.plot(results["Full_results"]["Ours_few"]["Ours_val_few_losses"], label='Valid Loss')
-    ax3.set_xlabel('Epochs')
-    ax3.set_ylabel('Loss')
-    ax3.set_title('Few-shot: Train vs Valid Loss')
-    ax3.legend()
-    ax3.grid(True)
+        ax2.plot(results["Full_results"]["Ours"]["Ours_train_full_auc"], label='Train AUC')
+        ax2.plot(results["Full_results"]["Ours"]["Ours_val_full_auc"], label='Valid AUC')
+        ax2.set_xlabel('Epochs')
+        ax2.set_ylabel('AUC')
+        ax2.set_title('Full Dataset: Train vs Valid AUC')
+        ax2.legend()
+        ax2.grid(True)
+        
+        # Few-shot의 Train vs Valid
+        ax3.plot(results["Full_results"]["Ours_few"]["Ours_train_few_losses"], label='Train Loss')
+        ax3.plot(results["Full_results"]["Ours_few"]["Ours_val_few_losses"], label='Valid Loss')
+        ax3.set_xlabel('Epochs')
+        ax3.set_ylabel('Loss')
+        ax3.set_title('Few-shot: Train vs Valid Loss')
+        ax3.legend()
+        ax3.grid(True)
 
-    ax4.plot(results["Full_results"]["Ours_few"]["Ours_train_few_auc"], label='Train AUC')
-    ax4.plot(results["Full_results"]["Ours_few"]["Ours_val_few_auc"], label='Valid AUC')
-    ax4.set_xlabel('Epochs')
-    ax4.set_ylabel('AUC')
-    ax4.set_title('Few-shot: Train vs Valid AUC')
-    ax4.legend()
-    ax4.grid(True)
+        ax4.plot(results["Full_results"]["Ours_few"]["Ours_train_few_auc"], label='Train AUC')
+        ax4.plot(results["Full_results"]["Ours_few"]["Ours_val_few_auc"], label='Valid AUC')
+        ax4.set_xlabel('Epochs')
+        ax4.set_ylabel('AUC')
+        ax4.set_title('Few-shot: Train vs Valid AUC')
+        ax4.legend()
+        ax4.grid(True)
 
-    plt.suptitle(f'Training Progress - {args.source_dataset_name}', y=1.02, fontsize=16)
+    plt.suptitle(f'Training Progress - {args.source_dataset_name} (K={args.few_shot})', y=1.02, fontsize=16)
     plt.tight_layout()
     metrics_plot_path = os.path.join(exp_dir, f"metrics_plot_{timestamp}.png")
     plt.savefig(metrics_plot_path)
     plt.close()
 
     print(f"Metrics plot saved as {metrics_plot_path}")
+
+# def visualize_results(args, results, exp_dir):
+#     os.makedirs(exp_dir, exist_ok=True)
+#     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+#     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+#     #pdb.set_trace()
+#     # Full dataset의 Train vs Valid
+#     ax1.plot(results["Full_results"]["Ours"]["Ours_train_full_losses"], label='Train Loss')
+#     ax1.plot(results["Full_results"]["Ours"]["Ours_val_full_losses"], label='Valid Loss')
+#     ax1.set_xlabel('Epochs')
+#     ax1.set_ylabel('Loss')
+#     ax1.set_title('Full Dataset: Train vs Valid Loss')
+#     ax1.legend()
+#     ax1.grid(True)
+
+#     ax2.plot(results["Full_results"]["Ours"]["Ours_train_full_auc"], label='Train AUC')
+#     ax2.plot(results["Full_results"]["Ours"]["Ours_val_full_auc"], label='Valid AUC')
+#     ax2.set_xlabel('Epochs')
+#     ax2.set_ylabel('AUC')
+#     ax2.set_title('Full Dataset: Train vs Valid AUC')
+#     ax2.legend()
+#     ax2.grid(True)
+
+#     # Few-shot의 Train vs Valid
+#     ax3.plot(results["Full_results"]["Ours_few"]["Ours_train_few_losses"], label='Train Loss')
+#     ax3.plot(results["Full_results"]["Ours_few"]["Ours_val_few_losses"], label='Valid Loss')
+#     ax3.set_xlabel('Epochs')
+#     ax3.set_ylabel('Loss')
+#     ax3.set_title('Few-shot: Train vs Valid Loss')
+#     ax3.legend()
+#     ax3.grid(True)
+
+#     ax4.plot(results["Full_results"]["Ours_few"]["Ours_train_few_auc"], label='Train AUC')
+#     ax4.plot(results["Full_results"]["Ours_few"]["Ours_val_few_auc"], label='Valid AUC')
+#     ax4.set_xlabel('Epochs')
+#     ax4.set_ylabel('AUC')
+#     ax4.set_title('Few-shot: Train vs Valid AUC')
+#     ax4.legend()
+#     ax4.grid(True)
+
+#     plt.suptitle(f'Training Progress - {args.source_dataset_name}', y=1.02, fontsize=16)
+#     plt.tight_layout()
+#     metrics_plot_path = os.path.join(exp_dir, f"metrics_plot_{timestamp}.png")
+#     plt.savefig(metrics_plot_path)
+#     plt.close()
+
+#     print(f"Metrics plot saved as {metrics_plot_path}")
