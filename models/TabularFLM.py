@@ -34,8 +34,9 @@ class SimpleAttention(nn.Module):
         return out, attention_weights
     
 class Meta(nn.Module):
-    def __init__(self, input_dim, hidden_dim, enc_type, meta_type):
+    def __init__(self, args, input_dim, hidden_dim, enc_type, meta_type):
         super().__init__()
+        self.args = args
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim 
         self.scaling = torch.sqrt(torch.tensor(input_dim).float())
@@ -50,7 +51,9 @@ class Meta(nn.Module):
             nn.Linear(2 * self.input_dim, self.input_dim),
             nn.LayerNorm(self.input_dim),
             nn.ReLU(),
+            nn.Dropout(self.args.meta_dropout_rate),
             nn.Linear(self.input_dim, self.input_dim),
+            nn.LayerNorm(self.input_dim)
         )
 
     def forward(self, name_embeddings, desc_embeddings, label_description_embeddings):
@@ -84,9 +87,11 @@ class FlattenHead(nn.Module):
     def _initialize_projector(self, num_features, D):
         self.projector = nn.Sequential(
             nn.Linear(num_features * D, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-            nn.Linear(self.hidden_dim, num_features * D)
+            nn.Dropout(self.args.flatten_dropout_rate),
+            nn.Linear(self.hidden_dim, num_features * D),
+            nn.LayerNorm(num_features * D)
         ).to(self.device)
         
     def forward(self, x):
@@ -94,7 +99,6 @@ class FlattenHead(nn.Module):
         if self.projector is None:
             self._initialize_projector(F, D)
         x = x.reshape(B, F*D)
-        #pdb.set_trace()
         x = self.projector(x)
         return x 
 
@@ -111,9 +115,11 @@ class Attention_FlattenHead(nn.Module):
     def _initialize_projector(self, num_features, D):
         self.projector = nn.Sequential(
             nn.Linear(num_features * D, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-            nn.Linear(self.hidden_dim, num_features * D)
+            nn.Dropout(self.args.flatten_dropout_rate),
+            nn.Linear(self.hidden_dim, num_features * D),
+            nn.LayerNorm(num_features * D)
         ).to(self.device)
         
     def forward(self, x):
@@ -121,7 +127,6 @@ class Attention_FlattenHead(nn.Module):
         if self.projector is None:
             self._initialize_projector(F, D)
         x = x.reshape(B, F*D)
-        #pdb.set_trace()
         x = self.projector(x)
         return x 
 
@@ -156,25 +161,34 @@ class Model(nn.Module):
         ).to(self.device)
 
         if self.args.meta_type in ['meta_mlp', 'meta_attn']:
-            self.meta_level = Meta(input_dim, hidden_dim, self.enc_type, self.meta_type)
+            self.meta_level = Meta(args, input_dim, hidden_dim, self.enc_type, self.meta_type)
 
         if self.args.enc_type == 'ind':
             self.cat_val_mlp = nn.Sequential(
-            nn.Linear(2 * self.input_dim, self.input_dim),
-            nn.ReLU(),
-            nn.Linear(self.input_dim, self.input_dim),
+                nn.Linear(2 * self.input_dim, self.input_dim),
+                nn.LayerNorm(self.input_dim),
+                nn.ReLU(),
+                nn.Dropout(self.args.ind_dropout_rate),
+                nn.Linear(self.input_dim, self.input_dim),
+                nn.LayerNorm(self.input_dim)
             ).to(self.device)
 
             self.num_val_mlp = nn.Sequential(
                 nn.Linear(2 * self.input_dim, self.input_dim),
+                nn.LayerNorm(self.input_dim),
                 nn.ReLU(),
+                nn.Dropout(self.args.ind_dropout_rate),
                 nn.Linear(self.input_dim, self.input_dim),
+                nn.LayerNorm(self.input_dim)
             ).to(self.device)
         elif self.args.enc_type == 'shared':
             self.shared_val_mlp = nn.Sequential(
                 nn.Linear(2 * self.input_dim, self.input_dim),
+                nn.LayerNorm(self.input_dim),
                 nn.ReLU(),
+                nn.Dropout(self.args.shared_dropout_rate),
                 nn.Linear(self.input_dim, self.input_dim),
+                nn.LayerNorm(self.input_dim)
             ).to(self.device)
         
         if self.args.aggr_type == 'attn':

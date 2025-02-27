@@ -408,7 +408,11 @@ def save_results_(args, results):
             "meta_heads": args.meta_heads,
             "meta_num_layers": args.meta_num_layers,
             "few_shot": args.few_shot,
-            "threshold": args.threshold
+            "threshold": args.threshold,
+            "meta_dropout_rate": args.meta_dropout_rate,
+            "ind_dropout_rate": args.ind_dropout_rate,
+            "shared_dropout_rate": args.shared_dropout_rate,
+            "flatten_dropout_rate": args.flatten_dropout_rate
         },
         "model_type": args.model_type,
         "aggr_type": args.aggr_type,
