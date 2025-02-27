@@ -25,7 +25,7 @@ def process_json_files(directory_path):
         if not os.path.exists(dataset_path):
             continue
             
-        json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/*/f*.json")
+        json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/A:*_L:*_E:*_M:*/f*.json")
         json_files = glob.glob(json_pattern, recursive=True)
         
         if not json_files:
@@ -41,11 +41,17 @@ def process_json_files(directory_path):
                     data = json.load(f)
                     
                 path_parts = json_file.split('/')
-                model_variant = path_parts[-2]
+                model_config = path_parts[-2]
                 seed = path_parts[-4].split(':')[1]
                 
+                config_parts = model_config.split('_')
+                aggr_type = config_parts[0].split(':')[1]
+                label_type = config_parts[1].split(':')[1]
+                enc_type = config_parts[2].split(':')[1]
+                meta_type = config_parts[3].split(':')[1]
+                
                 config_key = (
-                    model_variant,
+                    model_config,
                     data['hyperparameters']['few_shot'],
                     data['hyperparameters']['batch_size']
                 )
@@ -55,7 +61,6 @@ def process_json_files(directory_path):
                         'few_shot': {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': []}
                     }
                 
-                # Few-shot 결과 저장
                 if 'Ours_few' in data['results']:
                     results = data['results']['Ours_few']
                     metrics = {
@@ -68,10 +73,9 @@ def process_json_files(directory_path):
                     for metric_name, value in metrics.items():
                         results_by_config[dataset][config_key]['few_shot'][metric_name].append(value)
                 
-                # Full dataset 결과는 few_shot=4일 때만 저장
                 if data['hyperparameters']['few_shot'] == 4 and isinstance(data['results']['Ours'], dict):
                     results = data['results']['Ours']
-                    full_key = (model_variant, data['hyperparameters']['batch_size'])
+                    full_key = (model_config, data['hyperparameters']['batch_size'])
                     metrics = {
                         'auc': results['Ours_best_full_auc'],
                         'acc': results['Ours_best_full_acc'],
@@ -85,11 +89,10 @@ def process_json_files(directory_path):
             except Exception as e:
                 print(f"Error processing file {json_file}: {str(e)}")
         
-        # 결과 저장
         for config_key in results_by_config[dataset].keys():
-            model_variant, few_shot, batch_size = config_key
+            model_config, few_shot, batch_size = config_key
             
-            model_dir = os.path.join(directory_path, dataset, "summary", model_variant)
+            model_dir = os.path.join(directory_path, dataset, "summary", model_config)
             create_directory(model_dir)
             
             output_file = os.path.join(model_dir, f'f{few_shot}_b{batch_size}.csv')
@@ -108,7 +111,7 @@ def process_json_files(directory_path):
                 # Full dataset 결과
                 writer.writerow([''])
                 writer.writerow(['Full Dataset Results:'])
-                full_key = (model_variant, batch_size)
+                full_key = (model_config, batch_size)
                 if full_key in full_results:
                     for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
                         values = full_results[full_key][metric]
@@ -121,7 +124,7 @@ def process_json_files(directory_path):
 def main():
     parser = argparse.ArgumentParser(description='Summarize DL results')
     parser.add_argument('--base_dir', type=str, 
-                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_Experiment5",
+                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_Experiment_TabularFLM2",
                        help='Base directory containing the results')
     
     args = parser.parse_args()

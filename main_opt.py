@@ -63,10 +63,11 @@ def get_args():
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
     parser.add_argument('--model_type', type=str, default='TabularFLM', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5', 'TabularFLM'])
     parser.add_argument('--scaler_type', type=str, default='pow', choices=['pow'])
-    parser.add_argument('--label', type = str, choices = ['add', 'no'], default = 'add')
+    parser.add_argument('--label', type = str, choices = ['add', 'no'], default = 'no')
     parser.add_argument('--enc_type', type = str, choices = ['ind', 'shared'], default = 'ind')
     parser.add_argument('--meta_type', type = str, choices = ['meta_attn', 'meta_mlp'], default = 'meta_attn')
-    parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
+    parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'flatten')
+    parser.add_argument('--n_trials', type=int, default=20)
     args = parser.parse_args()
 
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
@@ -237,149 +238,101 @@ def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretr
         return model_path
     return None
 
-def main():
-    start_time = time.time()
-    args  = get_args()
+import optuna
+from optuna.trial import TrialState
+import json
+from optuna.visualization import plot_optimization_history
+from optuna.visualization import plot_param_importances
+from optuna.visualization import plot_contour
+
+def objective(trial, args):
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
-    #pdb.set_trace()
-    logger.info(f"Starting experiment with dataset: {args.source_dataset_name}")
-    logger.info(f"Device: {device}")
-
-    logger.info("Preparing Tabular datasets...")
-
-
-    # 데이터셋 준비
-    # results = prepare_tabular_dataloaders(
-    #     args, args.source_dataset_name, args.random_seed
-    # )
     
-    # X_train, X_val, X_test, y_train, y_val, y_test = results['data']
-    # train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
-    # num_classes = results['num_classes']
-    # X_train_few, y_train_few = get_few_shot_tabular_samples(X_train, y_train, args)
-    # #X_train_few, y_train_few, val_loader, test_loader, args
-    # few_results = prepare_few_shot_dataloaders(
-    #     X_train_few, y_train_few, val_loader_full_s, test_loader_full_s, args
-    # )
-    # train_loader_few_s, val_loader_few_s, test_loader_few_s = few_results['train'], few_results['val'], few_results['test']
+    # 하이퍼파라미터 탐색 범위 설정 - 문법만 수정
+    args.source_lr_few = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3])
+    weight_decay = trial.suggest_categorical('weight_decay', [1e-5, 1e-4, 1e-3, 1e-2])
+    
+    # 데이터 로더 준비
     results = prepare_embedding_dataloaders(args, args.source_dataset_name)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
     
     if args.few_shot > 0:
-        logger.info(f"Preparing few-shot samples (K={args.few_shot})...")
         train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
         val_loader_few_s = val_loader_full_s
         test_loader_few_s = test_loader_full_s
-    logger.info(f"Datasets prepared, source dataset names : {args.source_dataset_name}")
 
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
-    #self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
-    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model)
-    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model)
-    model_full = model_full.to(device)
-    model_few = model_few.to(device)
-    optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-4)
-
-
-    if args.few_shot == 4:
-        logger.info(f"[Source-Only: Full] Start Training..")
-
-        (train_losses_full, val_losses_full,
-        train_aucs_full, val_aucs_full,
-        train_precisions_full, val_precisions_full,
-        train_recalls_full, val_recalls_full,
-        train_f1s_full, val_f1s_full,
-        train_accs_full, val_accs_full,
-        best_epoch_full, best_val_auc_full, best_threshold_full
-        ) = train_and_validate(model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
-                            device, args.train_epochs, is_binary)
-
-        logger.info("[Full-shot] Final Testing with best threshold from Validation")
-        (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
-        test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
-                                                                threshold=best_threshold_full)
-
-    # 4-2) 최종 Test - Few
-    logger.info("[Few-shot] Start Training...")
-    (train_losses_few, val_losses_few,
-    train_aucs_few, val_aucs_few,
-    train_precisions_few, val_precisions_few,
-    train_recalls_few, val_recalls_few,
-    train_f1s_few, val_f1s_few,
-    train_accs_few, val_accs_few,
-    best_epoch_few, best_val_auc_few, best_threshold_few
-    ) = train_and_validate(model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary)
-
-    logger.info("[Few-shot] Final Testing with best threshold from Validation")
-    (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
-    test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
-                                                        threshold=best_threshold_few)
-
-
-
     
-    if args.few_shot == 4:
-        full_ours_results = wrap_up_results_(
-            train_losses=train_losses_full, 
-            val_losses=val_losses_full,
-            test_losses=[],  # 필요하면 test_loss 리스트 넣기
-            train_aucs=train_aucs_full,
-            val_aucs=val_aucs_full,
-            test_aucs=[test_auc_full], 
-            train_precisions=train_precisions_full,
-            val_precisions=val_precisions_full,
-            test_precisions=[test_precision_full],
-            train_recalls=train_recalls_full,
-            val_recalls=val_recalls_full,
-            test_recalls=[test_recall_full],
-            train_f1s=train_f1s_full,
-            val_f1s=val_f1s_full,
-            test_f1s=[test_f1_full],
-            all_y_true=[all_y_true_full],
-            all_y_pred=[all_y_pred_full],
-            best_epoch=best_epoch_full,
-            best_ours_auc=test_auc_full,
-            best_ours_acc=test_acc_full,
-            best_ours_precision=test_precision_full,
-            best_ours_recall=test_recall_full,
-            best_ours_f1=test_f1_full,
-            train_accs=train_accs_full,
-            val_accs=val_accs_full,
-            test_accs=[test_acc_full]
-            )
-    else: 
-        full_ours_results = None
+    # 모델 초기화
+    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, 
+                     args.num_layers, args.dropout_rate, args.llm_model).to(device)
+    
+    optimizer_few = optim.Adam(model_few.parameters(), 
+                             lr=args.source_lr_few, 
+                             weight_decay=weight_decay)
 
+    # 학습 및 검증
+    (_, _, _, val_aucs_few, _, _, _, _, _, _,
+     _, _, _, _, best_threshold_few) = train_and_validate(
+        model_few, train_loader_few_s, val_loader_few_s, criterion, 
+        optimizer_few, device, args.train_epochs, is_binary
+    )
+    
+    return max(val_aucs_few)
 
-    few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
-    train_losses_few, val_losses_few, [],
-    train_aucs_few, val_aucs_few, [test_auc_few],
-    train_precisions_few, val_precisions_few, [test_precision_few],
-    train_recalls_few, val_recalls_few, [test_recall_few],
-    train_f1s_few, val_f1s_few, [test_f1_few],
-    [all_y_true_few], [all_y_pred_few],
-    best_epoch_few, test_auc_few, test_acc_few,
-    test_precision_few, test_recall_few, test_f1_few,
-    train_accs=train_accs_few,
-    val_accs=val_accs_few,
-    test_accs=[test_acc_few]
-)
-
-
-    results = prepare_results_(full_ours_results, few_ours_results)
-
+def main():
+    start_time = time.time()
+    args = get_args()
+    
+    # 현재 variant에 대한 디렉토리 생성
+    variant_dir = f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
+    results_path = os.path.join(
+        f'experiments/source_to_source_{args.base_dir}',
+        args.source_dataset_name,
+        f'args_seed:{args.random_seed}',
+        'TabularFLM',
+        variant_dir
+    )
+    os.makedirs(results_path, exist_ok=True)
+    
+    # DB 파일 경로 설정
+    db_path = os.path.join(results_path, "study.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    
+    study_name = f"opt_{args.source_dataset_name}_{variant_dir}_seed{args.random_seed}"
+    storage_name = f"sqlite:///{db_path}"
+    
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage_name,
+        direction="maximize",
+        load_if_exists=True
+    )
+    
+    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials)
+    
     # 결과 저장
-    logger.info("Saving results...")
-    save_results_(args, results)
-    logger.info("Results saved")
+    best_params = {
+        "learning_rate": study.best_trial.params["learning_rate"],
+        "weight_decay": study.best_trial.params["weight_decay"],
+        "best_value": study.best_trial.value
+    }
+    
+    with open(os.path.join(results_path, "best_hyperparameters.json"), 'w') as f:
+        json.dump(best_params, f, indent=4)
+    
+    logger.info("Best hyperparameters found:")
+    logger.info(f"  Learning rate: {best_params['learning_rate']}")
+    logger.info(f"  Weight decay: {best_params['weight_decay']}")
+    logger.info(f"  Best validation AUC: {best_params['best_value']:.4f}")
+    
     end_time = time.time()
     total_time = end_time - start_time
-    logger.info(f"Total experiment time: {format_time(total_time)}")
+    logger.info(f"Total optimization time: {format_time(total_time)}")
 
 if __name__ == "__main__":
     main()
