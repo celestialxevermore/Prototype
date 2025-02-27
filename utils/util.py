@@ -403,6 +403,7 @@ def save_results_(args, results):
             "few dataset learning_rate": args.source_lr_few,
             "llm_models": args.llm_model,
             "dropout_rate": args.dropout_rate,
+            "hidden_dim": args.hidden_dim,
             "num_layers": args.num_layers,
             "heads": args.heads,
             "meta_heads": args.meta_heads,
@@ -410,6 +411,7 @@ def save_results_(args, results):
             "few_shot": args.few_shot,
             "threshold": args.threshold,
             "meta_dropout_rate": args.meta_dropout_rate,
+            "aggr_attn_dropout_rate": args.aggr_attn_dropout_rate,
             "ind_dropout_rate": args.ind_dropout_rate,
             "shared_dropout_rate": args.shared_dropout_rate,
             "flatten_dropout_rate": args.flatten_dropout_rate

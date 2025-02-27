@@ -2,7 +2,7 @@ gpu_id=1
 source_datasets="heart diabetes adult"
 few_shots="4 8 16 32 64"
 model_types="TabularFLM"
-aggr_types="flatten mean attn"
+aggr_types="flatten attn"
 enc_types="ind shared"
 meta_types="meta_mlp meta_attn"
 labels="add no"
@@ -16,7 +16,7 @@ for few_shot in $few_shots; do
                             CUDA_VISIBLE_DEVICES=$gpu_id python main.py \
                             --random_seed 1993 \
                             --source_dataset_name $source_dataset \
-                            --base_dir 'Experiment_TabularFLM2' \
+                            --base_dir 'Experiment_TabularFLM3' \
                             --few_shot $few_shot \
                             --train_epochs 1000 \
                             --label $label \
