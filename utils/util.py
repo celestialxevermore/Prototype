@@ -370,9 +370,6 @@ def prepare_results_ss(full_ours_results, few_ours_results):
     }
     return results
 
-
-
-
 def save_results_(args, results):
     exp_dir = os.path.join(
         f'experiments/source_to_source_{args.base_dir}',
@@ -489,9 +486,64 @@ def save_results_st(args, results_s, results_t):
     
     #visualize_results(args, results_s, os.path.join(exp_dir, 'source'))
     #visualize_results(args, results_t, os.path.join(exp_dir, 'target'))
+def prepare_ml_results(args, full_baseline_results, few_baseline_results):
+    """
+    ML 모델들의 결과를 정리하는 함수
+    """
+    results = {
+        'Best_results': {
+            "full": {},
+            "few": {}
+        },
 
+    }
+    
+    # 선택된 베이스라인 모델에 대해서만 처리
+    for baseline in args.baseline:  # args.baseline이 하나의 모델만 포함해도 동작
+        model_prefix = {
+            'lr': 'LR',
+            'xgb': 'xgb',
+            'mlp': 'mlp',
+            'cat': 'catboost',
+            'rf': 'rf'
+        }[baseline]
+        
+        # Best results for full dataset
+        results['Best_results']['full'][baseline] = {
+            f"{baseline}_best_full_auc": full_baseline_results[baseline][f'test_{model_prefix}_auc'],
+            f"{baseline}_best_full_acc": full_baseline_results[baseline][f'test_{model_prefix}_acc'],
+            f"{baseline}_best_full_precision": full_baseline_results[baseline][f'test_{model_prefix}_precision'],
+            f"{baseline}_best_full_recall": full_baseline_results[baseline][f'test_{model_prefix}_recall'],
+            f"{baseline}_best_full_f1": full_baseline_results[baseline][f'test_{model_prefix}_f1']
+        }
+        
+        # Best results for few-shot
+        results['Best_results']['few'][baseline] = {
+            f"{baseline}_best_few_auc": few_baseline_results[baseline][f'test_{model_prefix}_auc'],
+            f"{baseline}_best_few_acc": few_baseline_results[baseline][f'test_{model_prefix}_acc'],
+            f"{baseline}_best_few_precision": few_baseline_results[baseline][f'test_{model_prefix}_precision'],
+            f"{baseline}_best_few_recall": few_baseline_results[baseline][f'test_{model_prefix}_recall'],
+            f"{baseline}_best_few_f1": few_baseline_results[baseline][f'test_{model_prefix}_f1']
+        }
+    
+    return results
 
+def save_ml_results(args, results):
+    """
+    ML 모델들의 결과를 저장하는 함수
+    """
+    # 선택된 베이스라인 모델의 이름을 경로에 포함
+    baseline_name = '_'.join(args.baseline)
+    
+    exp_dir = os.path.join(
+        'experiments/ml_baselines_SEEDS',
+        args.source_dataset_name,
+        f"args_seed:{args.random_seed}",
+        baseline_name  # 모델 이름으로 서브디렉토리 생성
+    )
+    os.makedirs(exp_dir, exist_ok=True)
 
+<<<<<<< Updated upstream
 def prepare_ml_results(args, full_results, few_results):
     results = {'Best_results': {'full': {}, 'few': {}}}
     
@@ -569,21 +621,39 @@ def save_ml_results(args, results):
         json.dump(data, f, indent=4)
     
     print(f"Results saved to {filepath}")
+=======
+    dataset_file_path = os.path.join(
+        args.table_path,
+        f"{args.source_dataset_name}.csv"
+    )
+>>>>>>> Stashed changes
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"f{args.few_shot}_b{args.batch_size}_{timestamp}.json"
+    filepath = os.path.join(exp_dir, filename)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+    data = {
+        "Experimental Memo": args.des,
+        "dataset": args.source_dataset_name,
+        "dataset_file_path": dataset_file_path,
+        "timestamp": timestamp,
+        "hyperparameters": {
+            "seed": args.random_seed,
+            "batch_size": args.batch_size,
+            "train_epochs": args.train_epochs,
+            "learning_rate": args.source_lr,
+            "hidden_dim": args.hidden_dim,
+            "dropout_rate": args.dropout_rate,
+            "few_shot": args.few_shot,
+            "threshold": args.threshold
+        },
+        "results": results
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+    print(f"Results saved to {filepath}")
 
 def extract_center_nodes_and_labels(graphs):
     center_nodes = []

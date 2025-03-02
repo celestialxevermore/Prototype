@@ -23,7 +23,11 @@ from models.Model import Model
 from models.XGBoost import xgboost_benchmark
 from models.LogReg import logistic_regression_benchmark
 import psutil 
+<<<<<<< Updated upstream
 from torch_geometric.data import Batch
+=======
+import optuna
+>>>>>>> Stashed changes
 p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
@@ -68,11 +72,11 @@ def get_args():
     parser.add_argument('--FD', type=str, default='N',
                        choices=['P', 'N', 'D', 'ND'],
                        help='N: Name embeddings, D: Description embeddings, ND: Name and Description embeddings')
-    parser.add_argument('--center_type', type=str,default='CM',choices=['CM','CP','CA'])
+    parser.add_argument('--center_type', type=str,default='CM',choices=['CM','CP','CA_m', 'CA_f', 'CA_p'])
     parser.add_argument('--label', action='store_true', help='Use Label Decoded Dataset')
     args = parser.parse_args()
     
-    # 그래프 경로 설정
+
     args.graph_path = f"/storage/personal/eungyeop/dataset/test2_graph/seed:{args.random_seed}"
     
     # graph_type과 FD에 따른 하위 경로 설정
@@ -252,7 +256,7 @@ def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretr
 
 def main():
     start_time = time.time()
-    args  = get_args()
+    args = get_args()
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
 
@@ -261,6 +265,7 @@ def main():
 
     logger.info("Preparing Graph datasets...")
     train_loader_full_s, val_loader_full_s, test_loader_s, num_classes = prepare_graph_dataloaders(args, args.source_dataset_name)
+<<<<<<< Updated upstream
     #pdb.set_trace() #이상 없음
 
     # # Optuna study 생성
@@ -337,15 +342,93 @@ def main():
     #     logger.info(f"    {key}: {value}")
     #     setattr(args, key, value)    
 
+=======
+    
+    # Optuna study 생성
+    study_name = f"optimization_{args.source_dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+    study = optuna.create_study(
+        study_name=study_name,
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=args.random_seed)
+    )
+    
+    def objective(trial):
+        # 하이퍼파라미터 정의
+        trial_args = args  # args 복사본 사용
+        trial_args.num_layers = trial.suggest_int('num_layers', 1, 4)
+        trial_args.heads = trial.suggest_categorical('heads', [4, 8, 16])
+        #trial_args.hidden_dim = trial.suggest_int('hidden_dim', 64, 256, step=32)
+        trial_args.dropout_rate = trial.suggest_categorical('dropout_rate', [0.1, 0.2, 0.3, 0.4, 0.5])
+        trial_args.source_lr = trial.suggest_float('source_lr', 1e-5, 1e-3, log=True)
+        
+        # 모델 및 optimizer 초기화
+        is_binary = (num_classes == 2)
+        criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+        model = Model(trial_args, trial_args.input_dim, trial_args.hidden_dim, num_classes).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=trial_args.source_lr)
+        
+        # 학습 및 검증
+        results = train_and_validate(
+            model, train_loader_full_s, val_loader_full_s, 
+            criterion, optimizer, device, 
+            trial_args.train_epochs, is_binary
+            
+        )
+        
+        return results[12]  # best_val_auc 반환
+    
+    # 최적화 실행
+    logger.info("Starting hyperparameter optimization...")
+    study.optimize(objective, n_trials=30)
+    
+    # 최적화 결과 시각화
+    try:
+        import plotly
+        import os
+        from plotly.subplots import make_subplots
+        
+        # 결과 저장 디렉토리 생성
+        os.makedirs("results/optuna", exist_ok=True)
+        
+        # 1. 최적화 히스토리
+        history_fig = optuna.visualization.plot_optimization_history(study)
+        history_fig.write_html(f"results/optuna/{study_name}_history.html")  # HTML로도 저장
+        history_fig.write_image(f"results/optuna/{study_name}_history.png", scale=2)  # 해상도 높여서 저장
+        
+        # 2. 파라미터 중요도
+        param_importance_fig = optuna.visualization.plot_param_importances(study)
+        param_importance_fig.write_html(f"results/optuna/{study_name}_param_importance.html")
+        param_importance_fig.write_image(f"results/optuna/{study_name}_param_importance.png", scale=2)
+        
+        # 3. 파라미터 간 상관관계
+        parallel_coord_fig = optuna.visualization.plot_parallel_coordinate(study)
+        parallel_coord_fig.write_html(f"results/optuna/{study_name}_parallel_coord.html")
+        parallel_coord_fig.write_image(f"results/optuna/{study_name}_parallel_coord.png", scale=2)
+        
+        logger.info(f"Visualization results saved in results/optuna/")
+        
+    except Exception as e:
+        logger.warning(f"Failed to create visualizations: {e}")
+        logger.warning("Please install kaleido: pip install kaleido")
+    
+    # 최적의 하이퍼파라미터 출력
+    logger.info("Best trial:")
+    logger.info(f"  Value: {study.best_trial.value:.4f}")
+    for key, value in study.best_trial.params.items():
+        logger.info(f"    {key}: {value}")
+        setattr(args, key, value)
+    
+    # 최적의 하이퍼파라미터로 full training 진행
+>>>>>>> Stashed changes
     if args.few_shot:
         train_loader_few_s = get_few_shot_graph_samples(train_loader_full_s, args)
         val_loader_few_s = val_loader_full_s
         test_loader_few_s = test_loader_s
-        #pdb.set_trace() #이상 없음
     else:
         train_loader_few_s = train_loader_full_s
         val_loader_few_s = val_loader_full_s
         test_loader_few_s = test_loader_s
+
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
     model_full = Model(args, args.input_dim, args.hidden_dim, num_classes).to(device)
@@ -353,7 +436,6 @@ def main():
     optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
     optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
     
-
     logger.info(f"[Source-Only: Full] Start Training..")
 
     (train_losses_full, val_losses_full,
