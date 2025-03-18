@@ -26,7 +26,7 @@ p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-#os.environ["CUDA_VISIBLE_DEVICES"]="4"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
@@ -40,7 +40,7 @@ def get_args():
     parser.add_argument('--input_dim', type = int, default = 768)
     parser.add_argument('--hidden_dim', type = int, default = 128)
     parser.add_argument('--output_dim', type = int, default = 1)
-    parser.add_argument('--num_layers', type = int, default = 1)
+    parser.add_argument('--num_layers', type = int, default = 2)
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
     parser.add_argument('--meta_dropout_rate', type = float, default = 0.1)
     parser.add_argument('--aggr_attn_dropout_rate', type = float, default = 0.1)
@@ -287,7 +287,7 @@ def main():
     model_full = model_full.to(device)
     model_few = model_few.to(device)
     optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-4)
+    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
 
 
     if args.few_shot == 4:

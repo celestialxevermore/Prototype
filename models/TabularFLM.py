@@ -61,9 +61,9 @@ class Meta(nn.Module):
         if self.meta_type == 'meta_attn':
             name_desc_embeddings = torch.cat([name_embeddings, desc_embeddings], dim = -1)
             name_desc_embeddings = self.name_desc_mlp(name_desc_embeddings)
-            Q = self.W_q(name_desc_embeddings)
-            K = self.W_k(label_description_embeddings)
-            V = self.W_v(label_description_embeddings)
+            Q = self.W_q(label_description_embeddings)
+            K = self.W_k(name_desc_embeddings)
+            V = self.W_v(name_desc_embeddings)
             attention_weights = torch.bmm(Q, K.transpose(1, 2))
             attention_weights = attention_weights / self.scaling
             attention_weights = F.softmax(attention_weights, dim=-1)
@@ -181,6 +181,8 @@ class Model(nn.Module):
                 nn.Linear(hidden_dim, 1)
             ).to(self.device)
         elif (self.args.aggr_type == 'attn'):
+            self.cls = nn.Parameter(torch.randn(1, 1, self.input_dim))
+            
             self.feature_attentions = nn.ModuleList([
                 SimpleAttention(embed_dim=self.input_dim) 
                 for _ in range(self.args.num_layers)
@@ -285,13 +287,13 @@ class Model(nn.Module):
             pred = self.predictor(sample_embeddings)
         elif self.args.aggr_type == 'attn':
             attention_output = sample_embeddings
-            pdb.set_trace()
             B, F ,D = attention_output.shape
+            cls_token = self.cls.expand(B, -1, -1)
+            attention_output = torch.cat([cls_token, attention_output], dim=1)
             for attention_layer in self.feature_attentions:
                 attention_output, _ = attention_layer(attention_output)
-            pred = self.attention_flatten_head(attention_output)
-            pred = pred.reshape(B, F, D)
-            pred = pred.mean(dim=1)
+            pred = attention_output[:, 0, :]
+            #pred = attention_output.mean(dim=1)
             pred = self.predictor(pred)
         return pred
 
