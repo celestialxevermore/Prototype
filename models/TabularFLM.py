@@ -7,7 +7,8 @@ import pdb
 from sklearn.preprocessing import PowerTransformer, StandardScaler
 import json
 import os
-
+from torch import Tensor
+import math
 class SimpleAttention(nn.Module):
     def __init__(self, embed_dim, use_residual=True):
         super().__init__()
@@ -19,14 +20,19 @@ class SimpleAttention(nn.Module):
         self.W_k = nn.Linear(embed_dim, embed_dim, bias = False)
         self.W_v = nn.Linear(embed_dim, embed_dim, bias = False)
         
-    def forward(self, x):
+    def forward(self, x, attn_mask = None):
+
         Q = self.W_q(x)
         K = self.W_k(x)
         V = self.W_v(x)
         attention_weights = torch.bmm(Q, K.transpose(1, 2))
         attention_weights = attention_weights / self.scaling
+
+        if attn_mask is not None:
+            attention_weights = attention_weights + attn_mask 
+
         attention_weights = F.softmax(attention_weights, dim=-1)
-        
+
         out = torch.bmm(attention_weights, V)
         if self.use_residual:
             out = out + x  # residual connection
@@ -69,41 +75,6 @@ class Meta(nn.Module):
             attention_weights = F.softmax(attention_weights, dim=-1)
             meta_attn_out = torch.bmm(attention_weights, V)
             return meta_attn_out, attention_weights
-
-
-class FlattenHead(nn.Module):
-    def __init__(self, args, hidden_dim, output_dim):
-        super(FlattenHead, self).__init__()
-        self.args = args
-        self.input_dim = args.input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim 
-        self.dropout_rate = args.dropout_rate
-        self.projector = None  # 나중에 초기화
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    def _initialize_projector(self, num_features, D):
-        self.projector = nn.Sequential(
-            nn.Linear(num_features * D, self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-            
-            nn.Linear(self.hidden_dim, num_features * D)
-        ).to(self.device)
-        
-    def forward(self, x):
-        B, F, D = x.shape  # F: (cat, num)
-        if self.projector is None:
-            self._initialize_projector(F, D)
-        x = x.reshape(B, F*D)
-        #pdb.set_trace()
-        x = self.projector(x)
-        return x 
-
             
 
 class Model(nn.Module):
@@ -124,7 +95,7 @@ class Model(nn.Module):
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
-        
+
         # Meta-embedding MLP
         self.name_desc_mlp = nn.Sequential(
             nn.Linear(2 * self.input_dim, self.input_dim),
@@ -164,9 +135,7 @@ class Model(nn.Module):
 
 
         ### self.args.aggr_type ###
-        if self.args.aggr_type == 'flatten':
-            self.flatten_head = FlattenHead(args, hidden_dim, output_dim).to(self.device)
-        elif (self.args.aggr_type == 'mean'):
+        if (self.args.aggr_type == 'mean'):
             self.predictor = nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim),
@@ -181,8 +150,8 @@ class Model(nn.Module):
                 nn.Linear(hidden_dim, 1)
             ).to(self.device)
         elif (self.args.aggr_type == 'attn'):
-            self.cls = nn.Parameter(torch.randn(1, 1, self.input_dim))
-            
+            self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
+            nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
             self.feature_attentions = nn.ModuleList([
                 SimpleAttention(embed_dim=self.input_dim) 
                 for _ in range(self.args.num_layers)
@@ -201,8 +170,20 @@ class Model(nn.Module):
 
                 nn.Linear(hidden_dim, 1)
             ).to(self.device)
-            self.attention_flatten_head = FlattenHead(args, hidden_dim, output_dim).to(self.device)
     
+    def build_prune_to_readout_mask(self, batch_size, num_tokens):
+        """
+            T2GFormer-like prune_to_readout:
+                - block (i>0, col=0) so that row = i doesn't attent col=0
+                - keep (row = 0, col=j>0) open so [CLS] can gather from features
+        """
+        mask = torch.zeros(num_tokens, num_tokens) # shape [F, F]
+        mask[1:,0] = -10000
+        mask = mask.unsqueeze(0).expand(batch_size, -1, -1)
+        return mask 
+
+
+
     def forward(self, batch, y):
         pred = self.predict(batch)
         target = y.to(self.device).view(-1,1).float()
@@ -230,13 +211,11 @@ class Model(nn.Module):
 
             elif self.args.meta_type == 'meta_attn':
                 meta_cat_embeddings, meta_weights = self.meta_level(cat_name_embeddings, cat_desc_embeddings, label_description_embeddings)
-                
+                pdb.set_trace()
                 if self.args.enc_type == 'ind':
                     concat_cat_value_embeddings = torch.cat([cat_value_embeddings, meta_cat_embeddings], dim=-1)
                     final_cat_value_embeddings = self.cat_val_mlp(concat_cat_value_embeddings) + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
-                    #final_cat_value_embeddings_ = self.cat_val_mlp(concat_cat_value_embeddings) + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
-                    #final_cat_value_embeddings = final_cat_value_embeddings_ + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
-                
+                    
                 elif self.args.enc_type == 'shared':
                     concat_cat_value_embeddings = torch.cat([cat_value_embeddings, meta_cat_embeddings], dim=-1)
                     final_cat_value_embeddings = self.shared_val_mlp(concat_cat_value_embeddings) + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
@@ -262,8 +241,6 @@ class Model(nn.Module):
                 if self.args.enc_type == 'ind':
                     num_value_embeddings = self.num_val_mlp(concat_num_value_embeddings) 
                     final_num_value_embeddings = num_value_embeddings+ column_weights.expand(-1,-1,self.input_dim) * num_value_embeddings
-                    #final_cat_value_embeddings_ = self.cat_val_mlp(final_num_value_embeddings) + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
-                    #final_cat_value_embeddings = final_cat_value_embeddings_ + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
                 elif self.args.enc_type == 'shared':
                     num_value_embeddings = self.shared_val_mlp(concat_num_value_embeddings)
                     final_num_value_embeddings = num_value_embeddings + column_weights.expand(-1,-1,self.input_dim) * num_value_embeddings
@@ -274,26 +251,25 @@ class Model(nn.Module):
         else:
             raise ValueError("Neither categorical nor numerical features found in batch")
 
-        #pdb.set_trace()
         if self.args.label == 'add':
             sample_embeddings = torch.concat([label_description_embeddings, sample_embeddings], dim=1)
 
-        if self.args.aggr_type == 'flatten':
-            sample_embeddings = self.flatten_head(sample_embeddings) # B x (cat+num) x D
-            pred = sample_embeddings.mean(dim=1).reshape(-1,1)
         
-        elif self.args.aggr_type == 'mean':
+        if self.args.aggr_type == 'mean':
             sample_embeddings = sample_embeddings.mean(dim=1)
             pred = self.predictor(sample_embeddings)
         elif self.args.aggr_type == 'attn':
             attention_output = sample_embeddings
             B, F ,D = attention_output.shape
+            
             cls_token = self.cls.expand(B, -1, -1)
             attention_output = torch.cat([cls_token, attention_output], dim=1)
+
+            attn_mask = self.build_prune_to_readout_mask(B,F + 1).to(self.device)
+
             for attention_layer in self.feature_attentions:
-                attention_output, _ = attention_layer(attention_output)
+                attention_output, _ = attention_layer(attention_output, attn_mask)
             pred = attention_output[:, 0, :]
-            #pred = attention_output.mean(dim=1)
             pred = self.predictor(pred)
         return pred
 

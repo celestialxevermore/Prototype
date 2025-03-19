@@ -16,7 +16,7 @@ for few_shot in $few_shots; do
                             CUDA_VISIBLE_DEVICES=$gpu_id python main.py \
                             --random_seed 1993 \
                             --source_dataset_name $source_dataset \
-                            --base_dir 'Experiment_TabularFLM4' \
+                            --base_dir 'Experiment_TabularFLM5' \
                             --few_shot $few_shot \
                             --train_epochs 1000 \
                             --label $label \
