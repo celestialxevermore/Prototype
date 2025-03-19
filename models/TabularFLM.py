@@ -67,13 +67,13 @@ class Meta(nn.Module):
         if self.meta_type == 'meta_attn':
             name_desc_embeddings = torch.cat([name_embeddings, desc_embeddings], dim = -1)
             name_desc_embeddings = self.name_desc_mlp(name_desc_embeddings)
-            Q = self.W_q(label_description_embeddings)
-            K = self.W_k(name_desc_embeddings)
-            V = self.W_v(name_desc_embeddings)
-            attention_weights = torch.bmm(Q, K.transpose(1, 2))
+            Q = self.W_q(name_desc_embeddings)
+            K = self.W_k(label_description_embeddings)
+            V = self.W_v(label_description_embeddings)
+            attention_weights = torch.matmul(Q, K.transpose(1, 2))
             attention_weights = attention_weights / self.scaling
             attention_weights = F.softmax(attention_weights, dim=-1)
-            meta_attn_out = torch.bmm(attention_weights, V)
+            meta_attn_out = torch.matmul(attention_weights, V)
             return meta_attn_out, attention_weights
             
 
@@ -88,7 +88,6 @@ class Model(nn.Module):
         self.input_dim = input_dim
         self.num_layers = num_layers
         self.source_dataset_name = args.source_dataset_name
-        self.cls_token = nn.Parameter(torch.randn(1, 1, args.input_dim))
         num_layers = args.num_layers
         dropout_rate = args.dropout_rate
         llm_model = args.llm_model
@@ -211,17 +210,18 @@ class Model(nn.Module):
 
             elif self.args.meta_type == 'meta_attn':
                 meta_cat_embeddings, meta_weights = self.meta_level(cat_name_embeddings, cat_desc_embeddings, label_description_embeddings)
-                pdb.set_trace()
+                
                 if self.args.enc_type == 'ind':
+                    
                     concat_cat_value_embeddings = torch.cat([cat_value_embeddings, meta_cat_embeddings], dim=-1)
+                    
                     final_cat_value_embeddings = self.cat_val_mlp(concat_cat_value_embeddings) + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
                     
                 elif self.args.enc_type == 'shared':
                     concat_cat_value_embeddings = torch.cat([cat_value_embeddings, meta_cat_embeddings], dim=-1)
                     final_cat_value_embeddings = self.shared_val_mlp(concat_cat_value_embeddings) + meta_weights.expand(-1,-1,self.input_dim) * cat_value_embeddings
             sample_embeddings.append(final_cat_value_embeddings)
-        #pdb.set_trace()
-        # Numerical features 처리
+
         if all(k in batch for k in ['num_name_embeddings', 'num_desc_embeddings', 'num_prompt_embeddings']):
             num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
             num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
