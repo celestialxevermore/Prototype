@@ -19,7 +19,7 @@ from utils.train_test import binary_train, binary_evaluate, multi_train, multi_e
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM import Model
+from models.TabularFLM_G import Model
 import psutil 
 from torch_geometric.data import Batch
 p = psutil.Process()
@@ -40,7 +40,7 @@ def get_args():
     parser.add_argument('--input_dim', type = int, default = 768)
     parser.add_argument('--hidden_dim', type = int, default = 128)
     parser.add_argument('--output_dim', type = int, default = 1)
-    parser.add_argument('--num_layers', type = int, default = 2)
+    parser.add_argument('--num_layers', type = int, default = 3)
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
     parser.add_argument('--meta_dropout_rate', type = float, default = 0.1)
     parser.add_argument('--aggr_attn_dropout_rate', type = float, default = 0.1)
@@ -48,7 +48,7 @@ def get_args():
     parser.add_argument('--shared_dropout_rate', type = float, default = 0.1)
     parser.add_argument('--flatten_dropout_rate', type = float, default = 0.3)
     parser.add_argument('--threshold', type = float, default = 0.5)
-    parser.add_argument('--heads', type = int, default = 4)
+    parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_dataset_name', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland'])

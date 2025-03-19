@@ -384,7 +384,7 @@ def save_results_(args, results):
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.heads}_{timestamp}.json"
+    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.n_heads}_{timestamp}.json"
     filepath = os.path.join(exp_dir, filename)
 
     data = {
@@ -402,7 +402,7 @@ def save_results_(args, results):
             "dropout_rate": args.dropout_rate,
             "hidden_dim": args.hidden_dim,
             "num_layers": args.num_layers,
-            "heads": args.heads,
+            "num_heads": args.n_heads,
             "meta_heads": args.meta_heads,
             "meta_num_layers": args.meta_num_layers,
             "few_shot": args.few_shot,

@@ -11,41 +11,88 @@ from torch import Tensor
 import math
 import torch.nn.init as nn_init
 
-class SimpleAttention(nn.Module):
-    def __init__(self, embed_dim, use_residual=True):
+class MultiheadAttention(nn.Module):
+    def __init__(self, embed_dim, n_heads=4, use_residual=True, dropout=0.1):
         super().__init__()
+        assert embed_dim % n_heads == 0
         self.embed_dim = embed_dim
-        self.scaling = torch.sqrt(torch.tensor(embed_dim).float())
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
         self.use_residual = use_residual
+        self.dropout = dropout
         
+        # Q, K, V 투영 레이어
         self.W_q = nn.Linear(embed_dim, embed_dim, bias=False)
         self.W_k = nn.Linear(embed_dim, embed_dim, bias=False)
         self.W_v = nn.Linear(embed_dim, embed_dim, bias=False)
+        
+        # 출력 투영 레이어
+        self.W_out = nn.Linear(embed_dim, embed_dim)
+        
+        # 드롭아웃
+        self.attn_dropout = nn.Dropout(dropout)
         
         # 가중치 초기화
         nn_init.xavier_uniform_(self.W_q.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.W_k.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.W_v.weight, gain=1 / math.sqrt(2))
-
-    def forward(self, x, attn_mask = None):
-
-        Q = self.W_q(x)
-        K = self.W_k(x)
-        V = self.W_v(x)
-        attention_weights = torch.bmm(Q, K.transpose(1, 2))
-        attention_weights = attention_weights / self.scaling
-
-        if attn_mask is not None:
-            attention_weights = attention_weights + attn_mask 
-
-        attention_weights = F.softmax(attention_weights, dim=-1)
-
-        out = torch.bmm(attention_weights, V)
-        if self.use_residual:
-            out = out + x  # residual connection
-            
-        return out, attention_weights
+        nn_init.xavier_uniform_(self.W_out.weight)
+        nn_init.zeros_(self.W_out.bias)
     
+    def _split_heads(self, x):
+        """텐서를 (batch_size, seq_len, n_heads, head_dim) 형태로 분할"""
+        batch_size, seq_len, _ = x.shape
+        x = x.view(batch_size, seq_len, self.n_heads, self.head_dim)
+        return x.permute(0, 2, 1, 3)  # (batch_size, n_heads, seq_len, head_dim)
+    
+    def _merge_heads(self, x):
+        """헤드 결과를 다시 합침"""
+        batch_size, _, seq_len, _ = x.shape
+        x = x.permute(0, 2, 1, 3)  # (batch_size, seq_len, n_heads, head_dim)
+        return x.reshape(batch_size, seq_len, self.embed_dim)
+    
+    def forward(self, x, attn_mask=None):
+        # 원본 입력 저장 (residual 연결용)
+        residual = x
+        batch_size, seq_len, _ = x.shape
+        
+        # 선형 투영
+        q = self.W_q(x)
+        k = self.W_k(x)
+        v = self.W_v(x)
+        
+        # 헤드 분할
+        q = self._split_heads(q)  # (batch_size, n_heads, seq_len, head_dim)
+        k = self._split_heads(k)  # (batch_size, n_heads, seq_len, head_dim)
+        v = self._split_heads(v)  # (batch_size, n_heads, seq_len, head_dim)
+        
+        # 스케일링된 닷-프로덕트 어텐션
+        scaling = float(self.head_dim) ** -0.5
+        scores = torch.matmul(q, k.transpose(-1, -2)) * scaling  # (batch_size, n_heads, seq_len, seq_len)
+        
+        # 마스크 적용 (필요한 경우)
+        if attn_mask is not None:
+            # 마스크를 헤드 차원에 맞게 확장
+            attn_mask = attn_mask.unsqueeze(1)  # (batch_size, 1, seq_len, seq_len)
+            scores = scores + attn_mask
+        
+        # 소프트맥스 및 드롭아웃 적용
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+        
+        # 값에 가중치 적용 및 헤드 합치기
+        context = torch.matmul(attn_weights, v)  # (batch_size, n_heads, seq_len, head_dim)
+        context = self._merge_heads(context)  # (batch_size, seq_len, embed_dim)
+        
+        # 최종 선형 투영
+        output = self.W_out(context)
+        
+        # residual 연결 적용
+        if self.use_residual:
+            output = output + residual
+        
+        return output, attn_weights
+
 class Meta(nn.Module):
     def __init__(self, args, input_dim, hidden_dim, enc_type, meta_type):
         super().__init__()
@@ -112,10 +159,6 @@ class Model(nn.Module):
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
-
-        # cls_token 초기화
-        self.cls = nn.Parameter(torch.randn(1, 1, args.input_dim))
-        nn_init.kaiming_uniform_(self.cls, a=math.sqrt(5))
         
         # MLP 초기화 함수 정의
         def init_mlp(module):
@@ -166,30 +209,22 @@ class Model(nn.Module):
             ).to(self.device)
             init_mlp(self.shared_val_mlp)
 
-        ### self.args.aggr_type ###
-        if (self.args.aggr_type == 'mean'):
-            self.predictor = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
-
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
-                
-                nn.Linear(hidden_dim, 1)
-            ).to(self.device)
-            init_mlp(self.predictor)
-        elif (self.args.aggr_type == 'attn'):
+        
+        if (self.args.aggr_type == 'attn'):
             self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
             nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
+            
             self.feature_attentions = nn.ModuleList([
-                SimpleAttention(embed_dim=self.input_dim) 
+                MultiheadAttention(
+                    embed_dim=self.input_dim,
+                    n_heads=args.n_heads if hasattr(args, 'n_heads') else 4,  # 기본값 4
+                    use_residual=True,
+                    dropout=dropout_rate
+                ) 
                 for _ in range(self.args.num_layers)
             ])  
             self.feature_attentions = self.feature_attentions.to(self.device)
+            
             self.predictor = nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim),
@@ -215,8 +250,6 @@ class Model(nn.Module):
         mask[1:,0] = -10000
         mask = mask.unsqueeze(0).expand(batch_size, -1, -1)
         return mask 
-
-
 
     def forward(self, batch, y):
         pred = self.predict(batch)
@@ -289,18 +322,14 @@ class Model(nn.Module):
         if self.args.label == 'add':
             sample_embeddings = torch.concat([label_description_embeddings, sample_embeddings], dim=1)
 
-        
-        if self.args.aggr_type == 'mean':
-            sample_embeddings = sample_embeddings.mean(dim=1)
-            pred = self.predictor(sample_embeddings)
-        elif self.args.aggr_type == 'attn':
+        if self.args.aggr_type == 'attn':
             attention_output = sample_embeddings
-            B, F ,D = attention_output.shape
+            B, F, D = attention_output.shape
             
             cls_token = self.cls.expand(B, -1, -1)
             attention_output = torch.cat([cls_token, attention_output], dim=1)
 
-            attn_mask = self.build_prune_to_readout_mask(B,F + 1).to(self.device)
+            attn_mask = self.build_prune_to_readout_mask(B, F + 1).to(self.device)
 
             for attention_layer in self.feature_attentions:
                 attention_output, _ = attention_layer(attention_output, attn_mask)
