@@ -112,14 +112,22 @@ class AdaptiveGraphAttention(nn.Module):
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
 
-        if edge_attr is not None:
-            edge_attr = self.edge_update(edge_attr)
-            edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
-            edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
-            edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
 
-        attn_weights = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
-        
+        edge_attr = self.edge_update(edge_attr)
+        edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+        edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+        edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+
+        q_expanded = q.unsqueeze(3)
+        k_expanded = k.unsqueeze(2)
+        qke_expanded = torch.cat([
+            q_expanded.expand(-1,-1,-1, new_seq, -1),
+            k_expanded.expand(-1,-1, new_seq, -1, -1),
+            edge_attr
+        ], dim = -1)
+
+        attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+
         # Attention mask - adjacency matrix = 0인 곳은 차단. 
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
@@ -129,6 +137,7 @@ class AdaptiveGraphAttention(nn.Module):
         context = torch.matmul(attn_weights, v)
         context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
         output = self.out_proj(context)
+        #pdb.set_trace()
         return output, attn_weights
             
 class Model(nn.Module):
@@ -243,8 +252,6 @@ class Model(nn.Module):
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
         name_embeddings = torch.cat(name_embeddings, dim = 1)
         value_embeddings = torch.cat(value_embeddings, dim = 1)
-
-
         '''
             0. Name & Value Embedding
         '''
