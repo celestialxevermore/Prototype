@@ -21,12 +21,10 @@ class MultiheadAttention(nn.Module):
         self.use_residual = use_residual
         self.dropout = dropout
         
-        # Q, K, V 투영 레이어
         self.W_q = nn.Linear(embed_dim, embed_dim, bias=False)
         self.W_k = nn.Linear(embed_dim, embed_dim, bias=False)
         self.W_v = nn.Linear(embed_dim, embed_dim, bias=False)
         
-        # 출력 투영 레이어
         self.W_out = nn.Linear(embed_dim, embed_dim)
         
         # 드롭아웃
