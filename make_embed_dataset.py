@@ -6,7 +6,7 @@ import os
 import sys
 import pickle, torch, random
 import argparse, pdb
-from utils.table_to_embedding import Table2EmbeddingTransformer
+from utils.table_to_embedding_new import Table2EmbeddingTransformer
 
 class TabularToEmbeddingDataset:
     def __init__(self, args, base_path: str = "/storage/personal/eungyeop/dataset/table/"):
@@ -69,7 +69,7 @@ class TabularToEmbeddingDataset:
         
         # 저장 경로 설정
         base_save_path = "/storage/personal/eungyeop/dataset/embedding"
-        sub_dir = "tabular_embeddings"
+        sub_dir = "tabular_embeddings_new"
         
         save_dir = os.path.join(base_save_path, sub_dir)
         os.makedirs(save_dir, exist_ok=True)

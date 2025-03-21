@@ -40,10 +40,10 @@ for few_shot in $few_shots; do
     for source_dataset in $source_datasets; do
 
         echo "Running experiment for $source_dataset with $shot few-shot samples in random_seed:1993"
-        CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
+        CUDA_VISIBLE_DEVICES=$gpu_id python main_G2.py \
         --random_seed 1993 \
         --source_dataset_name $source_dataset \
-        --base_dir 'Experiment_TabularFLM_G3' \
+        --base_dir 'Experiment_TabularFLM_G4' \
         --few_shot $few_shot \
         --train_epochs 1000 \
         --model_type "TabularFLM"

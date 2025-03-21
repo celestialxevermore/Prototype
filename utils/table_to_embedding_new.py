@@ -125,7 +125,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             metadata = json.load(f)
             # target_binary 키에 해당하는 description을 가져옴
             label_description = metadata.get('target_binary')
-            #pdb.set_trace()
+            
             if label_description is None:
                 raise ValueError("target_binary description not found in metadata")
         return label_description
@@ -225,17 +225,11 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
 
         return embedding_data
 
-    def _transform_cat(self, X_categorical, cat_name_to_description):
-        name_embeddings = []
-        desc_embeddings = [] 
-        value_embeddings = [] 
+    def _transform_cat(self, X_categorical, X_categorical_total, cat_name_to_description):
+        cat_name_value_embeddings = [] 
+        desc_embeddings = []
         for feature_name in X_categorical.columns:
-            # Name embedding
-            name_input = self.tokenizer(feature_name, return_tensors="pt", padding=True, truncation=True)
             
-            with torch.no_grad():
-                name_emb = self.llm_model(**name_input).last_hidden_state.mean(dim=1)
-                name_embeddings.append(name_emb)
             # Description embedding
             desc = cat_name_to_description[feature_name]
             desc_input = self.tokenizer(desc, return_tensors="pt", padding=True, truncation=True)
@@ -243,17 +237,23 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 desc_emb = self.llm_model(**desc_input).last_hidden_state.mean(dim=1)
                 desc_embeddings.append(desc_emb)
             # Value embeddings
-            values = X_categorical[feature_name].values[0]
+            current_value = X_categorical[feature_name].values[0]
+            unique_values = X_categorical_total[feature_name].unique() 
+            name_value_text = (
+                f"<|start_prompt|>"
+                f"{feature_name} can have these values: {','.join(unique_values)} "
+                f"Current value is {current_value}."
+                f"<|end_prompt|>"
+            )
             
-            value_input = self.tokenizer(values, return_tensors="pt", padding=True, truncation=True)
+            name_value_input = self.tokenizer(name_value_text, return_tensors="pt", padding=True, truncation=True)
             with torch.no_grad():
-                value_emb = self.llm_model(**value_input).last_hidden_state.mean(dim=1)
-                value_embeddings.append(value_emb)
-            
-        name_embeddings = torch.stack(name_embeddings, dim=0)
-        desc_embeddings = torch.stack(desc_embeddings, dim=0)
-        value_embeddings = torch.stack(value_embeddings, dim=0)
-        return name_embeddings, desc_embeddings, value_embeddings
+                name_value_emb = self.llm_model(**name_value_input).last_hidden_state.mean(dim=1)
+                cat_name_value_embeddings.append(name_value_emb)
+        
+        cat_name_value_embeddings = torch.stack(cat_name_value_embeddings, dim = 0)
+        desc_embeddings = torch.stack(desc_embeddings, dim = 0)
+        return cat_name_value_embeddings, desc_embeddings
     
 
 
@@ -265,7 +265,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             X_num = self.num_transformer.transform(X_num)
         return X_num 
     
-    def _transform_num_raw(self, x_num_raw, num_name_to_desriptions):
+    def _transform_num_raw(self, x_num_raw, X_numerical_raw_total, num_name_to_desriptions):
         """
             수치형 데이터의 임베딩을 생성 (단일 샘플)
             Args:
@@ -277,48 +277,72 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 desc_embeddings: (n_num_features, embed_dim)
                 prompt_embeddings: (n_num_features, embed_dim)
         """
-        name_embeddings = []
         desc_embeddings = []
         prompt_embeddings = [] 
         for i, col_name in enumerate(self.num_col_names):
             # Name embedding
-            name_input = self.tokenizer(col_name, return_tensors="pt", padding=True, truncation=True)
-            with torch.no_grad():
-                name_emb = self.llm_model(**name_input).last_hidden_state.mean(dim=1)
-                name_embeddings.append(name_emb)
-            # Description embedding
-            desc = num_name_to_desriptions.get(col_name, col_name)
             
+            desc = num_name_to_desriptions.get(col_name, col_name)
             desc_input = self.tokenizer(desc, return_tensors="pt", padding=True, truncation=True)
             with torch.no_grad():
                 desc_emb = self.llm_model(**desc_input).last_hidden_state.mean(dim=1)
                 desc_embeddings.append(desc_emb)
 
-            col_values = x_num_raw[col_name].values
-            min_val = col_values.min().item()
-            max_val = col_values.max().item()
-            mean_val = col_values.mean().item()
-            std_val = col_values.std().item()
 
+
+
+            col_values = x_num_raw[col_name].values
+            value = col_values[0]
+
+            min_val = X_numerical_raw_total[col_name].min()
+            max_val = X_numerical_raw_total[col_name].max()
+            mean_val = X_numerical_raw_total[col_name].mean() 
+            std_val = X_numerical_raw_total[col_name].std() 
+
+            relative_position = ""
+            if abs(value - mean_val) < 0.1:
+                relative_position = "equal to"
+            elif value > mean_val:
+                std_diff = (value - mean_val) / std_val
+                relative_position = f"{std_diff:.2f} standard deviations above"
+            else:
+                std_diff = (mean_val - value) / std_val
+                relative_position = f"{std_diff:.2f} standard deviations below"
+            
+            bin_category = ""
+            z_score = (value - mean_val) / std_val if std_val > 0 else 0 
+            
+            if abs(z_score) <= 0.5:
+                bin_category = "Within normal range (close to mean)"
+            elif z_score >0.5 and z_score < 1.5:
+                bin_category = "Moderately above mean"
+            elif z_score >=1.5:
+                bin_category = "Significantly above mean"
+            elif z_score <=-0.5 and z_score > -1.5:
+                bin_category = "Moderately below mean"
+            else:
+                bin_category = "Significantly below mean"
+            
             prompt = (
                 f"<|start_prompt|>"
                 f"The distribution of the column {col_name} is as follows: "
                 f"Column Name: {col_name}."
-                f"Statistics: Min = {min_val:.2f}, Max = {max_val:.2f}, "
+                f"Min = {min_val:.2f}, Max = {max_val:.2f}, "
                 f"Mean = {mean_val:.2f}, Std = {std_val:.2f}. "
-                "<|end_prompt|>"
+                f"Current value: {col_name} = {value:.2f}, which is {relative_position}."
+                f"Relative position: This value {value:.2f} falls in the '{bin_category}' of the distribution."
+                f"<|end_prompt|>"
             )
 
             prompt_input = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+
             with torch.no_grad():
                 prompt_emb = self.llm_model(**prompt_input).last_hidden_state.mean(dim=1)
                 prompt_embeddings.append(prompt_emb)
-            #pdb.set_trace()
-        name_embeddings = torch.stack(name_embeddings, dim=0)
         desc_embeddings = torch.stack(desc_embeddings, dim=0)
         prompt_embeddings = torch.stack(prompt_embeddings, dim=0)
 
-        return name_embeddings, desc_embeddings, prompt_embeddings
+        return prompt_embeddings, desc_embeddings 
     
 
     def _get_embeddings(self, X_categorical, X_numerical, X_numerical_raw, cat_name_to_description, num_name_to_description, y, idx):
@@ -355,18 +379,22 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         if len(X_categorical.columns) > 0:
             data_cat = X_categorical.iloc[idx]
             data_cat = data_cat.dropna()
+            
             num_cat = len(data_cat)
             if num_cat != 0:
-                data_cat = data_cat.str.replace("\n", " ", regex=True).str.lower()
-                cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings = self._transform_cat(
+                data_cat = data_cat.str.replace("\n", " ", regex=True)
+
+                cat_name_value_embeddings, cat_desc_embeddings = self._transform_cat(
                     pd.DataFrame(data_cat).T,
+                    X_categorical,
                     cat_name_to_description)
                 
                 data.update({
-                    'cat_name_embeddings': cat_name_embeddings,
+                    'cat_name_value_embeddings': cat_name_value_embeddings,
                     'cat_desc_embeddings': cat_desc_embeddings,
-                    'cat_value_embeddings': cat_value_embeddings,
                 })
+
+
 
         # Numerical features exist
         if len(X_numerical.columns) > 0:
@@ -376,8 +404,9 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             
             data_num_raw = X_numerical_raw.iloc[idx]
             data_num_raw = data_num_raw.dropna()
-            num_name_embeddings, num_desc_embeddings, num_prompt_embeddings = self._transform_num_raw(
+            num_prompt_embeddings , num_desc_embeddings = self._transform_num_raw(
                 pd.DataFrame(data_num_raw).T,
+                X_numerical_raw,
                 num_name_to_description
             )
         
@@ -389,9 +418,9 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 num_prompt_embeddings = num_prompt_embeddings.reshape(0, self.n_components)
             
             data.update({
-                'num_name_embeddings': num_name_embeddings,
-                'num_desc_embeddings': num_desc_embeddings,
                 'num_prompt_embeddings': num_prompt_embeddings,
+                'num_desc_embeddings': num_desc_embeddings,
+                
             })
         
         return data

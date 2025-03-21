@@ -46,7 +46,7 @@ class AdaptiveGraphAttention(nn.Module):
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
         self.v_proj = nn.Linear(input_dim, input_dim)
-        self.attn_proj = nn.Linear(self.head_dim * 3, 1)  # [q | k | edge_attr] -> attention score
+        self.attn_proj = nn.Linear(self.head_dim * 3, 1)   # [q | k | edge_attr] -> attention score
         
         
         self.out_proj = nn.Linear(input_dim, input_dim)
@@ -55,7 +55,45 @@ class AdaptiveGraphAttention(nn.Module):
         nn_init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
+    
+    def _no_self_interaction(self, adjacency_matrix):
+        batch_size, seq_len, _ = adjacency_matrix.shape
+        diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
+        return adjacency_matrix * diag_mask
 
+    def _debug_fr_graph(self, global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency):
+        """
+        FR-Graph 생성 과정의 디버깅 정보를 출력하는 함수
+        """
+        print(f"global_topology 범위: 최소={global_topology.min().item():.4f}, 최대={global_topology.max().item():.4f}")
+        print(f"global_topology 평균: {global_topology.mean().item():.4f}")
+        
+        print(f"sample_sim 범위: 최소={sample_sim.min().item():.4f}, 최대={sample_sim.max().item():.4f}")
+        print(f"sample_sim 평균: {sample_sim.mean().item():.4f}")
+        
+        print(f"adjacency_matrix 범위: 최소={adjacency_matrix.min().item():.4f}, 최대={adjacency_matrix.max().item():.4f}")
+        print(f"adjacency_matrix 평균: {adjacency_matrix.mean().item():.4f}")
+        print(f"임계값: {self.threshold}")
+        
+        print(f"adjacency 범위: 최소={adjacency.min().item():.4f}, 최대={adjacency.max().item():.4f}")
+        print(f"adjacency 평균: {adjacency.mean().item():.4f}")
+        
+        # 임계값 이상 엣지 비율 계산
+        threshold_ratio = (global_topology_A > 0).float().mean().item()
+        print(f"임계값 이상 엣지 비율: {threshold_ratio:.4f}")
+        
+        # 범위별 분포 분석
+        adj_flat = adjacency.flatten()
+        min_val = adj_flat.min().item()
+        max_val = adj_flat.max().item()
+        num_bins = 10
+        step = (max_val - min_val) / num_bins
+        
+        for i in range(num_bins):
+            lower = min_val + i * step
+            upper = min_val + (i + 1) * step
+            count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
+            print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
 
     def forward(self, desc_embeddings, name_value_embeddings):
         batch_size, new_seq, _ = name_value_embeddings.shape
@@ -69,58 +107,25 @@ class AdaptiveGraphAttention(nn.Module):
         global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
         global_topology = torch.sigmoid(global_sim + self.topology_bias)
 
-        # 디버깅 - global_topology 값 분포
-        print(f"global_topology 범위: 최소={global_topology.min().item():.4f}, 최대={global_topology.max().item():.4f}")
-        print(f"global_topology 평균: {global_topology.mean().item():.4f}")
+        if not self.frozen:
+            global_topology_A = (global_topology > self.threshold).float() - global_topology.detach() + global_topology
+        else:
+            global_topology_A = (global_topology > self.threshold).float()
 
         '''
             2. Sample-wise Weight
         '''
-        # CLS를 제외한 name value embedding 사이의 유사도 
         var_embeddings = name_value_embeddings[:, 1:, :]
         var_embeddings_ = var_embeddings / var_embeddings.norm(dim=-1, keepdim=True)
         sample_sim = torch.matmul(var_embeddings_, var_embeddings_.transpose(-1, -2))
+
+        global_topology_A = self._no_self_interaction(global_topology_A)
+        G = global_topology_A * sample_sim 
+        adjacency = torch.softmax(G, dim=-1)
         
-        # # 디버깅 - sample_sim 값 분포
-        # print(f"sample_sim 범위: 최소={sample_sim.min().item():.4f}, 최대={sample_sim.max().item():.4f}")
-        # print(f"sample_sim 평균: {sample_sim.mean().item():.4f}")
-
-        adjacency_matrix = global_topology * sample_sim 
-
-        # print(f"adjacency_matrix 범위: 최소={adjacency_matrix.min().item():.4f}, 최대={adjacency_matrix.max().item():.4f}")
-        # print(f"adjacency_matrix 평균: {adjacency_matrix.mean().item():.4f}")
-
-        '''
-            3. Self Connection Delete
-        '''
-        diag_mask = 1.0 - torch.eye(seq_len, device = name_value_embeddings.device).unsqueeze(0)
-        adjacency = torch.sigmoid(adjacency_matrix * diag_mask)
-
-        # 디버깅 - 최종 adjacency 값 분포
-        # print(f"임계값: {self.threshold}")
-        # print(f"adjacency 범위: 최소={adjacency.min().item():.4f}, 최대={adjacency.max().item():.4f}")
-        # print(f"adjacency 평균: {adjacency.mean().item():.4f}")
-        # print(f"임계값 이상 엣지 비율: {(adjacency > self.threshold).float().mean().item():.4f}")
-
-        # 히스토그램 정보 출력
-        # adjacency_flat = adjacency.reshape(-1).cpu().detach().numpy()
-        # counts, bins = np.histogram(adjacency_flat, bins=10)
-        # for i in range(len(counts)):
-        #     print(f"범위 [{bins[i]:.4f}, {bins[i+1]:.4f}): {counts[i]} 개")
-
-        '''
-            5. Edge Pruning
+        # 디버깅: 필요시 주석 해제
+        # self._debug_fr_graph(global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency)
         
-        '''
-        if not self.frozen:
-            pruned_adjacency = (adjacency > self.threshold).float() - adjacency.detach() + adjacency
-            #prune_ratio = 1.0 - (pruned_adjacency > 0).float().mean().item()
-            #print(f"프루닝 비율: {prune_ratio:.4f} (값이 0인 엣지 비율)")
-        else:
-            pruned_adjacency = (adjacency > self.threshold).float()
-
-        adjacency = pruned_adjacency
-        #pdb.set_trace()
         '''
             4. Edge Attributes & Adjacency 
         '''
@@ -133,7 +138,7 @@ class AdaptiveGraphAttention(nn.Module):
         cls_edge_attr = torch.cat([
             desc_embeddings.unsqueeze(1),  # CLS->변수: 변수의 description
             desc_embeddings.unsqueeze(1)   # 변수->CLS: 동일한 description
-        ], dim=-1)  # [batch, 1, seq_len, dim*2]
+        ], dim=-1)
 
         # 3. Edge attribute 합치기
         edge_dim = var_edge_attr.size(-1)
@@ -149,7 +154,6 @@ class AdaptiveGraphAttention(nn.Module):
         '''
             5. Attention
         '''
-        # q, k, v projection
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
@@ -170,7 +174,6 @@ class AdaptiveGraphAttention(nn.Module):
 
         attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
 
-        # Attention mask - adjacency matrix = 0인 곳은 차단. 
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
@@ -179,7 +182,6 @@ class AdaptiveGraphAttention(nn.Module):
         context = torch.matmul(attn_weights, v)
         context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
         output = self.out_proj(context)
-        #pdb.set_trace()
         return output, attn_weights
             
 class Model(nn.Module):
@@ -283,8 +285,6 @@ class Model(nn.Module):
         if all(k in batch for k in ['num_name_embeddings', 'num_desc_embeddings', 'num_prompt_embeddings']):
             num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
             num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
-            
-            
             num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
             
             desc_embeddings.append(num_desc_embeddings)
@@ -304,7 +304,6 @@ class Model(nn.Module):
         name_value_embeddings = torch.cat([name_embeddings, value_embeddings], dim = -1)
         name_value_embeddings = self.sample_fusion(name_value_embeddings)
 
-
         '''
             1. [CLS] Token
         '''
@@ -321,6 +320,6 @@ class Model(nn.Module):
         return pred
 
     def froze_topology(self):
-        """그래프 구조를 고정하여 추가 학습 시 변경되지 않도록 함"""
+
         self.frozen = True
         logger.info("Graph topology frozen. Continuing with fixed structure.")

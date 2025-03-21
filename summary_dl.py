@@ -124,7 +124,7 @@ def process_json_files(directory_path):
 def main():
     parser = argparse.ArgumentParser(description='Summarize DL results')
     parser.add_argument('--base_dir', type=str, 
-                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_Experiment_TabularFLM_G2",
+                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_Experiment_TabularFLM_G3",
                        help='Base directory containing the results')
     
     args = parser.parse_args()
