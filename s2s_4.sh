@@ -43,7 +43,7 @@ for few_shot in $few_shots; do
         CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
         --random_seed 1234 \
         --source_dataset_name $source_dataset \
-        --base_dir 'Experiment_TabularFLM_G' \
+        --base_dir 'Experiment_TabularFLM_G3' \
         --few_shot $few_shot \
         --train_epochs 1000 \
         --model_type "TabularFLM"

@@ -65,34 +65,62 @@ class AdaptiveGraphAttention(nn.Module):
             1. Glboal Topology
         '''
         desc_embeddings = self.global_topology_proj(desc_embeddings)
-        global_sim = torch.matmul(desc_embeddings, desc_embeddings.transpose(-1, -2))
+        desc_embeddings_ = desc_embeddings / desc_embeddings.norm(dim=-1, keepdim=True)
+        global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
         global_topology = torch.sigmoid(global_sim + self.topology_bias)
 
+        # 디버깅 - global_topology 값 분포
+        print(f"global_topology 범위: 최소={global_topology.min().item():.4f}, 최대={global_topology.max().item():.4f}")
+        print(f"global_topology 평균: {global_topology.mean().item():.4f}")
 
         '''
             2. Sample-wise Weight
         '''
-        
         # CLS를 제외한 name value embedding 사이의 유사도 
         var_embeddings = name_value_embeddings[:, 1:, :]
-        sample_sim = torch.matmul(var_embeddings, var_embeddings.transpose(-1, -2))
+        var_embeddings_ = var_embeddings / var_embeddings.norm(dim=-1, keepdim=True)
+        sample_sim = torch.matmul(var_embeddings_, var_embeddings_.transpose(-1, -2))
+        
+        # # 디버깅 - sample_sim 값 분포
+        # print(f"sample_sim 범위: 최소={sample_sim.min().item():.4f}, 최대={sample_sim.max().item():.4f}")
+        # print(f"sample_sim 평균: {sample_sim.mean().item():.4f}")
+
         adjacency_matrix = global_topology * sample_sim 
+
+        # print(f"adjacency_matrix 범위: 최소={adjacency_matrix.min().item():.4f}, 최대={adjacency_matrix.max().item():.4f}")
+        # print(f"adjacency_matrix 평균: {adjacency_matrix.mean().item():.4f}")
+
         '''
             3. Self Connection Delete
         '''
         diag_mask = 1.0 - torch.eye(seq_len, device = name_value_embeddings.device).unsqueeze(0)
-        adjacency = adjacency_matrix * diag_mask
+        adjacency = torch.sigmoid(adjacency_matrix * diag_mask)
+
+        # 디버깅 - 최종 adjacency 값 분포
+        # print(f"임계값: {self.threshold}")
+        # print(f"adjacency 범위: 최소={adjacency.min().item():.4f}, 최대={adjacency.max().item():.4f}")
+        # print(f"adjacency 평균: {adjacency.mean().item():.4f}")
+        # print(f"임계값 이상 엣지 비율: {(adjacency > self.threshold).float().mean().item():.4f}")
+
+        # 히스토그램 정보 출력
+        # adjacency_flat = adjacency.reshape(-1).cpu().detach().numpy()
+        # counts, bins = np.histogram(adjacency_flat, bins=10)
+        # for i in range(len(counts)):
+        #     print(f"범위 [{bins[i]:.4f}, {bins[i+1]:.4f}): {counts[i]} 개")
 
         '''
             5. Edge Pruning
         
-        # '''
+        '''
         if not self.frozen:
             pruned_adjacency = (adjacency > self.threshold).float() - adjacency.detach() + adjacency
+            #prune_ratio = 1.0 - (pruned_adjacency > 0).float().mean().item()
+            #print(f"프루닝 비율: {prune_ratio:.4f} (값이 0인 엣지 비율)")
         else:
             pruned_adjacency = (adjacency > self.threshold).float()
 
         adjacency = pruned_adjacency
+        #pdb.set_trace()
         '''
             4. Edge Attributes & Adjacency 
         '''

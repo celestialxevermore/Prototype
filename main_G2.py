@@ -19,7 +19,7 @@ from utils.train_test import binary_train, binary_evaluate, multi_train, multi_e
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM_G import Model
+from models.TabularFLM_G2 import Model
 import psutil 
 from torch_geometric.data import Batch
 p = psutil.Process()
@@ -58,8 +58,6 @@ def get_args():
     parser.add_argument('--source_lr', type=float, default=0.0001)
     parser.add_argument('--source_lr_few', type=float, default=0.00001)
     parser.add_argument('--llm_model', type=str, default='gpt2')
-    parser.add_argument('--meta_heads', type=int, default= 2)
-    parser.add_argument('--meta_num_layers', type=int, default= 2)
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
@@ -71,7 +69,7 @@ def get_args():
     parser.add_argument('--enc_type', type = str, choices = ['ind', 'shared'], default = 'ind')
     parser.add_argument('--meta_type', type = str, choices = ['meta_attn', 'meta_mlp'], default = 'meta_attn')
     parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
-    parser.add_argument('--threshold', type = float, default = 0.3)
+    parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
     args = parser.parse_args()
 

@@ -403,8 +403,6 @@ def save_results_(args, results):
             "hidden_dim": args.hidden_dim,
             "num_layers": args.num_layers,
             "num_heads": args.n_heads,
-            "meta_heads": args.meta_heads,
-            "meta_num_layers": args.meta_num_layers,
             "few_shot": args.few_shot,
             "threshold": args.threshold,
             "meta_dropout_rate": args.meta_dropout_rate,

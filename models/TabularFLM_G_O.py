@@ -10,33 +10,28 @@ import os
 from torch import Tensor
 import math
 import torch.nn.init as nn_init
-import logging
 
-logger = logging.getLogger(__name__)
 
 class AdaptiveGraphAttention(nn.Module):
     def __init__(
         self,
         input_dim : int,
         n_heads : int, 
-        dropout : float = 0.1,
-        threshold : float = 0.5
+        dropout : float = 0.1
     ):
         super().__init__()
         assert input_dim % n_heads == 0 
         self.n_heads = n_heads 
         self.head_dim = input_dim // n_heads 
         self.input_dim = input_dim
-        
-        self.frozen = False  # 그래프 구조 고정 여부
-        
+
         self.edge_update = nn.Sequential(
             nn.Linear(input_dim * 2, input_dim),
             nn.LayerNorm(input_dim),
             nn.ReLU(),
             nn.Linear(input_dim, input_dim)
         )
-        self.threshold = threshold
+
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
@@ -76,23 +71,14 @@ class AdaptiveGraphAttention(nn.Module):
         # CLS를 제외한 name value embedding 사이의 유사도 
         var_embeddings = name_value_embeddings[:, 1:, :]
         sample_sim = torch.matmul(var_embeddings, var_embeddings.transpose(-1, -2))
-        adjacency_matrix = global_topology * sample_sim 
+        adaptive_weight = torch.sigmoid(sample_sim)
+        adjacency_matrix = global_topology * adaptive_weight 
         '''
             3. Self Connection Delete
         '''
+
         diag_mask = 1.0 - torch.eye(seq_len, device = name_value_embeddings.device).unsqueeze(0)
         adjacency = adjacency_matrix * diag_mask
-
-        '''
-            5. Edge Pruning
-        
-        # '''
-        if not self.frozen:
-            pruned_adjacency = (adjacency > self.threshold).float() - adjacency.detach() + adjacency
-        else:
-            pruned_adjacency = (adjacency > self.threshold).float()
-
-        adjacency = pruned_adjacency
         '''
             4. Edge Attributes & Adjacency 
         '''
@@ -159,9 +145,7 @@ class Model(nn.Module):
             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
         super(Model, self).__init__()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        self.threshold = args.threshold  # 엣지 프루닝 임계값 (명령줄 인자에서 가져옴)
-        self.frozen = args.frozen  # 그래프 구조 고정 여부 (초기에는 False로 설정)
+        
         self.args = args
         self.llm_model = llm_model
         self.input_dim = input_dim
@@ -175,6 +159,7 @@ class Model(nn.Module):
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
+
 
         '''
             MLP(CONCAT[Name embedding, Value embedding])
@@ -197,8 +182,7 @@ class Model(nn.Module):
             AdaptiveGraphAttention(
                 input_dim = self.input_dim, 
                 n_heads = args.n_heads,
-                dropout = args.dropout_rate,
-                threshold = self.threshold
+                dropout = args.dropout_rate
             ) for _ in range(args.num_layers)
         ])
         self.layer_norms = nn.ModuleList([
@@ -219,7 +203,6 @@ class Model(nn.Module):
                 nn.Linear(hidden_dim, 1)
             ).to(self.device)
         self._init_weights()
-
     
     def _init_weights(self):
         for m in self.modules():
@@ -269,7 +252,6 @@ class Model(nn.Module):
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
         name_embeddings = torch.cat(name_embeddings, dim = 1)
         value_embeddings = torch.cat(value_embeddings, dim = 1)
-
         '''
             0. Name & Value Embedding
         '''
@@ -291,8 +273,3 @@ class Model(nn.Module):
         pred = x[:, 0, :]
         pred = self.predictor(pred)
         return pred
-
-    def froze_topology(self):
-        """그래프 구조를 고정하여 추가 학습 시 변경되지 않도록 함"""
-        self.frozen = True
-        logger.info("Graph topology frozen. Continuing with fixed structure.")
