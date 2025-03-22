@@ -23,7 +23,7 @@
 #!/bin/bash
 
 gpu_id=5
-source_datasets="heart diabetes"
+source_datasets="adult"
 few_shots="4 8 16 32 64"
 model_types="TabularFLM"
 
@@ -37,6 +37,7 @@ for random_seed in $(seq 4000 4199); do
             --random_seed $random_seed \
             --source_dataset_name $source_dataset \
             --base_dir 'Experiment_TabularFLM_G5' \
+            --use_gmm \
             --few_shot $few_shot \
             --train_epochs 1000 \
             --model_type "TabularFLM"

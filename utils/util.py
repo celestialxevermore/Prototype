@@ -499,10 +499,10 @@ def prepare_ml_results(args, full_baseline_results, few_baseline_results):
     # 선택된 베이스라인 모델에 대해서만 처리
     for baseline in args.baseline:  # args.baseline이 하나의 모델만 포함해도 동작
         model_prefix = {
-            'lr': 'LR',
+            'lr': 'lr',
             'xgb': 'xgb',
             'mlp': 'mlp',
-            'cat': 'catboost',
+            'cat': 'cat',
             'rf': 'rf'
         }[baseline]
         
@@ -534,7 +534,7 @@ def save_ml_results(args, results):
     baseline_name = '_'.join(args.baseline)
     
     exp_dir = os.path.join(
-        'experiments/ml_baselines_SEEDS',
+        f'experiments/ml_baselines_{args.base_dir}',
         args.source_dataset_name,
         f"args_seed:{args.random_seed}",
         baseline_name  # 모델 이름으로 서브디렉토리 생성
@@ -559,7 +559,7 @@ def save_ml_results(args, results):
             "seed": args.random_seed,
             "batch_size": args.batch_size,
             "train_epochs": args.train_epochs,
-            "learning_rate": args.source_lr,
+            "learning_rate": args.learning_rate,
             "hidden_dim": args.hidden_dim,
             "dropout_rate": args.dropout_rate,
             "few_shot": args.few_shot,

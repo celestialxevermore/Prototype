@@ -216,46 +216,115 @@ class GMM(nn.Module):
         nn.init.kaiming_uniform_(prototypes, a = math.sqrt(5))
         prototypes = prototypes / (1e-6 + prototypes.norm(dim=1, keepdim=True))
         self.register_buffer("prototypes", prototypes)
+        
     def forward(self, cls : torch.Tensor, is_train = True):
-        """
-            cls : [B, D]
-            if_train : bool 
-        """
         assert cls.dim() == 2
         b, d = cls.shape
         device = cls.device
         
-        # 프로토타입을 입력 텐서와 같은 장치로 이동
         local_proto = self.prototypes.to(device).expand(b, -1, -1).contiguous()
         _cls = cls 
         with torch.no_grad():
             for _ in range(self.stage_num):
-                # ---------- E-step ----------
                 latent = torch.einsum("bd, bkd->bk", cls, local_proto)
-                
                 r = F.softmax(latent, dim = 1)
-                # ---------- M-step ----------
-                # 각 proto_k = sum_i( r[i,k]* emb[i,:] ) / norm
-                new_proto = torch.mm(r.t(), _cls)  # (K,D)
+                new_proto = torch.mm(r.t(), _cls)
                 new_proto = new_proto / (new_proto.norm(dim=1, keepdim=True) + self.eps)
                 local_proto = new_proto.unsqueeze(0).expand(b, -1, -1).contiguous()
 
         dot = torch.einsum("bd,bkd->bk", cls, local_proto)
-        r = F.softmax(dot, dim=1)  # (B,K)
-
+        r = F.softmax(dot, dim=1)
+        
         z_recon = torch.mm(r, new_proto)
-
         z_out = self.beta * z_recon + cls
 
-        # 모멘텀 갱신 (전역 proto)
         if is_train:
-            old_proto = self.prototypes.to(device)  # 현재 장치로 이동
-            new_proto_for_update = new_proto.unsqueeze(0)  # CPU로 이동하지 않음
+            old_proto = self.prototypes.to(device)
+            new_proto_for_update = new_proto.unsqueeze(0)
             updated = self.momentum * old_proto + (1-self.momentum)*new_proto_for_update            
             self.prototypes = updated.detach().cpu()
+            
         return r, z_out
 
 
+class GMM2(nn.Module):
+    def __init__(
+            self,
+            args, 
+            num_prototypes : int, 
+            stage_num  : int = 5, 
+            momentum : float = 0.9, 
+            beta : float = 1.0,
+            lambd : float = 0.1, 
+            eps : float = 1e-6,
+    ):
+        super(GMM2, self).__init__()
+        self.num_prototypes = num_prototypes
+        self.input_dim = args.input_dim
+        self.stage_num = stage_num
+        self.momentum = momentum 
+        self.beta = beta
+        self.lambd = lambd
+        self.eps = eps
+
+        prototypes = torch.Tensor(num_prototypes, self.input_dim)
+        nn.init.kaiming_uniform_(prototypes, a = math.sqrt(5))
+        prototypes = prototypes / (1e-6 + prototypes.norm(dim=1, keepdim=True))
+        
+        self.prototypes = nn.Parameter(prototypes.clone())
+        self.register_buffer("running_prototypes", prototypes.clone())
+        
+    def _normalize_prototypes(self):
+        with torch.no_grad():
+            norm = self.prototypes.norm(dim=1, keepdim=True) + self.eps
+            self.prototypes.data = self.prototypes.data / norm
+            
+    def forward(self, cls : torch.Tensor, is_train = True):
+        assert cls.dim() == 2
+        b, d = cls.shape
+        device = cls.device
+        
+        self._normalize_prototypes()
+        local_proto = self.prototypes.unsqueeze(0).expand(b, -1, -1).contiguous()
+        _cls = cls 
+        
+        for _ in range(self.stage_num):
+            latent = torch.einsum("bd, bkd->bk", cls, local_proto)
+            latent = latent / self.lambd
+            r = F.softmax(latent, dim = 1)
+            
+            new_proto = torch.mm(r.t(), _cls)
+            new_proto = new_proto / (new_proto.norm(dim=1, keepdim=True) + self.eps)
+            local_proto = new_proto.unsqueeze(0).expand(b, -1, -1).contiguous()
+
+        dot = torch.einsum("bd,bkd->bk", cls, local_proto)
+        dot = dot / self.lambd
+        r = F.softmax(dot, dim=1)
+
+        z_recon = torch.mm(r, new_proto)
+        z_out = self.beta * z_recon + cls
+
+        recon_loss = F.mse_loss(z_recon, cls)
+        entropy_loss = - (r * torch.log(r + self.eps)).sum(dim = 1).mean()
+        proto_similarity = torch.mm(new_proto, new_proto.t())
+        eye = torch.eye(self.num_prototypes, device = device)
+        diversity_loss = torch.mean(torch.abs(proto_similarity * (1 - eye)))
+
+        if is_train:
+            with torch.no_grad():
+                old_proto = self.running_prototypes.to(device)
+                updated = self.momentum * old_proto + (1 - self.momentum) * new_proto 
+                updated = updated / (updated.norm(dim = 1, keepdim = True) + self.eps)
+                self.running_prototypes.copy_(updated.detach())
+                
+                update_ratio = 0.01 
+                self.prototypes.data = (1 - update_ratio) * self.prototypes.data + update_ratio * new_proto.detach()
+
+        return r, z_out, {
+            'recon_loss': recon_loss,
+            'entropy_loss': entropy_loss,
+            'diversity_loss': diversity_loss
+        }
 
 
 class Model(nn.Module):
@@ -278,6 +347,7 @@ class Model(nn.Module):
         self.enc_type = args.enc_type
                 # GMM 관련 속성 추가
         self.use_gmm = args.use_gmm 
+        self.use_gmm2 = args.use_gmm2
         self.num_prototypes = args.num_prototypes
         self.stage_num = args.gmm_stage_num
         self.momentum = args.gmm_momentum 
@@ -288,6 +358,8 @@ class Model(nn.Module):
 
         if self.use_gmm:
             self.gmm = GMM(self.args, self.num_prototypes, self.stage_num, self.momentum, self.beta, self.lambd, self.eps)
+        elif self.use_gmm2:
+            self.gmm = GMM2(self.args, self.num_prototypes, self.stage_num, self.momentum, self.beta, self.lambd, self.eps)
         
         # GMM 모듈 초
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
@@ -342,10 +414,27 @@ class Model(nn.Module):
 
 
     def forward(self, batch, y):
-        pred = self.predict(batch)
         target = y.to(self.device).view(-1,1).float()
-        loss = self.criterion(pred, target)
-        return loss
+        
+        # GMM2 사용 시 predict에서 손실도 함께 받음
+        if self.use_gmm2 and self.training:
+            pred, gmm_losses = self.predict(batch)
+            loss = self.criterion(pred, target)
+            
+            # GMM 손실 계산
+            gmm_loss_weight = 0.1
+            gmm_loss = (
+                #gmm_losses['recon_loss'] + 
+                #0.1 * gmm_losses['entropy_loss'] + 
+                gmm_losses['diversity_loss']
+            )
+            return loss + gmm_loss_weight * gmm_loss
+    
+        # 일반적인 경우
+        else:
+            pred = self.predict(batch)
+            loss = self.criterion(pred, target)
+            return loss
     
     def predict(self, batch):
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
@@ -387,10 +476,20 @@ class Model(nn.Module):
         pred = x[:, 0, :]
         if self.use_gmm:
             r, z_out = self.gmm(pred, is_train = True)
+            pred = self.predictor(z_out)
+            return pred
+        elif self.use_gmm2:
+            r, z_out, gmm_losses = self.gmm(pred, is_train = True)
+            pred = self.predictor(z_out)
+            if self.training:
+                return pred, gmm_losses
+            else:
+                return pred
         else:
+            pred = self.predictor(pred)
             z_out = pred
 
-        pred = self.predictor(z_out)
+        
         return pred
 
     def froze_topology(self):

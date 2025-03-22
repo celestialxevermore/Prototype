@@ -2,13 +2,13 @@
 
 # 사용할 데이터셋 목록
 gpu_id=0
-datasets="heart diabetes adult"
+datasets="diabetes"
 
 # few-shot 샘플 수 목록
 few_shots="4 8 16 32 64"
 
 # random seeds
-seed="42"
+seed="4078"
 baselines="rf lr xgb mlp cat"
 
 # 실험 실행
@@ -19,7 +19,7 @@ for dataset in $datasets; do
         --source_dataset_name $dataset \
         --few_shot $shot \
         --baseline $baselines \
-        --base_dir 'ML_results_20250216' \
+        --base_dir 'ML_results_20250322' \
         --random_seed $seed \
         --train_epochs 200 \
         --batch_size 32 \
