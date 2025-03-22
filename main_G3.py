@@ -34,7 +34,7 @@ logger = setup_logger()
 
 def get_args():
     parser = argparse.ArgumentParser(description='ProtoLLM For Tabular Task')
-    parser.add_argument('--random_seed', type=int, default=42, help='random_seed')
+    parser.add_argument('--random_seed', type=int, default=2095, help='random_seed')
     parser.add_argument('--train_epochs', type=int, default=300, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
     parser.add_argument('--input_dim', type = int, default = 768)
@@ -72,7 +72,7 @@ def get_args():
     parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
     # GMM 관련 인자 추가
-    parser.add_argument('--use_gmm', type=bool, default=True, help='Use GMM module')
+    parser.add_argument('--use_gmm', action='store_true', help='Use GMM module')
     parser.add_argument('--num_prototypes', type=int, default=32, help='Number of prototypes(phenotypes) in GMM')
     parser.add_argument('--gmm_stage_num', type=int, default=10, help='EM step iterations in GMM')
     parser.add_argument('--gmm_momentum', type=float, default=0.9, help='Momentum for prototype updates')
