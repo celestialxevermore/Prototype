@@ -333,7 +333,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 f"Relative position: This value {value:.2f} falls in the '{bin_category}' of the distribution."
                 f"<|end_prompt|>"
             )
-
+            pdb.set_trace()
             prompt_input = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
 
             with torch.no_grad():

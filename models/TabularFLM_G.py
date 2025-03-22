@@ -276,7 +276,6 @@ class Model(nn.Module):
         name_value_embeddings = torch.cat([name_embeddings, value_embeddings], dim = -1)
         name_value_embeddings = self.sample_fusion(name_value_embeddings)
 
-
         '''
             1. [CLS] Token
         '''

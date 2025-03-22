@@ -103,12 +103,8 @@ class AdaptiveGraphAttention(nn.Module):
             1. Glboal Topology
         '''
         desc_embeddings = self.global_topology_proj(desc_embeddings)
-        # 안전한 정규화 (epsilon 추가)
-        desc_norm = torch.clamp(desc_embeddings.norm(dim=-1, keepdim=True), min=1e-12)
-        desc_embeddings_ = desc_embeddings / desc_norm
+        desc_embeddings_ = desc_embeddings / desc_embeddings.norm(dim=-1, keepdim=True)
         global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
-        # 값 제한
-        global_sim = torch.clamp(global_sim, -20.0, 20.0)
         global_topology = torch.sigmoid(global_sim + self.topology_bias)
 
         if not self.frozen:
@@ -120,24 +116,12 @@ class AdaptiveGraphAttention(nn.Module):
             2. Sample-wise Weight
         '''
         var_embeddings = name_value_embeddings[:, 1:, :]
-        # 안전한 정규화 (epsilon 추가)
-        var_norm = torch.clamp(var_embeddings.norm(dim=-1, keepdim=True), min=1e-12)
-        var_embeddings_ = var_embeddings / var_norm
+        var_embeddings_ = var_embeddings / var_embeddings.norm(dim=-1, keepdim=True)
         sample_sim = torch.matmul(var_embeddings_, var_embeddings_.transpose(-1, -2))
-        # 값 제한
-        sample_sim = torch.clamp(sample_sim, -20.0, 20.0)
 
         global_topology_A = self._no_self_interaction(global_topology_A)
-        adjacency_matrix = global_topology_A * sample_sim
-        
-        adjacency_matrix = torch.clamp(adjacency_matrix, -30.0, 30.0)
-        adjacency = torch.softmax(adjacency_matrix, dim=-1)
-        
-        # 학습 디버깅: NaN 검사
-        if torch.isnan(adjacency).any():
-            print("WARNING: NaN detected in adjacency matrix!")
-            # NaN을 0으로 대체하여 학습 중단 방지
-            adjacency = torch.nan_to_num(adjacency, nan=0.0)
+        G = global_topology_A * sample_sim 
+        adjacency = torch.softmax(G, dim=-1)
         
         # 디버깅: 필요시 주석 해제
         # self._debug_fr_graph(global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency)
@@ -199,7 +183,81 @@ class AdaptiveGraphAttention(nn.Module):
         context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
         output = self.out_proj(context)
         return output, attn_weights
-            
+
+
+
+
+class GMM(nn.Module):
+    """
+        k : The number of Prototypes 
+        stage_num : EM step counter
+        momentum : The momentum of the prototype update 
+    """
+    def __init__(
+            self,
+            args, 
+            num_prototypes : int, 
+            stage_num  : int = 5, 
+            momentum : float = 0.9, 
+            beta : float = 1.0,
+            lambd : float = 0.1, 
+            eps : float = 1e-6,
+    ):
+        super(GMM, self).__init__()
+        self.num_prototypes = num_prototypes
+        self.input_dim = args.input_dim
+        self.stage_num = stage_num
+        self.momentum = momentum 
+        self.beta = beta
+        self.lambd = lambd
+        self.eps = eps
+
+        prototypes = torch.Tensor(num_prototypes, self.input_dim)
+        nn.init.kaiming_uniform_(prototypes, a = math.sqrt(5))
+        prototypes = prototypes / (1e-6 + prototypes.norm(dim=1, keepdim=True))
+        self.register_buffer("prototypes", prototypes)
+    def forward(self, cls : torch.Tensor, is_train = True):
+        """
+            cls : [B, D]
+            if_train : bool 
+        """
+        assert cls.dim() == 2
+        b, d = cls.shape
+        device = cls.device
+        
+        # 프로토타입을 입력 텐서와 같은 장치로 이동
+        local_proto = self.prototypes.to(device).expand(b, -1, -1).contiguous()
+        _cls = cls 
+        with torch.no_grad():
+            for _ in range(self.stage_num):
+                # ---------- E-step ----------
+                latent = torch.einsum("bd, bkd->bk", cls, local_proto)
+                
+                r = F.softmax(latent, dim = 1)
+                # ---------- M-step ----------
+                # 각 proto_k = sum_i( r[i,k]* emb[i,:] ) / norm
+                new_proto = torch.mm(r.t(), _cls)  # (K,D)
+                new_proto = new_proto / (new_proto.norm(dim=1, keepdim=True) + self.eps)
+                local_proto = new_proto.unsqueeze(0).expand(b, -1, -1).contiguous()
+
+        dot = torch.einsum("bd,bkd->bk", cls, local_proto)
+        r = F.softmax(dot, dim=1)  # (B,K)
+
+        z_recon = torch.mm(r, new_proto)
+
+        z_out = self.beta * z_recon + cls
+
+        # 모멘텀 갱신 (전역 proto)
+        if is_train:
+            old_proto = self.prototypes.to(device)  # 현재 장치로 이동
+            new_proto_for_update = new_proto.unsqueeze(0)  # CPU로 이동하지 않음
+            updated = self.momentum * old_proto + (1-self.momentum)*new_proto_for_update            
+            self.prototypes = updated.detach().cpu()
+        return r, z_out
+
+
+
+
 class Model(nn.Module):
     def __init__(
             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
@@ -218,6 +276,20 @@ class Model(nn.Module):
         llm_model = args.llm_model
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
+                # GMM 관련 속성 추가
+        self.use_gmm = args.use_gmm 
+        self.num_prototypes = args.num_prototypes
+        self.stage_num = args.gmm_stage_num
+        self.momentum = args.gmm_momentum 
+        self.beta = args.gmm_beta 
+        self.lambd = args.gmm_lambda
+        self.eps = args.gmm_eps
+        
+
+        if self.use_gmm:
+            self.gmm = GMM(self.args, self.num_prototypes, self.stage_num, self.momentum, self.beta, self.lambd, self.eps)
+        
+        # GMM 모듈 초
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
@@ -232,12 +304,6 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(input_dim, input_dim)
         )
-        def init_mlp(module):
-            for m in module.modules():
-                if isinstance(m, nn.Linear):
-                    nn_init.kaiming_uniform_(m.weight, a=math.sqrt(5))  # ReLU에 적합한 He 초기화
-                    if m.bias is not None:
-                        nn_init.zeros_(m.bias)
 
         self.layers = nn.ModuleList([
             AdaptiveGraphAttention(
@@ -282,45 +348,31 @@ class Model(nn.Module):
         return loss
     
     def predict(self, batch):
-
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
-        
         desc_embeddings = [] 
-        name_embeddings = [] 
-        value_embeddings = [] 
+        name_value_embeddings = [] 
+        
 
-        if all(k in batch for k in ['cat_name_embeddings', 'cat_desc_embeddings', 'cat_value_embeddings']):
-            cat_name_embeddings = batch['cat_name_embeddings'].to(self.device).squeeze(-2)
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device).squeeze(-2)
             cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
-            cat_value_embeddings = batch['cat_value_embeddings'].to(self.device).squeeze(-2)
-
+            
+            name_value_embeddings.append(cat_name_value_embeddings)
             desc_embeddings.append(cat_desc_embeddings)
-            name_embeddings.append(cat_name_embeddings)
-            value_embeddings.append(cat_value_embeddings)    
             
-
-        if all(k in batch for k in ['num_name_embeddings', 'num_desc_embeddings', 'num_prompt_embeddings']):
-            num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
-            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
             num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
-            
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+            name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
-            name_embeddings.append(num_name_embeddings)
-            value_embeddings.append(num_prompt_embeddings)
             
-        if not desc_embeddings or not name_embeddings or not value_embeddings:
+        
+        if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
 
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
-        name_embeddings = torch.cat(name_embeddings, dim = 1)
-        value_embeddings = torch.cat(value_embeddings, dim = 1)
-
-        '''
-            0. Name & Value Embedding
-        '''
-        name_value_embeddings = torch.cat([name_embeddings, value_embeddings], dim = -1)
-        name_value_embeddings = self.sample_fusion(name_value_embeddings)
-
+        name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
+    
         '''
             1. [CLS] Token
         '''
@@ -333,7 +385,12 @@ class Model(nn.Module):
             attn_output, attn_weights = layer(desc_embeddings, norm_x)
             x = x + attn_output
         pred = x[:, 0, :]
-        pred = self.predictor(pred)
+        if self.use_gmm:
+            r, z_out = self.gmm(pred, is_train = True)
+        else:
+            z_out = pred
+
+        pred = self.predictor(z_out)
         return pred
 
     def froze_topology(self):
