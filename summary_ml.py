@@ -89,7 +89,7 @@ def process_ml_results(base_directory):
 
 def main():
     parser = argparse.ArgumentParser(description='Summarize ML results')
-    parser.add_argument('--base_dir', type=str, default='/home/eungyeop/LLM/tabular/ProtoLLM/experiments/ml_baselines_ML_results_20250216',
+    parser.add_argument('--base_dir', type=str, default='/home/eungyeop/LLM/tabular/ProtoLLM/experiments/ml_baselines_ML_results_20250322',
                       help='Base directory containing the results')
     
     args = parser.parse_args()

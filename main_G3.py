@@ -75,7 +75,7 @@ def get_args():
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
     parser.add_argument('--num_prototypes', type=int, default=32, help='Number of prototypes(phenotypes) in GMM')
-    parser.add_argument('--gmm_stage_num', type=int, default=9, help='EM step iterations in GMM')
+    parser.add_argument('--gmm_stage_num', type=int, default=10, help='EM step iterations in GMM')
     parser.add_argument('--gmm_momentum', type=float, default=0.9, help='Momentum for prototype updates')
     parser.add_argument('--gmm_beta', type=float, default=1.0, help='Weight for reconstructed embedding')
     parser.add_argument('--gmm_lambda', type=float, default=2.0, help='Temperature parameter for responsibility')

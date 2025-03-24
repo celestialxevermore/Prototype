@@ -34,7 +34,7 @@ logger = setup_logger()
 
 def get_args():
     parser = argparse.ArgumentParser(description='ProtoLLM For Tabular Task')
-    parser.add_argument('--random_seed', type=int, default=42, help='random_seed')
+    parser.add_argument('--random_seed', type=int, default=2095, help='random_seed')
     parser.add_argument('--train_epochs', type=int, default=300, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
     parser.add_argument('--input_dim', type = int, default = 768)
@@ -42,16 +42,10 @@ def get_args():
     parser.add_argument('--output_dim', type = int, default = 1)
     parser.add_argument('--num_layers', type = int, default = 3)
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--meta_dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--aggr_attn_dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--ind_dropout_rate', type = float, default = 0.15)
-    parser.add_argument('--shared_dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--flatten_dropout_rate', type = float, default = 0.3)
     parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_dataset_name', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland'])
-    #parser.add_argument('--source_dataset_names', nargs='+', type = str, default = ['cleveland', 'heart_statlog', 'heart'] , help = 'List of source dataaset name')
     parser.add_argument('--target_dataset_name', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -64,13 +58,21 @@ def get_args():
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
     parser.add_argument('--model_type', type=str, default='TabularFLM', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5', 'TabularFLM'])
-    parser.add_argument('--scaler_type', type=str, default='pow', choices=['pow'])
     parser.add_argument('--label', type = str, choices = ['add', 'no'], default = 'add')
     parser.add_argument('--enc_type', type = str, choices = ['ind', 'shared'], default = 'ind')
     parser.add_argument('--meta_type', type = str, choices = ['meta_attn', 'meta_mlp'], default = 'meta_attn')
     parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
     parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
+    # GMM 관련 인자 추가
+    parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
+    parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
+    parser.add_argument('--num_prototypes', type=int, default=32, help='Number of prototypes(phenotypes) in GMM')
+    parser.add_argument('--gmm_stage_num', type=int, default=10, help='EM step iterations in GMM')
+    parser.add_argument('--gmm_momentum', type=float, default=0.9, help='Momentum for prototype updates')
+    parser.add_argument('--gmm_beta', type=float, default=1.0, help='Weight for reconstructed embedding')
+    parser.add_argument('--gmm_lambda', type=float, default=2.0, help='Temperature parameter for responsibility')
+    parser.add_argument('--gmm_eps', type=float, default=1e-6, help='Small value for numerical stability')
     args = parser.parse_args()
 
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
@@ -83,7 +85,7 @@ def find_optimal_threshold(y_true, y_pred_proba):
     return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
 def train_and_validate(model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10):
-    #pdb.set_trace()
+    
     """
     Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
     마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
@@ -258,7 +260,7 @@ def main():
     args  = get_args()
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
-    #pdb.set_trace()
+    
     logger.info(f"Starting experiment with dataset: {args.source_dataset_name}")
     logger.info(f"Device: {device}")
 
