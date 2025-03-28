@@ -110,7 +110,7 @@ class Meta(nn.Module):
             nn.Linear(2 * self.input_dim, self.input_dim),
             nn.LayerNorm(self.input_dim),
             nn.ReLU(),
-            nn.Dropout(self.args.meta_dropout_rate),
+            nn.Dropout(0.15),
             nn.Linear(self.input_dim, self.input_dim),
             nn.LayerNorm(self.input_dim)
         )

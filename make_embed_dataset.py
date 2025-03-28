@@ -6,7 +6,7 @@ import os
 import sys
 import pickle, torch, random
 import argparse, pdb
-from utils.table_to_embedding_new import Table2EmbeddingTransformer
+from table_to_embedding_new2 import Table2EmbeddingTransformer
 
 class TabularToEmbeddingDataset:
     def __init__(self, args, base_path: str = "/storage/personal/eungyeop/dataset/table/"):
@@ -69,7 +69,7 @@ class TabularToEmbeddingDataset:
         
         # 저장 경로 설정
         base_save_path = "/storage/personal/eungyeop/dataset/embedding"
-        sub_dir = "tabular_embeddings_new"
+        sub_dir = f"tabular_embeddings__{self.args.llm_model}"
         
         save_dir = os.path.join(base_save_path, sub_dir)
         os.makedirs(save_dir, exist_ok=True)
@@ -97,17 +97,16 @@ class TabularToEmbeddingDataset:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--random_seed', type=int, default=42)
-    parser.add_argument('--input_dim', type=int, default=768)
+    parser.add_argument('--input_dim', type=int, default=384)
     parser.add_argument('--label', action='store_true',
                        help='If True, uses label_table. If False, uses origin_table.')
-    parser.add_argument('--model_name', type=str, default='gpt2',
-                       help='Name of the language model to use')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--scaler_type', type=str, 
                        default='pow',
                        choices=['std', 'pow'],
                        help='Type of scaler to use for numerical features.')
-    parser.add_argument('--llm_model', type = str, default='gpt2')
+    parser.add_argument('--llm_model', type = str, default='gpt2', choices=['gpt2','sentence-bert', 'bio-bert', 'bio-clinical-bert', 'LLAMA'],
+                        help='Name of the language model to use')
     #parser.add_argument('--source_dataset_name', type = str, default='heart')
     args = parser.parse_args()
     
@@ -115,8 +114,10 @@ if __name__ == "__main__":
     os.environ['PYTHONHASHSEED'] = str(args.random_seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
-    
+    #torch.use_deterministic_algorithms(True)
+    import psutil
+    p = psutil.Process()
+    p.cpu_affinity(range(30, 64))
     torch.manual_seed(args.random_seed)
     np.random.seed(args.random_seed)
     random.seed(args.random_seed)
@@ -129,11 +130,6 @@ if __name__ == "__main__":
         #"heart",
         #"diabetes",
         "adult"
-        
-        # "cleveland",
-        # "hungarian",
-        # "switzerland",
-        # "heart_statlog",
     ]
     
     for dataset_name in datasets_to_process:

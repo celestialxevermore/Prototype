@@ -106,8 +106,7 @@ class AdaptiveGraphAttention(nn.Module):
         desc_embeddings_ = desc_embeddings / desc_embeddings.norm(dim=-1, keepdim=True)
         self.global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
         global_topology = torch.sigmoid(self.global_sim + self.topology_bias)
-        self.global_topology = global_topology 
-        
+
         if not self.frozen:
             global_topology_A = (global_topology > self.threshold).float() - global_topology.detach() + global_topology
         else:

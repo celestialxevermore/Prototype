@@ -23,7 +23,7 @@ def select_best_seeds(directory_path, output_file, top_n=1):
     # 시드별 결과를 저장할 딕셔너리
     results_by_seed = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
     
-    for dataset in ['diabetes', 'heart']:
+    for dataset in ['adult']:
         dataset_path = os.path.join(directory_path, dataset)
         if not os.path.exists(dataset_path):
             print(f"Dataset path {dataset_path} does not exist")
@@ -210,23 +210,22 @@ def select_best_seeds(directory_path, output_file, top_n=1):
             output_buffer.write(f"    Few-shot별 AUC: {few_shot_str}\n")
     
     # 결과를 텍스트 파일로 저장
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(output_buffer.getvalue())
-    
-    # 콘솔에도 동일한 내용 출력
-    print(output_buffer.getvalue())
-    
-    # JSON 파일로도 시드 목록 저장
-    json_file = output_file.replace('.txt', '.json')
-    json_data = {
-        "평균_AUC_기준": top_seeds_by_dataset,
-        "점진적_향상_기준": trending_seeds_by_dataset
-    }
-    with open(json_file, 'w', encoding='utf-8') as f:
-        json.dump(json_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"텍스트 결과 저장 완료: {output_file}")
-    print(f"JSON 시드 목록 저장 완료: {json_file}")
+    # 데이터셋 이름을 파일명에 포함
+    for dataset in results_by_seed:
+        dataset_output_file = output_file.replace('.txt', f'_{dataset}.txt')
+        with open(dataset_output_file, 'w', encoding='utf-8') as f:
+            f.write(output_buffer.getvalue())
+        print(f"텍스트 결과 저장 완료: {dataset_output_file}")
+        
+        # JSON 파일도 데이터셋 이름 포함
+        json_file = dataset_output_file.replace('.txt', '.json')
+        json_data = {
+            "평균_AUC_기준": top_seeds_by_dataset,
+            "점진적_향상_기준": trending_seeds_by_dataset
+        }
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        print(f"JSON 시드 목록 저장 완료: {json_file}")
 
 def main():
     parser = argparse.ArgumentParser(description='시드의 평균 AUC를 기준으로 최고 성능 시드 선택')
@@ -237,7 +236,7 @@ def main():
                       default="top_seeds_results.txt",
                       help='결과를 저장할 텍스트 파일 경로')
     parser.add_argument('--top_n', type=int, 
-                      default=5,
+                      default=20,
                       help='선택할 상위 시드 개수 (예: 1000개 중 100개 또는 5개 중 1개)')
     
     args = parser.parse_args()

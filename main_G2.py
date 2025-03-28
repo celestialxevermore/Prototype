@@ -20,8 +20,10 @@ from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
 from models.TabularFLM_G2 import Model
-import psutil 
+import psutil
+from utils.visualization import visualize_attention_weights
 from torch_geometric.data import Batch
+from utils.visualization import visualize_attention_graph
 p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
@@ -51,7 +53,7 @@ def get_args():
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
     parser.add_argument('--source_lr_few', type=float, default=0.00001)
-    parser.add_argument('--llm_model', type=str, default='gpt2')
+    parser.add_argument('--llm_model', type=str, default = 'gpt2', choices = ['gpt2','sentence-bert','bio-bert','bio-clinical-bert','bio-llama', 'new', 'LLAMA'])
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
@@ -78,13 +80,28 @@ def get_args():
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args 
 
+def ad(adjacency):
+    
+    # 범위별 분포 분석
+    adj_flat = adjacency.flatten()
+    min_val = adj_flat.min().item()
+    max_val = adj_flat.max().item()
+    num_bins = 10
+    step = (max_val - min_val) / num_bins
+    
+    for i in range(num_bins):
+        lower = min_val + i * step
+        upper = min_val + (i + 1) * step
+        count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
+        print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
+
 def find_optimal_threshold(y_true, y_pred_proba):
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
     f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)  # avoid division by zero
     optimal_idx = np.argmax(f1_scores)
     return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
-def train_and_validate(model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10):
+def train_and_validate(args, model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10):
     
     """
     Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
@@ -113,17 +130,74 @@ def train_and_validate(model, train_loader, val_loader, criterion, optimizer, de
     best_threshold = 0.5
     best_model_state = None
 
+    vis_dir = os.path.join("visualizations")
+    os.makedirs(vis_dir, exist_ok=True)
+
+
+
+
     for epoch in range(epochs):
         # 1) Training
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
-        #pdb.set_trace()
         # 2) Evaluate on Train / Validation
         #    - Train 평가는 단순 모니터링용
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
 
+        if epoch % 10 == 0 or epoch == epoch - 1:
+            try:
+                viz_dir = os.path.join(f"visualizations/cosine_similarity/{args.llm_model}/cosine_similarity")
+                os.makedirs(viz_dir, exist_ok = True)
+                with torch.no_grad():
+                    model.eval()
+                    for batch in val_loader:
+                        batch_on_device = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                                          for k, v in batch.items()}
+                        
+                        # predict 메서드 호출 - 내부적으로 forward 실행하고 global_sim 저장
+                        prediction = model.predict(batch_on_device)
+                        
+                        # 코사인 유사도 시각화 
+                        if hasattr(model.layers[0], 'global_sim'):
+                            # 첫 번째 배치의 첫 번째 샘플에 대한 시각화
+                            sim_matrix = model.layers[0].global_sim[0].cpu().numpy()
+                            
+                            import matplotlib.pyplot as plt
+                            import numpy as np
+                            
+                            plt.figure(figsize=(10, 8))
+                            
+                            # 히트맵 생성
+                            im = plt.imshow(sim_matrix, cmap='viridis', vmin=-1, vmax=1)
+                            plt.colorbar(im, label='Cosine Similarity')
+                            
+                            # 행렬에 값 표시
+                            for i in range(sim_matrix.shape[0]):
+                                for j in range(sim_matrix.shape[1]):
+                                    text_color = 'white' if abs(sim_matrix[i, j]) > 0.5 else 'black'
+                                    plt.text(j, i, f'{sim_matrix[i, j]:.2f}', 
+                                             ha='center', va='center', color=text_color, fontsize=8)
+                            
+                            plt.title(f'llm model : {args.llm_model} Feature Cosine Similarity - Epoch {epoch}')
+                            plt.tight_layout()
+                            
+                            # 저장
+                            sim_path = os.path.join(viz_dir, f'cosine_similarity_epoch_{epoch}.png')
+                            plt.savefig(sim_path)
+                            plt.close()
+                            
+                            logger.info(f"{epoch} Cosine Similarity Heatmap: {sim_path}")
+                        
+                        logger.info(f"{epoch} Graph Visualization Completed")
+                        break  # 첫 번째 배치만 시각화
+                        
+            except Exception as e:
+                logger.error(f"시각화 중 오류 발생: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        
         if is_binary:
             # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)
@@ -298,7 +372,7 @@ def main():
         train_f1s_full, val_f1s_full,
         train_accs_full, val_accs_full,
         best_epoch_full, best_val_auc_full, best_threshold_full
-        ) = train_and_validate(model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
+        ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
                             device, args.train_epochs, is_binary)
 
         logger.info("[Full-shot] Final Testing with best threshold from Validation")
@@ -315,7 +389,7 @@ def main():
     train_f1s_few, val_f1s_few,
     train_accs_few, val_accs_few,
     best_epoch_few, best_val_auc_few, best_threshold_few
-    ) = train_and_validate(model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
+    ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
                         device, args.train_epochs, is_binary)
 
     logger.info("[Few-shot] Final Testing with best threshold from Validation")

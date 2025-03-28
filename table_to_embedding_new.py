@@ -197,7 +197,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         self.col_names = self.cat_col_names + self.num_col_names # n_i  = \{n_1, n_2, ... n_d\}
         self.cat_name_to_description = {name: self._get_feature_description(name) for name in self.cat_col_names}
         self.num_name_to_description = {name: self._get_feature_description(name) for name in self.num_col_names}
-    
+        pdb.set_trace()
         if self.scaler_type == 'pow':
             self.num_transformer = PowerTransformer().set_output(transform="pandas")
             X_num = X[self.num_col_names]
