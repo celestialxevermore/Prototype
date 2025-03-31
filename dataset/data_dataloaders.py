@@ -327,8 +327,7 @@ def prepare_embedding_dataloaders(args, dataset_name):
     
     # 파일 경로 설정
     base_path = "/storage/personal/eungyeop/dataset/embedding"
-    sub_dir = f"tabular_embeddings/{args.llm_model}"
-    #/storage/personal/eungyeop/dataset/embedding/tabular_embeddings_new
+    sub_dir = f"tabular_embeddings_/{args.llm_model}"
     emb_name =  f"embedding_{dataset_name}.pkl"
     file_path = os.path.join(base_path, sub_dir, emb_name)
     

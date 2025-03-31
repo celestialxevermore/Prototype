@@ -82,7 +82,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
 
     def _load_lm_model(self):
         # GPT2 모델
-        if (self.llm_model_name == "gpt2_mean") or (self.llm_model_name == "gpt2_auto"):
+        if self.llm_model_name == "gpt2":
             self.gpt2_config = GPT2Config.from_pretrained('openai-community/gpt2')
             self.gpt2_config.num_hidden_layers = 12
             self.gpt2_config.output_attentions = True
@@ -124,7 +124,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 print("Sentence-BERT 모델 로딩 완료")
             except ImportError:
                 raise ImportError("sentence-transformers 패키지를 설치해주세요: pip install sentence-transformers")
-        elif (self.llm_model_name == 'LLAMA_mean') or (self.llm_model_name == 'LLAMA_auto'):
+        elif self.llm_model_name == 'LLAMA':
             self.llama_config = LlamaConfig.from_pretrained('huggyllama/llama-7b')
             self.llama_config.output_attentions = True 
             self.llama_config.output_hidden_states = True 
@@ -223,14 +223,10 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 # BERT 계열 모델은 [CLS] 토큰 사용
                 if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
                     label_embedding = outputs.last_hidden_state[:, 0, :]  # [CLS] 토큰 (1, embed_dim)
-                elif self.llm_model_name in ["gpt2_auto","LLAMA_auto"]:
-                    last_token_idx = (label_input.attention_mask[0] == 1).sum() - 1 
-                    label_embedding = outputs.last_hidden_state[0, last_token_idx, :].unsqueeze(0)
-                elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                    label_embedding = outputs.last_hidden_state.mean(dim=1)  # (1, embed_dim)
+                # GPT2, LLaMA는 mean pooling
                 else:
-                    label_embedding = outputs.last_hidden_state.mean(dim=1)
-
+                    label_embedding = outputs.last_hidden_state.mean(dim=1)  # (1, embed_dim)
+        
         return label_embedding
         
     def _get_feature_description(self, feature_name: str) -> str:
@@ -320,14 +316,12 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         
         cat_name_value_embeddings = [] 
         desc_embeddings = []
-        cat_name_texts = []
-
+        desc_texts = [] 
         for feature_name in X_categorical.columns:
             
             # Description embedding
             desc = cat_name_to_description[feature_name]
-            cat_name_texts.append(feature_name)
-            #desc_texts.append(desc)
+            desc_texts.append(desc)
             if self.llm_model_name == 'sentence-bert':
                 with torch.no_grad():
                     desc_emb = self.llm_model.encode(desc, convert_to_tensor=True)
@@ -347,42 +341,26 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     outputs = self.llm_model(**desc_input)
                     if self.llm_model_name in ["bio-bert", 'bio-clinical-bert']:
                         desc_emb = outputs.last_hidden_state[:,0,:].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_auto","LLAMA_auto"]:
-                        last_token_idx = (desc_input.attention_mask[0] == 1).sum() - 1 
-                        desc_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
                     else:
                         desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
                 desc_embeddings.append(desc_emb)
-            # Value embeddings
-            current_value = X_categorical[feature_name].values[0]
-            unique_values = X_categorical_total[feature_name].unique() 
-            name_value_text = (
-                f"{feature_name} can have these values: {','.join(unique_values)}. "
-                f"Current value is {current_value}. "
-            )
-            if self.llm_model_name == 'sentence-bert':
-                with torch.no_grad():
-                    name_value_emb = self.llm_model.encode(name_value_text, convert_to_tensor=True)
-            else:
+                
+                # Value embeddings
+                current_value = X_categorical[feature_name].values[0]
+                unique_values = X_categorical_total[feature_name].unique() 
+                name_value_text = (
+                    f"{feature_name} can have these values: {','.join(unique_values)}. "
+                    f"Current value is {current_value}. "
+                )
                 name_value_input = self.tokenizer(name_value_text, return_tensors="pt", padding=True, truncation=True)
                 with torch.no_grad():
-                    outputs = self.llm_model(**name_value_input)
-                    if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
-                        name_value_emb = outputs.last_hidden_state[:,0,:].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_auto","LLAMA_auto"]:
-                        last_token_idx = (name_value_input.attention_mask[0] == 1).sum() - 1
-                        name_value_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0) 
-                    elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        name_value_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-                    else:
-                        name_value_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-                cat_name_value_embeddings.append(name_value_emb)
+                    name_value_emb = self.llm_model(**name_value_input).last_hidden_state.mean(dim=1).squeeze(0)
+                    cat_name_value_embeddings.append(name_value_emb)
+                    
 
         cat_name_value_embeddings = torch.stack(cat_name_value_embeddings, dim=0)
         desc_embeddings = torch.stack(desc_embeddings, dim=0)
-        return cat_name_value_embeddings, desc_embeddings, cat_name_texts
+        return cat_name_value_embeddings, desc_embeddings, desc_texts
     
 
 
@@ -408,16 +386,17 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         """
         desc_embeddings = []
         prompt_embeddings = [] 
-        num_name_texts = []  
+        desc_texts = [] 
         for i, col_name in enumerate(self.num_col_names):
             # Name embedding
             
             desc = num_name_to_desriptions.get(col_name, col_name)
-            num_name_texts.append(col_name)
+            desc_texts.append(desc)
 
             if self.llm_model_name == 'sentence-bert':
                 with torch.no_grad():
                     desc_emb = self.llm_model.encode(desc, convert_to_tensor = True)
+                    desc_embeddings.append(desc_emb)
             else:
                 desc_input = self.tokenizer(desc, return_tensors="pt", padding=True, truncation=True)
 
@@ -425,14 +404,9 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     outputs = self.llm_model(**desc_input)
                     if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
                         desc_emb = outputs.last_hidden_state[:,0,:].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_auto", "LLAMA_auto"]:
-                        last_token_idx = (desc_input.attention_mask[0] == 1).sum() - 1 
-                        desc_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
                     else:
                         desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-            desc_embeddings.append(desc_emb)
+                desc_embeddings.append(desc_emb)
 
             col_values = x_num_raw[col_name].values
             value = col_values[0]
@@ -483,22 +457,15 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 prompt_input = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
                 with torch.no_grad():
                     outputs = self.llm_model(**prompt_input)
-                    
                     if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
                         prompt_emb = outputs.last_hidden_state[:,0,:].squeeze(0)  # [CLS] 토큰
-                    elif self.llm_model_name in ["gpt2_auto", "LLAMA_auto"]:
-                        last_token_idx = (prompt_input.attention_mask[0] == 1).sum() - 1 
-                        prompt_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        prompt_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
                     else:
                         prompt_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)  # mean pooling
 
             prompt_embeddings.append(prompt_emb)
         desc_embeddings = torch.stack(desc_embeddings, dim=0)
-        prompt_embeddings = torch.stack(prompt_embeddings, dim=0)
-        #pdb.set_trace()
-        return prompt_embeddings, desc_embeddings, num_name_texts
+        prompt_embeddings = torch.stack(prompt_embeddings, dim=0)   
+        return prompt_embeddings, desc_embeddings, desc_texts
     
 
     def _get_embeddings(self, X_categorical, X_numerical, X_numerical_raw, cat_name_to_description, num_name_to_description, y, idx):
@@ -586,5 +553,4 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         # print(f"num_desc_embeddings: {data['num_desc_embeddings'].shape}")
         # print(f"num_desc_texts: {data['num_desc_texts']}")
         # pdb.set_trace()
-        
         return data

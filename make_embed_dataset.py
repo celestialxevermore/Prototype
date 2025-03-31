@@ -100,12 +100,13 @@ if __name__ == "__main__":
     parser.add_argument('--input_dim', type=int, default=384)
     parser.add_argument('--label', action='store_true',
                        help='If True, uses label_table. If False, uses origin_table.')
+    parser.add_argument('--cpu', type = int, default = 30)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--scaler_type', type=str, 
                        default='pow',
                        choices=['std', 'pow'],
                        help='Type of scaler to use for numerical features.')
-    parser.add_argument('--llm_model', type = str, default='gpt2', choices=['gpt2','sentence-bert', 'bio-bert', 'bio-clinical-bert', 'LLAMA'],
+    parser.add_argument('--llm_model', type = str, default='gpt2_mean', choices=['gpt2_mean','gpt2_auto','sentence-bert', 'bio-bert', 'bio-clinical-bert', 'LLAMA_mean', 'LLAMA_auto'],
                         help='Name of the language model to use')
     #parser.add_argument('--source_dataset_name', type = str, default='heart')
     args = parser.parse_args()
@@ -117,7 +118,7 @@ if __name__ == "__main__":
     #torch.use_deterministic_algorithms(True)
     import psutil
     p = psutil.Process()
-    p.cpu_affinity(range(30, 64))
+    p.cpu_affinity(range(args.cpu, args.cpu + 3))
     torch.manual_seed(args.random_seed)
     np.random.seed(args.random_seed)
     random.seed(args.random_seed)
@@ -127,9 +128,9 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
-        #"heart",
+        "heart",
         #"diabetes",
-        "adult"
+        #"adult"
     ]
     
     for dataset_name in datasets_to_process:

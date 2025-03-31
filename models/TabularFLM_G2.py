@@ -40,8 +40,16 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
-        self.global_topology_proj = nn.Linear(input_dim, input_dim)
-        self.adaptive_weight_proj = nn.Linear(input_dim, input_dim)
+        self.global_topology_proj_head = nn.Linear(input_dim, input_dim)
+        self.global_topology_proj_tail = nn.Linear(input_dim, input_dim)
+        nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
+        nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
+
+        self.adaptive_weight_proj_head = nn.Linear(input_dim, input_dim)
+        self.adaptive_weight_proj_tail = nn.Linear(input_dim, input_dim)
+        nn.init.xavier_uniform_(self.adaptive_weight_proj_head.weight, gain=1 / math.sqrt(2))
+        nn.init.xavier_uniform_(self.adaptive_weight_proj_tail.weight, gain=1 / math.sqrt(2))
+
 
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
@@ -102,27 +110,35 @@ class AdaptiveGraphAttention(nn.Module):
         '''
             1. Glboal Topology
         '''
-        desc_embeddings = self.global_topology_proj(desc_embeddings)
-        desc_embeddings_ = desc_embeddings / desc_embeddings.norm(dim=-1, keepdim=True)
-        self.global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
+        desc_embeddings_head = self.global_topology_proj_head(desc_embeddings)
+        desc_embeddings_tail = self.global_topology_proj_tail(desc_embeddings)
+        desc_embeddings_head_ = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
+        desc_embeddings_tail_ = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
+        self.global_sim = torch.matmul(desc_embeddings_head_, desc_embeddings_tail_.transpose(-1, -2))
+        # desc_embeddings = self.global_topology_proj(desc_embeddings)
+        # desc_embeddings_ = desc_embeddings / desc_embeddings.norm(dim=-1, keepdim=True)
+        
+        self.global_sim = torch.matmul(desc_embeddings_head_, desc_embeddings_tail_.transpose(-1, -2))
+        #self.global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
         global_topology = torch.sigmoid(self.global_sim + self.topology_bias)
-        self.global_topology = global_topology 
         
         if not self.frozen:
             global_topology_A = (global_topology > self.threshold).float() - global_topology.detach() + global_topology
-        else:
+        else: 
             global_topology_A = (global_topology > self.threshold).float()
 
         '''
             2. Sample-wise Weight
         '''
         var_embeddings = name_value_embeddings[:, 1:, :]
-        var_embeddings_ = var_embeddings / var_embeddings.norm(dim=-1, keepdim=True)
-        sample_sim = torch.matmul(var_embeddings_, var_embeddings_.transpose(-1, -2))
-
+        var_embeddings_head = self.adaptive_weight_proj_head(var_embeddings)
+        var_embeddings_tail = self.adaptive_weight_proj_tail(var_embeddings)
+        var_embeddings_head_ = var_embeddings_head / var_embeddings_head.norm(dim=-1, keepdim=True)
+        var_embeddings_tail_ = var_embeddings_tail / var_embeddings_tail.norm(dim=-1, keepdim=True)
+        self.sample_sim = torch.matmul(var_embeddings_head_, var_embeddings_tail_.transpose(-1, -2))
         global_topology_A = self._no_self_interaction(global_topology_A)
-        G = global_topology_A * sample_sim 
-        adjacency = torch.softmax(G, dim=-1)
+        self.G = global_topology_A * self.sample_sim 
+        adjacency = torch.softmax(self.G, dim=-1)
         
         # 디버깅: 필요시 주석 해제
         # self._debug_fr_graph(global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency)
@@ -470,7 +486,7 @@ class Model(nn.Module):
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
         name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)    
 
-        x = name_value_embeddings 
+        x = name_value_embeddings
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
             attn_output, attn_weights = layer(desc_embeddings, norm_x)

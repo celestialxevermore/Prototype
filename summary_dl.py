@@ -23,7 +23,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
     if selected_seeds:
         selected_seeds = [str(seed) for seed in selected_seeds]  # 문자열로 변환
     
-    datasets_to_process = selected_datasets if selected_datasets else ['adult', 'diabetes', 'heart']
+    datasets_to_process = selected_datasets if selected_datasets else ['heart']
     
     for dataset in datasets_to_process:
         results_by_config = {}
@@ -143,8 +143,8 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
 
 def main():
     parser = argparse.ArgumentParser(description='Summarize DL results')
-    parser.add_argument('--base_dir', type=str, 
-                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_Experiment_TabularFLM_G5",
+    parser.add_argument('--base_dir', type=str, #/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_tabular_embedding_new_bio-clinical-bert
+                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_tabular_embedding_new_bio-clinical-bert",
                        help='Base directory containing the results')
     parser.add_argument('--datasets', nargs='+', type=str,
                        help='Specific datasets to process (e.g., --datasets adult diabetes)')

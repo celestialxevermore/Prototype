@@ -20,8 +20,16 @@ from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
 from models.TabularFLM_G import Model
-import psutil 
+import psutil
+from utils.visualization import visualize_attention_weights
 from torch_geometric.data import Batch
+from utils.visualization import visualize_attention_graph
+from datetime import datetime
+import networkx as nx               
+import matplotlib.pyplot as plt
+import numpy as np
+experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
@@ -34,7 +42,7 @@ logger = setup_logger()
 
 def get_args():
     parser = argparse.ArgumentParser(description='ProtoLLM For Tabular Task')
-    parser.add_argument('--random_seed', type=int, default=42, help='random_seed')
+    parser.add_argument('--random_seed', type=int, default=2095, help='random_seed')
     parser.add_argument('--train_epochs', type=int, default=300, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
     parser.add_argument('--input_dim', type = int, default = 768)
@@ -42,41 +50,56 @@ def get_args():
     parser.add_argument('--output_dim', type = int, default = 1)
     parser.add_argument('--num_layers', type = int, default = 3)
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--meta_dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--aggr_attn_dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--ind_dropout_rate', type = float, default = 0.15)
-    parser.add_argument('--shared_dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--flatten_dropout_rate', type = float, default = 0.3)
     parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_dataset_name', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland'])
-    #parser.add_argument('--source_dataset_names', nargs='+', type = str, default = ['cleveland', 'heart_statlog', 'heart'] , help = 'List of source dataaset name')
     parser.add_argument('--target_dataset_name', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
     parser.add_argument('--source_lr_few', type=float, default=0.00001)
-    parser.add_argument('--llm_model', type=str, default='gpt2')
-    parser.add_argument('--meta_heads', type=int, default= 2)
-    parser.add_argument('--meta_num_layers', type=int, default= 2)
+    parser.add_argument('--llm_model', type=str, default = 'gpt2_mean', choices = ['gpt2_mean','gpt2_auto','sentence-bert','bio-bert','bio-clinical-bert','bio-llama', 'new', 'LLAMA_mean','LLAMA_auto'])
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
     parser.add_argument('--model_type', type=str, default='TabularFLM', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5', 'TabularFLM'])
-    parser.add_argument('--scaler_type', type=str, default='pow', choices=['pow'])
     parser.add_argument('--label', type = str, choices = ['add', 'no'], default = 'add')
     parser.add_argument('--enc_type', type = str, choices = ['ind', 'shared'], default = 'ind')
     parser.add_argument('--meta_type', type = str, choices = ['meta_attn', 'meta_mlp'], default = 'meta_attn')
     parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
-    parser.add_argument('--threshold', type = float, default = 0.3)
+    parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
+    # GMM 관련 인자 추가
+    parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
+    parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
+    parser.add_argument('--num_prototypes', type=int, default=32, help='Number of prototypes(phenotypes) in GMM')
+    parser.add_argument('--gmm_stage_num', type=int, default=10, help='EM step iterations in GMM')
+    parser.add_argument('--gmm_momentum', type=float, default=0.9, help='Momentum for prototype updates')
+    parser.add_argument('--gmm_beta', type=float, default=1.0, help='Weight for reconstructed embedding')
+    parser.add_argument('--gmm_lambda', type=float, default=2.0, help='Temperature parameter for responsibility')
+    parser.add_argument('--gmm_eps', type=float, default=1e-6, help='Small value for numerical stability')
     args = parser.parse_args()
 
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args 
+
+def ad(adjacency):
+    
+    # 범위별 분포 분석
+    adj_flat = adjacency.flatten()
+    min_val = adj_flat.min().item()
+    max_val = adj_flat.max().item()
+    num_bins = 10
+    step = (max_val - min_val) / num_bins
+    
+    for i in range(num_bins):
+        lower = min_val + i * step
+        upper = min_val + (i + 1) * step
+        count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
+        print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
 
 def find_optimal_threshold(y_true, y_pred_proba):
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
@@ -84,8 +107,8 @@ def find_optimal_threshold(y_true, y_pred_proba):
     optimal_idx = np.argmax(f1_scores)
     return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
-def train_and_validate(model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10):
-    #pdb.set_trace()
+def train_and_validate(args, model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10, mode="Full"):
+    
     """
     Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
     마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
@@ -109,21 +132,230 @@ def train_and_validate(model, train_loader, val_loader, criterion, optimizer, de
     # T2G 스타일의 2단계 학습을 위한 변수 추가
     frozen_switch = True  # 그래프 구조 고정 전환 여부
     
-    # Validation에서 찾은 best threshold (Binary 시에만)
     best_threshold = 0.5
     best_model_state = None
+    
+    viz_dir = os.path.join(f"visualizations/{args.llm_model}_{experiment_id}/cosine_similarity/{args.source_dataset_name}/{mode}")
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    graph_viz_dir = os.path.join(f"visualizations/{args.llm_model}_{experiment_id}/graph_structure/{args.source_dataset_name}/{mode}")
+    os.makedirs(graph_viz_dir, exist_ok=True)
 
     for epoch in range(epochs):
         # 1) Training
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
-        #pdb.set_trace()
         # 2) Evaluate on Train / Validation
-        #    - Train 평가는 단순 모니터링용
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
 
+        
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            with torch.no_grad():
+                model.eval()
+                
+                max_samples = 20  # 최대 20개 샘플만 시각화
+                sample_count = 0
+                
+                epoch_dir = os.path.join(graph_viz_dir, f'epoch_{epoch}')
+                os.makedirs(epoch_dir, exist_ok=True)
+                
+                for batch_idx, batch in enumerate(val_loader):
+                    batch_on_device = {
+                        k: v.to(device) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()
+                    }
+                    prediction = model.predict(batch_on_device)
+
+                    # 첫 번째 레이어 기준
+                    batch_size = model.layers[0].attn_weights.shape[0]
+                    
+                    for sample_idx in range(batch_size):
+                        # 1) Attention 가중치(헤드 평균)
+                        attn_weights = model.layers[0].attn_weights[sample_idx]  # [n_heads, seq, seq]
+                        graph_matrix = attn_weights.mean(dim=0).cpu().numpy()     # (seq, seq)
+
+                        n_nodes = graph_matrix.shape[0]
+                        
+                        # 2) Edge 리스트(모든 i->j) 수집 (Barplot용)
+                        edges_info = []
+                        for i in range(n_nodes):
+                            for j in range(n_nodes):
+                                if i != j:
+                                    w = abs(graph_matrix[i, j])
+                                    edges_info.append((f"{i}->{j}", w))
+                        
+                        # 가중치 내림차순 정렬
+                        edges_info.sort(key=lambda x: x[1], reverse=True)
+                        edge_labels = [x[0] for x in edges_info]
+                        edge_weights = [x[1] for x in edges_info]
+
+                        # 3) Feature names 정리
+                        feature_names = []
+                        if 'cat_desc_texts' in batch_on_device:
+                            for feature in batch_on_device['cat_desc_texts']:
+                                if isinstance(feature, tuple):
+                                    clean_name = str(feature[0])
+                                else:
+                                    try:
+                                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                                        clean_name = clean_name.split(',')[0]
+                                    except:
+                                        clean_name = str(feature)
+                                feature_names.append(clean_name)
+
+                        if 'num_desc_texts' in batch_on_device:
+                            for feature in batch_on_device['num_desc_texts']:
+                                if isinstance(feature, tuple):
+                                    clean_name = str(feature[0])
+                                else:
+                                    try:
+                                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                                        clean_name = clean_name.split(',')[0]
+                                    except:
+                                        clean_name = str(feature)
+                                feature_names.append(clean_name)
+
+                        # 중복 제거 (순서 유지)
+                        seen = set()
+                        unique_features = []
+                        for feat in feature_names:
+                            if feat not in seen:
+                                seen.add(feat)
+                                unique_features.append(feat)
+                        feature_names = unique_features
+
+                        # 4) Figure & 2 Subplots 생성
+                        fig, (ax_bar, ax_graph) = plt.subplots(1, 2, figsize=(20, 10))
+
+                        # -----(A) Left Subplot: Barplot)-----
+                        ax_bar.bar(range(len(edge_weights)), edge_weights, color='gray')
+                        ax_bar.set_title('All Edge Weights', fontsize=12)
+                        ax_bar.set_xlabel('Edge (i->j)')
+                        ax_bar.set_ylabel('Attention Weight')
+
+                        # x축 라벨 (너무 많으면 회전)
+                        ax_bar.set_xticks(range(len(edge_labels)))
+                        ax_bar.set_xticklabels(edge_labels, rotation=90, fontsize=8)
+
+                        # -----(B) Right Subplot: Network Graph)-----
+                        G = nx.DiGraph()
+                        node_labels = {}
+
+                        for i in range(n_nodes):
+                            if i == 0:
+                                node_name = "CLS"
+                                node_color = "red"
+                            else:
+                                idx_feat = i - 1
+                                if idx_feat < len(feature_names):
+                                    node_name = feature_names[idx_feat]
+                                    node_color = "blue"
+                                else:
+                                    node_name = f"feature_{i}"
+                                    node_color = "blue"
+
+                            G.add_node(i, name=node_name, color=node_color)
+                            node_labels[i] = node_name
+
+                        # CLS->Var / Var->Var 구분해서 그리기
+                        min_edge_weight = 0.1
+                        for i in range(n_nodes):
+                            for j in range(n_nodes):
+                                if i == j:
+                                    continue
+                                w = abs(graph_matrix[i, j])
+                                if w > min_edge_weight:
+                                    if i == 0 and j != 0:
+                                        # CLS->Var
+                                        G.add_edge(i, j, weight=w, cls_to_var=True)
+                                    elif j == 0:
+                                        # Var->CLS는 표시 안 함
+                                        continue
+                                    else:
+                                        # Var->Var
+                                        G.add_edge(i, j, weight=w, cls_to_var=False)
+
+                        pos = {}
+                        pos[0] = np.array([0, 0])
+                        non_center_nodes = n_nodes - 1
+                        radius = 1.0
+                        for i_ in range(1, n_nodes):
+                            angle_ = 2 * np.pi * (i_ - 1) / non_center_nodes
+                            pos[i_] = np.array([radius * np.cos(angle_), radius * np.sin(angle_)])
+
+                        # 배경 그리드
+                        for r_ in [0.25, 0.5, 0.75, 1.0]:
+                            circle = plt.Circle((0, 0), r_, fill=False, color='lightgray', linestyle='--', alpha=0.5)
+                            ax_graph.add_patch(circle)
+                        for i_ in range(1, n_nodes):
+                            angle__ = 2 * np.pi * (i_ - 1) / non_center_nodes
+                            x_ = 1.1 * np.cos(angle__)
+                            y_ = 1.1 * np.sin(angle__)
+                            ax_graph.plot([0, x_], [0, y_], color='lightgray', linestyle='--', alpha=0.5)
+
+                        node_colors = [d["color"] for _, d in G.nodes(data=True)]
+                        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=800, ax=ax_graph, edgecolors='gray')
+
+                        cls_edges = [(u, v) for u, v, d in G.edges(data=True) if d.get('cls_to_var')]
+                        var_edges = [(u, v) for u, v, d in G.edges(data=True) if not d.get('cls_to_var')]
+
+                        cls_weights = [G[u][v]['weight'] for (u, v) in cls_edges]
+                        var_weights = [G[u][v]['weight'] for (u, v) in var_edges]
+
+                        # CLS->Var: 빨강 굵은선
+                        if cls_edges:
+                            nx.draw_networkx_edges(
+                                G, pos, edgelist=cls_edges,
+                                width=[2 + 5*w_ for w_ in cls_weights],
+                                edge_color='crimson',
+                                alpha=0.9,
+                                ax=ax_graph,
+                                arrows=True
+                            )
+
+                        # Var->Var: 파랑 점선
+                        if var_edges:
+                            nx.draw_networkx_edges(
+                                G, pos, edgelist=var_edges,
+                                width=[1 + 2*w_ for w_ in var_weights],
+                                edge_color='blue',
+                                style='dashed',
+                                alpha=0.5,
+                                ax=ax_graph,
+                                arrows=True
+                            )
+
+                        label_options = {
+                            "font_size": 9,
+                            "font_color": "black",
+                            "bbox": dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                        }
+                        nx.draw_networkx_labels(G, pos, labels=node_labels, ax=ax_graph, **label_options)
+
+                        ax_graph.set_title(f'Graph Structure - Epoch {epoch} - Sample {sample_count}', fontsize=12)
+                        ax_graph.axis('off')
+                        ax_graph.set_xlim([-1.2, 1.2])
+                        ax_graph.set_ylim([-1.2, 1.2])
+
+                        fig.suptitle(f'Epoch {epoch} - Sample {sample_count}', fontsize=14)
+                        fig.tight_layout()
+
+                        # 저장
+                        graph_path = os.path.join(epoch_dir, f'sample_{sample_count}.png')
+                        fig.savefig(graph_path, dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+                        
+                        logger.info(f"에포크 {epoch} - 샘플 {sample_count} 바플롯 & 그래프 시각화 저장: {graph_path}")
+
+                        sample_count += 1
+                        if sample_count >= max_samples:
+                            break
+
+                    if sample_count >= max_samples:
+                        break
+                
         if is_binary:
             # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)
@@ -260,7 +492,7 @@ def main():
     args  = get_args()
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
-    #pdb.set_trace()
+    
     logger.info(f"Starting experiment with dataset: {args.source_dataset_name}")
     logger.info(f"Device: {device}")
 
@@ -298,8 +530,8 @@ def main():
         train_f1s_full, val_f1s_full,
         train_accs_full, val_accs_full,
         best_epoch_full, best_val_auc_full, best_threshold_full
-        ) = train_and_validate(model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
-                            device, args.train_epochs, is_binary)
+        ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
+                            device, args.train_epochs, is_binary, mode="Full")
 
         logger.info("[Full-shot] Final Testing with best threshold from Validation")
         (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
@@ -315,8 +547,8 @@ def main():
     train_f1s_few, val_f1s_few,
     train_accs_few, val_accs_few,
     best_epoch_few, best_val_auc_few, best_threshold_few
-    ) = train_and_validate(model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary)
+    ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
+                        device, args.train_epochs, is_binary, mode="Few")
 
     logger.info("[Few-shot] Final Testing with best threshold from Validation")
     (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,

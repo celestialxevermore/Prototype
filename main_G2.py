@@ -19,11 +19,17 @@ from utils.train_test import binary_train, binary_evaluate, multi_train, multi_e
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM_G2 import Model
+from models.TabularFLM_G import Model
 import psutil
 from utils.visualization import visualize_attention_weights
 from torch_geometric.data import Batch
 from utils.visualization import visualize_attention_graph
+from datetime import datetime
+                    
+import matplotlib.pyplot as plt
+import numpy as np
+experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
@@ -53,7 +59,7 @@ def get_args():
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
     parser.add_argument('--source_lr_few', type=float, default=0.00001)
-    parser.add_argument('--llm_model', type=str, default = 'gpt2', choices = ['gpt2','sentence-bert','bio-bert','bio-clinical-bert','bio-llama', 'new', 'LLAMA'])
+    parser.add_argument('--llm_model', type=str, default = 'gpt2_mean', choices = ['gpt2_mean','gpt2_auto','sentence-bert','bio-bert','bio-clinical-bert','bio-llama', 'new', 'LLAMA_mean','LLAMA_auto'])
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
@@ -126,78 +132,187 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
     # T2G 스타일의 2단계 학습을 위한 변수 추가
     frozen_switch = True  # 그래프 구조 고정 전환 여부
     
-    # Validation에서 찾은 best threshold (Binary 시에만)
     best_threshold = 0.5
     best_model_state = None
-
-    vis_dir = os.path.join("visualizations")
-    os.makedirs(vis_dir, exist_ok=True)
-
-
-
+    
+    viz_dir = os.path.join(f"visualizations/{args.llm_model}_{experiment_id}/cosine_similarity/{args.source_dataset_name}")
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    graph_viz_dir = os.path.join(f"visualizations/{args.llm_model}_{experiment_id}/graph_structure/{args.source_dataset_name}")
+    os.makedirs(graph_viz_dir, exist_ok=True)
 
     for epoch in range(epochs):
         # 1) Training
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
         # 2) Evaluate on Train / Validation
-        #    - Train 평가는 단순 모니터링용
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
 
-        if epoch % 10 == 0 or epoch == epoch - 1:
-            try:
-                viz_dir = os.path.join(f"visualizations/cosine_similarity/{args.llm_model}/cosine_similarity")
-                os.makedirs(viz_dir, exist_ok = True)
-                with torch.no_grad():
-                    model.eval()
-                    for batch in val_loader:
-                        batch_on_device = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                                          for k, v in batch.items()}
-                        
-                        # predict 메서드 호출 - 내부적으로 forward 실행하고 global_sim 저장
-                        prediction = model.predict(batch_on_device)
-                        
-                        # 코사인 유사도 시각화 
-                        if hasattr(model.layers[0], 'global_sim'):
-                            # 첫 번째 배치의 첫 번째 샘플에 대한 시각화
-                            sim_matrix = model.layers[0].global_sim[0].cpu().numpy()
-                            
-                            import matplotlib.pyplot as plt
-                            import numpy as np
-                            
-                            plt.figure(figsize=(10, 8))
-                            
-                            # 히트맵 생성
-                            im = plt.imshow(sim_matrix, cmap='viridis', vmin=-1, vmax=1)
-                            plt.colorbar(im, label='Cosine Similarity')
-                            
-                            # 행렬에 값 표시
-                            for i in range(sim_matrix.shape[0]):
-                                for j in range(sim_matrix.shape[1]):
-                                    text_color = 'white' if abs(sim_matrix[i, j]) > 0.5 else 'black'
-                                    plt.text(j, i, f'{sim_matrix[i, j]:.2f}', 
-                                             ha='center', va='center', color=text_color, fontsize=8)
-                            
-                            plt.title(f'llm model : {args.llm_model} Feature Cosine Similarity - Epoch {epoch}')
-                            plt.tight_layout()
-                            
-                            # 저장
-                            sim_path = os.path.join(viz_dir, f'cosine_similarity_epoch_{epoch}.png')
-                            plt.savefig(sim_path)
-                            plt.close()
-                            
-                            logger.info(f"{epoch} Cosine Similarity Heatmap: {sim_path}")
-                        
-                        logger.info(f"{epoch} Graph Visualization Completed")
-                        break  # 첫 번째 배치만 시각화
-                        
-            except Exception as e:
-                logger.error(f"시각화 중 오류 발생: {str(e)}")
-                import traceback
-                traceback.print_exc()
         
+        if epoch % 10 == 0 or epoch == epoch - 1:
+            with torch.no_grad():
+                model.eval()
+                for batch in val_loader:
+                    batch_on_device = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                                      for k, v in batch.items()}
+                    
+                    prediction = model.predict(batch_on_device)
+                    import networkx as nx
+
+                    # G 행렬 가져오기
+                    graph_matrix = model.layers[0].attn_weights[0].mean(dim = 0).cpu().numpy()
+                    # 그래프 생성
+                    G = nx.DiGraph()
+                    
+                    # 특성 이름 추출 및 중복 제거 부분
+                    feature_names = []
+                    if 'cat_desc_texts' in batch:
+                        for feature in batch['cat_desc_texts']:
+                            # 튜플인 경우 처리
+                            if isinstance(feature, tuple):
+                                clean_name = str(feature[0])  # 튜플의 첫 요소 사용
+                            else:
+                                # 문자열인 경우 처리
+                                try:
+                                    clean_name = feature.split("'")[1] if "'" in feature else feature
+                                    clean_name = clean_name.split(',')[0]  # 첫 번째 항목만 사용
+                                except:
+                                    clean_name = str(feature)  # 모든 경우 대비해 문자열 변환
+                                    
+                            feature_names.append(clean_name)
+
+                    if 'num_desc_texts' in batch:
+                        for feature in batch['num_desc_texts']:
+                            # 튜플인 경우 처리
+                            if isinstance(feature, tuple):
+                                clean_name = str(feature[0])  # 튜플의 첫 요소 사용
+                            else:
+                                try:
+                                    clean_name = feature.split("'")[1] if "'" in feature else feature
+                                    clean_name = clean_name.split(',')[0]  # 첫 번째 항목만 사용
+                                except:
+                                    clean_name = str(feature)  # 안전하게 문자열 변환
+                                    
+                            feature_names.append(clean_name)
+
+                    # 중복 제거하되 순서는 유지
+                    seen = set()
+                    unique_features = []
+                    for feat in feature_names:
+                        if feat not in seen:
+                            seen.add(feat)
+                            unique_features.append(feat)
+                    feature_names = unique_features
+                    
+                    # 노드 추가
+                    n_nodes = graph_matrix.shape[0]
+                    node_labels = {}
+                    for i in range(n_nodes):
+                        if i == 0:
+                            node_name = "CLS"  # 더 명확한 이름 사용
+                            node_color = "red"
+                        else:
+                            if i-1 < len(feature_names):
+                                node_name = feature_names[i-1]
+                                node_color = "blue"
+                            else:
+                                node_name = f"feature_{i}"
+                                node_color = "blue"
+                        
+                        G.add_node(i, name=node_name, color=node_color)
+                        node_labels[i] = node_name
+                    
+                    # 엣지 임계값 설정
+                    min_edge_weight = 0.05
+                    
+                    # 엣지 추가
+                    for i in range(n_nodes):
+                        for j in range(n_nodes):
+                            if i != j:
+                                weight = abs(graph_matrix[i, j])
+                                if weight > min_edge_weight:
+                                    G.add_edge(i, j, weight=weight)
+                    
+                    # 그래프 시각화
+                    fig2 = plt.figure(figsize=(14, 14))
+                    ax2 = fig2.add_subplot(111)
+                    
+                    # 노드 개수 확인
+                    non_center_nodes = n_nodes - 1  # center 노드를 제외한 노드 수
+                    
+                    # 커스텀 레이아웃 만들기 - 정각형 배치
+                    pos = {}
+                    
+                    # center 노드(0번)를 가운데에 배치
+                    pos[0] = np.array([0, 0])
+                    
+                    # 나머지 노드들을 정각형으로 배치
+                    radius = 1.0  # 원의 반지름
+                    for i in range(1, n_nodes):
+                        # 각 노드의 각도 계산 (2π를 노드 수로 나눔)
+                        angle = 2 * np.pi * (i - 1) / non_center_nodes
+                        # 각도에 따른 x, y 좌표 계산 (원의 둘레에 배치)
+                        pos[i] = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+                    
+                    # 배경 그리드 추가 (원형 눈금선)
+                    circle_radii = [0.25, 0.5, 0.75, 1.0]
+                    for r in circle_radii:
+                        circle = plt.Circle((0, 0), r, fill=False, color='lightgray', linestyle='--', alpha=0.5)
+                        ax2.add_patch(circle)
+                    
+                    # 방사형 그리드 라인 추가
+                    for i in range(1, n_nodes):
+                        angle = 2 * np.pi * (i - 1) / non_center_nodes
+                        x = 1.1 * np.cos(angle)
+                        y = 1.1 * np.sin(angle)
+                        ax2.plot([0, x], [0, y], color='lightgray', linestyle='--', alpha=0.5)
+                    
+                    # 노드 그리기
+                    node_colors = [data["color"] for _, data in G.nodes(data=True)]
+                    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=800, ax=ax2, edgecolors='gray')
+                    
+                    # 엣지 그리기 - 가중치에 따른 색상 및 선 굵기 적용
+                    edges = G.edges(data=True)
+                    weights = [data['weight'] for _, _, data in edges]
+                    
+                    # 엣지 그리기
+                    if edges:
+                        # 가중치 값 정규화 (0~1 범위로)
+                        min_weight = min(weights)
+                        max_weight = max(weights)
+                        normalized_weights = [(w - min_weight) / (max_weight - min_weight) if max_weight > min_weight else 0.5 for w in weights]
+                        
+                        # 색상맵 설정 (파란색 계열 그라데이션 - 더 보기 좋은 색상)
+                        cmap = plt.cm.Blues
+                        edge_colors = [cmap(0.3 + 0.7 * w) for w in normalized_weights]  # 밝은 파란색 -> 진한 파란색
+                        edge_widths = [1 + w * 7 for w in weights]  # 가중치에 비례하는 선 굵기
+                        
+                        nx.draw_networkx_edges(G, pos, edgelist=edges, width=edge_widths, 
+                                              edge_color=edge_colors, alpha=0.8, ax=ax2)
+                    
+                    # 노드 라벨 표시 - 배경색 추가하여 가독성 향상
+                    label_options = {"font_size": 9, "font_color": "black", 
+                                    "bbox": dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)}
+                    nx.draw_networkx_labels(G, pos, labels=node_labels, ax=ax2, **label_options)
+                    
+                    ax2.set_title(f'Graph Structure - Epoch {epoch}', fontsize=15)
+                    ax2.axis('off')
+                    
+                    # 여백 조정
+                    ax2.set_xlim([-1.2, 1.2])
+                    ax2.set_ylim([-1.2, 1.2])
+                    
+                    graph_path = os.path.join(graph_viz_dir, f'{experiment_id}_{args.llm_model}_graph_structure_epoch_{epoch}.png')
+                    fig2.savefig(graph_path, dpi=300, bbox_inches='tight')
+                    plt.close(fig2)
+                    
+                    logger.info(f"{epoch} 그래프 구조 시각화 저장: {graph_path}")
+                    
+                    break  # 첫 번째 배치만 시각화
+                        
+                
         if is_binary:
             # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)
@@ -373,7 +488,7 @@ def main():
         train_accs_full, val_accs_full,
         best_epoch_full, best_val_auc_full, best_threshold_full
         ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
-                            device, args.train_epochs, is_binary)
+                            device, args.train_epochs, is_binary, mode="Full")
 
         logger.info("[Full-shot] Final Testing with best threshold from Validation")
         (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
@@ -390,7 +505,7 @@ def main():
     train_accs_few, val_accs_few,
     best_epoch_few, best_val_auc_few, best_threshold_few
     ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary)
+                        device, args.train_epochs, is_binary, mode="Few")
 
     logger.info("[Few-shot] Final Testing with best threshold from Validation")
     (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,

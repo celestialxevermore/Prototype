@@ -40,13 +40,24 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
-        self.global_topology_proj = nn.Linear(input_dim, input_dim)
-        self.adaptive_weight_proj = nn.Linear(input_dim, input_dim)
+        # self.global_topology_proj = nn.Linear(input_dim, input_dim)
+        # nn.init.xavier_uniform_(self.global_topology_proj.weight, gain=1 / math.sqrt(2))
+
+        self.global_topology_proj_head = nn.Linear(input_dim, input_dim)
+        self.global_topology_proj_tail = nn.Linear(input_dim, input_dim)
+        nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
+        nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
+
+        self.adaptive_weight_proj_head = nn.Linear(input_dim, input_dim)
+        self.adaptive_weight_proj_tail = nn.Linear(input_dim, input_dim)
+        nn.init.xavier_uniform_(self.adaptive_weight_proj_head.weight, gain=1 / math.sqrt(2))
+        nn.init.xavier_uniform_(self.adaptive_weight_proj_tail.weight, gain=1 / math.sqrt(2))
+
 
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
         self.v_proj = nn.Linear(input_dim, input_dim)
-        self.attn_proj = nn.Linear(self.head_dim * 3, 1)  # [q | k | edge_attr] -> attention score
+        self.attn_proj = nn.Linear(self.head_dim * 3, 1)   # [q | k | edge_attr] -> attention score
         
         
         self.out_proj = nn.Linear(input_dim, input_dim)
@@ -55,44 +66,53 @@ class AdaptiveGraphAttention(nn.Module):
         nn_init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
+    
+    def _no_self_interaction(self, adjacency_matrix):
+        batch_size, seq_len, _ = adjacency_matrix.shape
+        diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
+        return adjacency_matrix * diag_mask
 
+    def _debug_fr_graph(self, global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency):
+        """
+        FR-Graph 생성 과정의 디버깅 정보를 출력하는 함수
+        """
+        print(f"global_topology 범위: 최소={global_topology.min().item():.4f}, 최대={global_topology.max().item():.4f}")
+        print(f"global_topology 평균: {global_topology.mean().item():.4f}")
+        
+        print(f"sample_sim 범위: 최소={sample_sim.min().item():.4f}, 최대={sample_sim.max().item():.4f}")
+        print(f"sample_sim 평균: {sample_sim.mean().item():.4f}")
+        
+        print(f"adjacency_matrix 범위: 최소={adjacency_matrix.min().item():.4f}, 최대={adjacency_matrix.max().item():.4f}")
+        print(f"adjacency_matrix 평균: {adjacency_matrix.mean().item():.4f}")
+        print(f"임계값: {self.threshold}")
+        
+        print(f"adjacency 범위: 최소={adjacency.min().item():.4f}, 최대={adjacency.max().item():.4f}")
+        print(f"adjacency 평균: {adjacency.mean().item():.4f}")
+        
+        # 임계값 이상 엣지 비율 계산
+        threshold_ratio = (global_topology_A > 0).float().mean().item()
+        print(f"임계값 이상 엣지 비율: {threshold_ratio:.4f}")
+        
+        # 범위별 분포 분석
+        adj_flat = adjacency.flatten()
+        min_val = adj_flat.min().item()
+        max_val = adj_flat.max().item()
+        num_bins = 10
+        step = (max_val - min_val) / num_bins
+        
+        for i in range(num_bins):
+            lower = min_val + i * step
+            upper = min_val + (i + 1) * step
+            count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
+            print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
 
     def forward(self, desc_embeddings, name_value_embeddings):
         batch_size, new_seq, _ = name_value_embeddings.shape
         seq_len = new_seq - 1
 
-        '''
-            1. Glboal Topology
-        '''
-        desc_embeddings = self.global_topology_proj(desc_embeddings)
-        global_sim = torch.matmul(desc_embeddings, desc_embeddings.transpose(-1, -2))
-        global_topology = torch.sigmoid(global_sim + self.topology_bias)
-
-
-        '''
-            2. Sample-wise Weight
-        '''
+        self.G = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
+        adjacency = torch.ones_like(self.G) / seq_len 
         
-        # CLS를 제외한 name value embedding 사이의 유사도 
-        var_embeddings = name_value_embeddings[:, 1:, :]
-        sample_sim = torch.matmul(var_embeddings, var_embeddings.transpose(-1, -2))
-        adjacency_matrix = global_topology * sample_sim 
-        '''
-            3. Self Connection Delete
-        '''
-        diag_mask = 1.0 - torch.eye(seq_len, device = name_value_embeddings.device).unsqueeze(0)
-        adjacency = adjacency_matrix * diag_mask
-
-        '''
-            5. Edge Pruning
-        
-        # '''
-        if not self.frozen:
-            pruned_adjacency = (adjacency > self.threshold).float() - adjacency.detach() + adjacency
-        else:
-            pruned_adjacency = (adjacency > self.threshold).float()
-
-        adjacency = pruned_adjacency
         '''
             4. Edge Attributes & Adjacency 
         '''
@@ -105,7 +125,7 @@ class AdaptiveGraphAttention(nn.Module):
         cls_edge_attr = torch.cat([
             desc_embeddings.unsqueeze(1),  # CLS->변수: 변수의 description
             desc_embeddings.unsqueeze(1)   # 변수->CLS: 동일한 description
-        ], dim=-1)  # [batch, 1, seq_len, dim*2]
+        ], dim=-1)
 
         # 3. Edge attribute 합치기
         edge_dim = var_edge_attr.size(-1)
@@ -117,11 +137,11 @@ class AdaptiveGraphAttention(nn.Module):
         new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=adjacency.device)
         new_adjacency[:, 1:, 1:] = adjacency 
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
-        new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS 
+        new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
+        self.new_adjacency = new_adjacency
         '''
             5. Attention
         '''
-        # q, k, v projection
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
@@ -142,18 +162,16 @@ class AdaptiveGraphAttention(nn.Module):
 
         attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
 
-        # Attention mask - adjacency matrix = 0인 곳은 차단. 
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
-        attn_weights = self.attn_dropout(attn_weights)
+        self.attn_weights = self.attn_dropout(attn_weights)
 
         context = torch.matmul(attn_weights, v)
         context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
         output = self.out_proj(context)
-        #pdb.set_trace()
         return output, attn_weights
-            
+
 class Model(nn.Module):
     def __init__(
             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
@@ -172,6 +190,16 @@ class Model(nn.Module):
         llm_model = args.llm_model
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
+                # GMM 관련 속성 추가
+        self.use_gmm = args.use_gmm 
+        self.use_gmm2 = args.use_gmm2
+        self.num_prototypes = args.num_prototypes
+        self.stage_num = args.gmm_stage_num
+        self.momentum = args.gmm_momentum 
+        self.beta = args.gmm_beta 
+        self.lambd = args.gmm_lambda
+        self.eps = args.gmm_eps
+        # GMM 모듈 초
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
@@ -181,17 +209,11 @@ class Model(nn.Module):
             - In order to infuse the information of name and value simultaneously. 
         '''
         self.sample_fusion = nn.Sequential(
-            nn.Linear(input_dim * 2, input_dim),
+            nn.Linear(input_dim, input_dim),
             nn.LayerNorm(input_dim),
             nn.ReLU(),
             nn.Linear(input_dim, input_dim)
         )
-        def init_mlp(module):
-            for m in module.modules():
-                if isinstance(m, nn.Linear):
-                    nn_init.kaiming_uniform_(m.weight, a=math.sqrt(5))  # ReLU에 적합한 He 초기화
-                    if m.bias is not None:
-                        nn_init.zeros_(m.bias)
 
         self.layers = nn.ModuleList([
             AdaptiveGraphAttention(
@@ -230,68 +252,60 @@ class Model(nn.Module):
 
 
     def forward(self, batch, y):
-        pred = self.predict(batch)
         target = y.to(self.device).view(-1,1).float()
+        pred = self.predict(batch)
         loss = self.criterion(pred, target)
         return loss
     
     def predict(self, batch):
-        label_description_embeddings = batch['label_description_embeddings'].to(self.device)
         
+        label_description_embeddings = batch['label_description_embeddings'].to(self.device)
         desc_embeddings = [] 
-        name_embeddings = [] 
-        value_embeddings = [] 
+        name_value_embeddings = [] 
+        
 
-        if all(k in batch for k in ['cat_name_embeddings', 'cat_desc_embeddings', 'cat_value_embeddings']):
-            cat_name_embeddings = batch['cat_name_embeddings'].to(self.device).squeeze(-2)
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device).squeeze(-2)
             cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
-            cat_value_embeddings = batch['cat_value_embeddings'].to(self.device).squeeze(-2)
-
+            
+            name_value_embeddings.append(cat_name_value_embeddings)
             desc_embeddings.append(cat_desc_embeddings)
-            name_embeddings.append(cat_name_embeddings)
-            value_embeddings.append(cat_value_embeddings)    
             
-
-        if all(k in batch for k in ['num_name_embeddings', 'num_desc_embeddings', 'num_prompt_embeddings']):
-            num_name_embeddings = batch['num_name_embeddings'].to(self.device).squeeze(-2)
-            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
-            
-            
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
             num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
-            
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+            name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
-            name_embeddings.append(num_name_embeddings)
-            value_embeddings.append(num_prompt_embeddings)
             
-        if not desc_embeddings or not name_embeddings or not value_embeddings:
+        
+        if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
 
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
-        name_embeddings = torch.cat(name_embeddings, dim = 1)
-        value_embeddings = torch.cat(value_embeddings, dim = 1)
-
-        '''
-            0. Name & Value Embedding
-        '''
-        name_value_embeddings = torch.cat([name_embeddings, value_embeddings], dim = -1)
+        name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
         name_value_embeddings = self.sample_fusion(name_value_embeddings)
-
         '''
             1. [CLS] Token
         '''
+        attention_weights = [] 
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
-        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)    
-
-        x = name_value_embeddings 
+        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
+        x = name_value_embeddings
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
             attn_output, attn_weights = layer(desc_embeddings, norm_x)
+            attention_weights.append(attn_weights)
             x = x + attn_output
         pred = x[:, 0, :]
+        
+        # attention_weights = torch.stack(attention_weights, dim = 0).mean(dim = 0)
+        # pdb.set_trace()
         pred = self.predictor(pred)
+
+        
         return pred
 
     def froze_topology(self):
-        """그래프 구조를 고정하여 추가 학습 시 변경되지 않도록 함"""
+
         self.frozen = True
         logger.info("Graph topology frozen. Continuing with fixed structure.")
