@@ -40,6 +40,9 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
+        # self.global_topology_proj = nn.Linear(input_dim, input_dim)
+        # nn.init.xavier_uniform_(self.global_topology_proj.weight, gain=1 / math.sqrt(2))
+
         self.global_topology_proj_head = nn.Linear(input_dim, input_dim)
         self.global_topology_proj_tail = nn.Linear(input_dim, input_dim)
         nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
@@ -107,41 +110,8 @@ class AdaptiveGraphAttention(nn.Module):
         batch_size, new_seq, _ = name_value_embeddings.shape
         seq_len = new_seq - 1
 
-        '''
-            1. Glboal Topology
-        '''
-        desc_embeddings_head = self.global_topology_proj_head(desc_embeddings)
-        desc_embeddings_tail = self.global_topology_proj_tail(desc_embeddings)
-        desc_embeddings_head_ = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
-        desc_embeddings_tail_ = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
-        self.global_sim = torch.matmul(desc_embeddings_head_, desc_embeddings_tail_.transpose(-1, -2))
-        # desc_embeddings = self.global_topology_proj(desc_embeddings)
-        # desc_embeddings_ = desc_embeddings / desc_embeddings.norm(dim=-1, keepdim=True)
-        
-        self.global_sim = torch.matmul(desc_embeddings_head_, desc_embeddings_tail_.transpose(-1, -2))
-        #self.global_sim = torch.matmul(desc_embeddings_, desc_embeddings_.transpose(-1, -2))
-        global_topology = torch.sigmoid(self.global_sim + self.topology_bias)
-        
-        if not self.frozen:
-            global_topology_A = (global_topology > self.threshold).float() - global_topology.detach() + global_topology
-        else: 
-            global_topology_A = (global_topology > self.threshold).float()
-
-        '''
-            2. Sample-wise Weight
-        '''
-        var_embeddings = name_value_embeddings[:, 1:, :]
-        var_embeddings_head = self.adaptive_weight_proj_head(var_embeddings)
-        var_embeddings_tail = self.adaptive_weight_proj_tail(var_embeddings)
-        var_embeddings_head_ = var_embeddings_head / var_embeddings_head.norm(dim=-1, keepdim=True)
-        var_embeddings_tail_ = var_embeddings_tail / var_embeddings_tail.norm(dim=-1, keepdim=True)
-        self.sample_sim = torch.matmul(var_embeddings_head_, var_embeddings_tail_.transpose(-1, -2))
-        global_topology_A = self._no_self_interaction(global_topology_A)
-        self.G = global_topology_A * self.sample_sim 
-        adjacency = torch.softmax(self.G, dim=-1)
-        
-        # 디버깅: 필요시 주석 해제
-        # self._debug_fr_graph(global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency)
+        self.G = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
+        adjacency = torch.ones_like(self.G) / seq_len 
         
         '''
             4. Edge Attributes & Adjacency 
@@ -167,14 +137,15 @@ class AdaptiveGraphAttention(nn.Module):
         new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=adjacency.device)
         new_adjacency[:, 1:, 1:] = adjacency 
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
-        new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS 
+        new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
+        self.new_adjacency = new_adjacency
+
         '''
             5. Attention
         '''
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-
 
         edge_attr = self.edge_update(edge_attr)
         edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
@@ -194,155 +165,12 @@ class AdaptiveGraphAttention(nn.Module):
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
-        attn_weights = self.attn_dropout(attn_weights)
+        self.attn_weights = self.attn_dropout(attn_weights)
 
         context = torch.matmul(attn_weights, v)
         context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
         output = self.out_proj(context)
         return output, attn_weights
-
-
-
-
-class GMM(nn.Module):
-    """
-        k : The number of Prototypes 
-        stage_num : EM step counter
-        momentum : The momentum of the prototype update 
-    """
-    def __init__(
-            self,
-            args, 
-            num_prototypes : int, 
-            stage_num  : int = 5, 
-            momentum : float = 0.9, 
-            beta : float = 1.0,
-            lambd : float = 0.1, 
-            eps : float = 1e-6,
-    ):
-        super(GMM, self).__init__()
-        self.num_prototypes = num_prototypes
-        self.input_dim = args.input_dim
-        self.stage_num = stage_num
-        self.momentum = momentum 
-        self.beta = beta
-        self.lambd = lambd
-        self.eps = eps
-
-        prototypes = torch.Tensor(num_prototypes, self.input_dim)
-        nn.init.kaiming_uniform_(prototypes, a = math.sqrt(5))
-        prototypes = prototypes / (1e-6 + prototypes.norm(dim=1, keepdim=True))
-        self.register_buffer("prototypes", prototypes)
-        
-    def forward(self, cls : torch.Tensor, is_train = True):
-        assert cls.dim() == 2
-        b, d = cls.shape
-        device = cls.device
-        
-        local_proto = self.prototypes.to(device).expand(b, -1, -1).contiguous()
-        _cls = cls 
-        with torch.no_grad():
-            for _ in range(self.stage_num):
-                latent = torch.einsum("bd, bkd->bk", cls, local_proto)
-                r = F.softmax(latent, dim = 1)
-                new_proto = torch.mm(r.t(), _cls)
-                new_proto = new_proto / (new_proto.norm(dim=1, keepdim=True) + self.eps)
-                local_proto = new_proto.unsqueeze(0).expand(b, -1, -1).contiguous()
-
-        dot = torch.einsum("bd,bkd->bk", cls, local_proto)
-        r = F.softmax(dot, dim=1)
-        
-        z_recon = torch.mm(r, new_proto)
-        z_out = self.beta * z_recon + cls
-
-        if is_train:
-            old_proto = self.prototypes.to(device)
-            new_proto_for_update = new_proto.unsqueeze(0)
-            updated = self.momentum * old_proto + (1-self.momentum)*new_proto_for_update            
-            self.prototypes = updated.detach().cpu()
-            
-        return r, z_out
-
-
-class GMM2(nn.Module):
-    def __init__(
-            self,
-            args, 
-            num_prototypes : int, 
-            stage_num  : int = 5, 
-            momentum : float = 0.9, 
-            beta : float = 1.0,
-            lambd : float = 0.1, 
-            eps : float = 1e-6,
-    ):
-        super(GMM2, self).__init__()
-        self.num_prototypes = num_prototypes
-        self.input_dim = args.input_dim
-        self.stage_num = stage_num
-        self.momentum = momentum 
-        self.beta = beta
-        self.lambd = lambd
-        self.eps = eps
-
-        prototypes = torch.Tensor(num_prototypes, self.input_dim)
-        nn.init.kaiming_uniform_(prototypes, a = math.sqrt(5))
-        prototypes = prototypes / (1e-6 + prototypes.norm(dim=1, keepdim=True))
-        
-        self.prototypes = nn.Parameter(prototypes.clone())
-        self.register_buffer("running_prototypes", prototypes.clone())
-        
-    def _normalize_prototypes(self):
-        with torch.no_grad():
-            norm = self.prototypes.norm(dim=1, keepdim=True) + self.eps
-            self.prototypes.data = self.prototypes.data / norm
-            
-    def forward(self, cls : torch.Tensor, is_train = True):
-        assert cls.dim() == 2
-        b, d = cls.shape
-        device = cls.device
-        
-        self._normalize_prototypes()
-        local_proto = self.prototypes.unsqueeze(0).expand(b, -1, -1).contiguous()
-        _cls = cls 
-        
-        for _ in range(self.stage_num):
-            latent = torch.einsum("bd, bkd->bk", cls, local_proto)
-            latent = latent / self.lambd
-            r = F.softmax(latent, dim = 1)
-            
-            new_proto = torch.mm(r.t(), _cls)
-            new_proto = new_proto / (new_proto.norm(dim=1, keepdim=True) + self.eps)
-            local_proto = new_proto.unsqueeze(0).expand(b, -1, -1).contiguous()
-
-        dot = torch.einsum("bd,bkd->bk", cls, local_proto)
-        dot = dot / self.lambd
-        r = F.softmax(dot, dim=1)
-
-        z_recon = torch.mm(r, new_proto)
-        z_out = self.beta * z_recon + cls
-
-        recon_loss = F.mse_loss(z_recon, cls)
-        entropy_loss = - (r * torch.log(r + self.eps)).sum(dim = 1).mean()
-        proto_similarity = torch.mm(new_proto, new_proto.t())
-        eye = torch.eye(self.num_prototypes, device = device)
-        diversity_loss = torch.mean(torch.abs(proto_similarity * (1 - eye)))
-
-        if is_train:
-            with torch.no_grad():
-                old_proto = self.running_prototypes.to(device)
-                updated = self.momentum * old_proto + (1 - self.momentum) * new_proto 
-                updated = updated / (updated.norm(dim = 1, keepdim = True) + self.eps)
-                self.running_prototypes.copy_(updated.detach())
-                
-                update_ratio = 0.01 
-                self.prototypes.data = (1 - update_ratio) * self.prototypes.data + update_ratio * new_proto.detach()
-
-        return r, z_out, {
-            'recon_loss': recon_loss,
-            'entropy_loss': entropy_loss,
-            'diversity_loss': diversity_loss
-        }
-
 
 class Model(nn.Module):
     def __init__(
@@ -371,14 +199,6 @@ class Model(nn.Module):
         self.beta = args.gmm_beta 
         self.lambd = args.gmm_lambda
         self.eps = args.gmm_eps
-        
-
-        if self.use_gmm:
-            self.gmm = GMM(self.args, self.num_prototypes, self.stage_num, self.momentum, self.beta, self.lambd, self.eps)
-        elif self.use_gmm2:
-            self.gmm = GMM2(self.args, self.num_prototypes, self.stage_num, self.momentum, self.beta, self.lambd, self.eps)
-        
-        # GMM 모듈 초
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
@@ -388,7 +208,7 @@ class Model(nn.Module):
             - In order to infuse the information of name and value simultaneously. 
         '''
         self.sample_fusion = nn.Sequential(
-            nn.Linear(input_dim * 2, input_dim),
+            nn.Linear(input_dim, input_dim),
             nn.LayerNorm(input_dim),
             nn.ReLU(),
             nn.Linear(input_dim, input_dim)
@@ -432,26 +252,9 @@ class Model(nn.Module):
 
     def forward(self, batch, y):
         target = y.to(self.device).view(-1,1).float()
-        
-        # GMM2 사용 시 predict에서 손실도 함께 받음
-        if self.use_gmm2 and self.training:
-            pred, gmm_losses = self.predict(batch)
-            loss = self.criterion(pred, target)
-            
-            # GMM 손실 계산
-            gmm_loss_weight = 0.1
-            gmm_loss = (
-                #gmm_losses['recon_loss'] + 
-                #0.1 * gmm_losses['entropy_loss'] + 
-                gmm_losses['diversity_loss']
-            )
-            return loss + gmm_loss_weight * gmm_loss
-    
-        # 일반적인 경우
-        else:
-            pred = self.predict(batch)
-            loss = self.criterion(pred, target)
-            return loss
+        pred = self.predict(batch)
+        loss = self.criterion(pred, target)
+        return loss
     
     def predict(self, batch):
         
@@ -479,33 +282,21 @@ class Model(nn.Module):
 
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
         name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
-    
+        name_value_embeddings = self.sample_fusion(name_value_embeddings)
         '''
             1. [CLS] Token
         '''
+        attention_weights = []
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
-        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)    
-
+        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
         x = name_value_embeddings
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
             attn_output, attn_weights = layer(desc_embeddings, norm_x)
+            attention_weights.append(attn_weights)
             x = x + attn_output
         pred = x[:, 0, :]
-        if self.use_gmm:
-            r, z_out = self.gmm(pred, is_train = True)
-            pred = self.predictor(z_out)
-            return pred
-        elif self.use_gmm2:
-            r, z_out, gmm_losses = self.gmm(pred, is_train = True)
-            pred = self.predictor(z_out)
-            if self.training:
-                return pred, gmm_losses
-            else:
-                return pred
-        else:
-            pred = self.predictor(pred)
-            z_out = pred
+        pred = self.predictor(pred)
 
         
         return pred

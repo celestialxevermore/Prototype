@@ -139,13 +139,13 @@ class AdaptiveGraphAttention(nn.Module):
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
         new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
         self.new_adjacency = new_adjacency
+
         '''
             5. Attention
         '''
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-
 
         edge_attr = self.edge_update(edge_attr)
         edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
@@ -199,7 +199,6 @@ class Model(nn.Module):
         self.beta = args.gmm_beta 
         self.lambd = args.gmm_lambda
         self.eps = args.gmm_eps
-        # GMM 모듈 초
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
@@ -297,9 +296,6 @@ class Model(nn.Module):
             attention_weights.append(attn_weights)
             x = x + attn_output
         pred = x[:, 0, :]
-        
-        # attention_weights = torch.stack(attention_weights, dim = 0).mean(dim = 0)
-        # pdb.set_trace()
         pred = self.predictor(pred)
 
         
