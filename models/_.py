@@ -72,9 +72,10 @@ class AdaptiveGraphAttention(nn.Module):
 
     
 
-    def forward(self, desc_embeddings, name_value_embeddings):
-        batch_size, new_seq, _ = name_value_embeddings.shape
-        seq_len = new_seq - 1
+    def forward(self, cls_token, desc_embeddings, name_value_embeddings):
+        batch_size, feature_seq, _ = name_value_embeddings.shape
+        seq_len = feature_seq + 1 # new_seq : 11 + CLS seq_len : 11 
+        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
 
         self.G = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
         adjacency = torch.ones_like(self.G) / seq_len 
@@ -95,33 +96,18 @@ class AdaptiveGraphAttention(nn.Module):
         var_embeddings_tail = self.adaptive_weight_proj_tail(name_value_embeddings[:, 1:, :])
 
         self.sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
-        self.global_topology_A = self._no_self_interaction(global_topology_A)
+        global_topology_A = self._no_self_interaction(global_topology_A)
         
-        self.G = self.global_topology_A * self.sample_sim
-
-        # 최대값의 10% 미만인 값들을 마스킹
-        threshold = self.G.max(dim=-1, keepdim=True)[0] * 0.1
-        mask = (self.G < threshold)
-
-        # softmax 계산 (softmax 후에도 확률 분포를 유지)
+        self.G = global_topology_A * self.sample_sim 
         adjacency = torch.softmax(self.G, dim=-1)
-
-        # softmax 후 마스킹된 위치를 정확히 0으로 설정
-        adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
-
-        
-        # 남은 값들을 다시 정규화 (각 행의 합이 1이 되도록)
-        row_sums = adjacency.sum(dim=-1, keepdim=True)
-        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)  # 0으로 나누기 방지
-        adjacency = adjacency / row_sums
-
         self.adjacency = adjacency
+
         '''
             4. Edge Attributes & Adjacency 
         '''
         # 1. 변수 노드 간의 edge_attr
-        node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
-        node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+        node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, feature_seq, -1)
+        node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, feature_seq, -1, -1)
         var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim=-1)  # [batch, seq_len, seq_len, dim*2]
 
         # 2. CLS-변수 노드 간의 edge_attr
@@ -132,45 +118,45 @@ class AdaptiveGraphAttention(nn.Module):
 
         # 3. Edge attribute 합치기
         edge_dim = var_edge_attr.size(-1)
-        edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=var_edge_attr.device)
+        edge_attr = torch.zeros(batch_size, seq_len, seq_len, edge_dim, device=var_edge_attr.device)
         edge_attr[:, 1:, 1:] = var_edge_attr  # 변수 노드 간
         edge_attr[:, 0, 1:] = cls_edge_attr.squeeze(1)  # CLS->변수
         edge_attr[:, 1:, 0] = cls_edge_attr.squeeze(1)  # 변수->CLS
 
-        new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=adjacency.device)
+        new_adjacency = torch.zeros(batch_size, seq_len, seq_len, device=adjacency.device)
         new_adjacency[:, 1:, 1:] = adjacency 
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
         new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
-        
         self.new_adjacency = new_adjacency
         '''
             5. Attention
         '''
-        q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(name_value_embeddings).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
 
         edge_attr = self.edge_update(edge_attr)
-        edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+        edge_attr = edge_attr.view(batch_size, seq_len, seq_len, self.n_heads, self.head_dim)
         edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
         edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
 
         q_expanded = q.unsqueeze(3)
         k_expanded = k.unsqueeze(2)
         qke_expanded = torch.cat([
-            q_expanded.expand(-1,-1,-1, new_seq, -1),
-            k_expanded.expand(-1,-1, new_seq, -1, -1),
+            q_expanded.expand(-1,-1,-1, seq_len, -1),
+            k_expanded.expand(-1,-1, seq_len, -1, -1),
             edge_attr
         ], dim = -1)
 
         attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
         self.attn_weights = self.attn_dropout(attn_weights)
 
         context = torch.matmul(attn_weights, v)
-        context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
+        context = context.transpose(1,2).reshape(batch_size, seq_len, self.input_dim)
         output = self.out_proj(context)
         return output, attn_weights
 
@@ -293,14 +279,15 @@ class Model(nn.Module):
         '''
         attention_weights = [] 
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
-        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
-        x = name_value_embeddings
+        x = name_value_embeddings # B x F x dim 
+
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
-            attn_output, attn_weights = layer(desc_embeddings, norm_x)
+            attn_output, attn_weights = layer(cls_token, desc_embeddings, norm_x) # B x (F+1) x dim 
             attention_weights.append(attn_weights)
-            x = x + attn_output
-        pred = x[:, 0, :]
+            x = x + attn_output[:,1:,:] # B x F x dim 
+            cls_token = cls_token + attn_output[:,0,:].unsqueeze(1) # B x 1 x dim 
+        pred = cls_token.squeeze(1)
         pred = self.predictor(pred)
 
         
