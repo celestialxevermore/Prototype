@@ -112,7 +112,7 @@ class AdaptiveGraphAttention(nn.Module):
         
         # 남은 값들을 다시 정규화 (각 행의 합이 1이 되도록)
         row_sums = adjacency.sum(dim=-1, keepdim=True)
-        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)  # 0으로 나누기 방지
+        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
         adjacency = adjacency / row_sums
 
         self.adjacency = adjacency
