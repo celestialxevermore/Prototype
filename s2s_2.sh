@@ -53,7 +53,7 @@
 #!/bin/bash
 
 gpu_id=1
-source_datasets="adult"
+source_datasets="heart diabetes adult"
 few_shots="4 8 16 32 64"
 model_types="TabularFLM"
 
@@ -63,10 +63,10 @@ for random_seed in $(seq 1000 1199); do
         for source_dataset in $source_datasets; do
             echo "Running experiment for $source_dataset with $few_shot few-shot samples in random_seed:$random_seed"
             
-            CUDA_VISIBLE_DEVICES=$gpu_id python main_G3.py \
+            CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
             --random_seed $random_seed \
             --source_dataset_name $source_dataset \
-            --base_dir 'Experiment_TabularFLM_G5' \
+            --base_dir 'Experiment_TabularFLM_G' \
             --use_gmm \
             --few_shot $few_shot \
             --train_epochs 1000 \

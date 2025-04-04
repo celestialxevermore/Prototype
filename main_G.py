@@ -34,7 +34,7 @@ p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="4"
+#os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
@@ -162,181 +162,182 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
 
-        # if epoch % 10 == 0 or epoch == epochs - 1:
-        #     with torch.no_grad():
-        #         model.eval()
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            with torch.no_grad():
+                model.eval()
                 
-        #         max_samples = 20 
-        #         sample_count = 0
+                max_samples = 20 
+                sample_count = 0
                 
-        #         for batch_idx, batch in enumerate(val_loader):
-        #             batch_on_device = {
-        #                 k: v.to(device) if isinstance(v, torch.Tensor) else v
-        #                 for k, v in batch.items()
-        #             }
-        #             prediction = model.predict(batch_on_device)
+                for batch_idx, batch in enumerate(val_loader):
+                    batch_on_device = {
+                        k: v.to(device) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()
+                    }
+                    prediction = model.predict(batch_on_device)
                     
-        #             # 배치 크기 확인model.layers[0].global_topology_proj_head
-        #             batch_size = model.layers[0].attn_weights.shape[0]
+                    # 배치 크기 확인model.layers[0].global_topology_proj_head
+                    batch_size = model.layers[0].attn_weights.shape[0]
                     
-        #             for sample_idx in range(batch_size):
-        #                 # 3) Feature names 정리 (모든 레이어에서 공통으로 사용)
-        #                 feature_names = []
-        #                 if 'cat_desc_texts' in batch_on_device:
-        #                     for feature in batch_on_device['cat_desc_texts']:
-        #                         if isinstance(feature, tuple):
-        #                             clean_name = str(feature[0])
-        #                         else:
-        #                             try:
-        #                                 clean_name = feature.split("'")[1] if "'" in feature else feature
-        #                                 clean_name = clean_name.split(',')[0]
-        #                             except:
-        #                                 clean_name = str(feature)
-        #                         feature_names.append(clean_name)
+                    for sample_idx in range(batch_size):
+                        # 3) Feature names 정리 (모든 레이어에서 공통으로 사용)
+                        feature_names = []
+                        if 'cat_desc_texts' in batch_on_device:
+                            for feature in batch_on_device['cat_desc_texts']:
+                                if isinstance(feature, tuple):
+                                    clean_name = str(feature[0])
+                                else:
+                                    try:
+                                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                                        clean_name = clean_name.split(',')[0]
+                                    except:
+                                        clean_name = str(feature)
+                                feature_names.append(clean_name)
 
-        #                 if 'num_desc_texts' in batch_on_device:
-        #                     for feature in batch_on_device['num_desc_texts']:
-        #                         if isinstance(feature, tuple):
-        #                             clean_name = str(feature[0])
-        #                         else:
-        #                             try:
-        #                                 clean_name = feature.split("'")[1] if "'" in feature else feature
-        #                                 clean_name = clean_name.split(',')[0]
-        #                             except:
-        #                                 clean_name = str(feature)
-        #                         feature_names.append(clean_name)
+                        if 'num_desc_texts' in batch_on_device:
+                            for feature in batch_on_device['num_desc_texts']:
+                                if isinstance(feature, tuple):
+                                    clean_name = str(feature[0])
+                                else:
+                                    try:
+                                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                                        clean_name = clean_name.split(',')[0]
+                                    except:
+                                        clean_name = str(feature)
+                                feature_names.append(clean_name)
                                 
-        #                 # 중복 제거 (순서 유지)
-        #                 seen = set()
-        #                 unique_features = []
-        #                 for feat in feature_names:
-        #                     if feat not in seen:
-        #                         seen.add(feat)
-        #                         unique_features.append(feat)
-        #                 feature_names = unique_features
+                        # 중복 제거 (순서 유지)
+                        seen = set()
+                        unique_features = []
+                        for feat in feature_names:
+                            if feat not in seen:
+                                seen.add(feat)
+                                unique_features.append(feat)
+                        feature_names = unique_features
                         
 
-        #                 '''
-        #                     1. heatmap
-        #                 '''
-        #                 global_topology_proj_head = model.layers[0].global_topology_proj_head
-        #                 global_topology_proj_tail = model.layers[0].global_topology_proj_tail
-        #                 adaptive_weight_proj_head = model.layers[0].adaptive_weight_proj_head
-        #                 adaptive_weight_proj_tail = model.layers[0].adaptive_weight_proj_tail
-        #                 topology_bias = model.layers[0].topology_bias
-        #                 threshold = model.layers[0].threshold
+                        '''
+                            1. heatmap
+                        '''
+                        global_topology_proj_head = model.layers[0].global_topology_proj_head
+                        global_topology_proj_tail = model.layers[0].global_topology_proj_tail
+                        adaptive_weight_proj_head = model.layers[0].adaptive_weight_proj_head
+                        adaptive_weight_proj_tail = model.layers[0].adaptive_weight_proj_tail
+                        topology_bias = model.layers[0].topology_bias
+                        threshold = model.layers[0].threshold
 
-        #                 desc_embeddings = [] 
-        #                 name_value_embeddings = [] 
-        #                 if all(k in batch_on_device for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-        #                     cat_name_value_embeddings = batch_on_device['cat_name_value_embeddings'].to(device).squeeze(-2)
-        #                     cat_desc_embeddings = batch_on_device['cat_desc_embeddings'].to(device).squeeze(-2)
+                        desc_embeddings = [] 
+                        name_value_embeddings = [] 
+                        if all(k in batch_on_device for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+                            cat_name_value_embeddings = batch_on_device['cat_name_value_embeddings'].to(device).squeeze(-2)
+                            cat_desc_embeddings = batch_on_device['cat_desc_embeddings'].to(device).squeeze(-2)
                             
-        #                     name_value_embeddings.append(cat_name_value_embeddings)
-        #                     desc_embeddings.append(cat_desc_embeddings)
+                            name_value_embeddings.append(cat_name_value_embeddings)
+                            desc_embeddings.append(cat_desc_embeddings)
                             
-        #                 if all(k in batch_on_device for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-        #                     num_prompt_embeddings = batch_on_device['num_prompt_embeddings'].to(device).squeeze(-2)
-        #                     num_desc_embeddings = batch_on_device['num_desc_embeddings'].to(device).squeeze(-2)
-        #                     name_value_embeddings.append(num_prompt_embeddings)
-        #                     desc_embeddings.append(num_desc_embeddings)
+                        if all(k in batch_on_device for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
+                            num_prompt_embeddings = batch_on_device['num_prompt_embeddings'].to(device).squeeze(-2)
+                            num_desc_embeddings = batch_on_device['num_desc_embeddings'].to(device).squeeze(-2)
+                            name_value_embeddings.append(num_prompt_embeddings)
+                            desc_embeddings.append(num_desc_embeddings)
 
-        #                 desc_embeddings = torch.cat(desc_embeddings, dim=1)
-        #                 name_value_embeddings = torch.cat(name_value_embeddings, dim=1)
-        #                 name_value_embeddings = model.sample_fusion(name_value_embeddings)
-        #                 # global_sim 계산 (모델의 forward 방식 그대로 적용)
-        #                 desc_embeddings_head = global_topology_proj_head(desc_embeddings)
-        #                 desc_embeddings_tail = global_topology_proj_tail(desc_embeddings)
-        #                 desc_embeddings_head = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
-        #                 desc_embeddings_tail = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
+                        desc_embeddings = torch.cat(desc_embeddings, dim=1)
+                        name_value_embeddings = torch.cat(name_value_embeddings, dim=1)
+                        name_value_embeddings = model.sample_fusion(name_value_embeddings)
+                        # global_sim 계산 (모델의 forward 방식 그대로 적용)
+                        desc_embeddings_head = global_topology_proj_head(model.layers[0].learnable_desc)
+                        desc_embeddings_tail = global_topology_proj_tail(model.layers[0].learnable_desc)
                         
-        #                 global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
-        #                 global_topology = torch.sigmoid(global_sim + topology_bias)
+                        desc_embeddings_head = global_topology_proj_head(desc_embeddings)
+                        desc_embeddings_tail = global_topology_proj_tail(desc_embeddings)
+                        desc_embeddings_head = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
+                        desc_embeddings_tail = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
                         
-        #                 # global_topology_A 계산
-        #                 global_topology_A = (global_topology > threshold).float()
+                        global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
+                        global_topology = torch.sigmoid(global_sim + topology_bias)
                         
-        #                 # no_self_interaction 적용
-        #                 # (대각선 0으로 만들기)
-        #                 mask = torch.eye(global_topology_A.size(-1), device=global_topology_A.device).unsqueeze(0)
-        #                 global_topology_A = global_topology_A * (1 - mask)
+                        # global_topology_A 계산
+                        #global_topology_A = (global_topology > threshold).float()
+
+                        mask = torch.eye(global_topology.size(-1), device=global_topology.device).unsqueeze(0)
+                        global_topology_A = global_topology * (1 - mask)
                         
-        #                 # sample_sim 계산
-        #                 var_embeddings_head = adaptive_weight_proj_head(name_value_embeddings)
-        #                 var_embeddings_tail = adaptive_weight_proj_tail(name_value_embeddings)
+                        # sample_sim 계산
+                        var_embeddings_head = adaptive_weight_proj_head(name_value_embeddings)
+                        var_embeddings_tail = adaptive_weight_proj_tail(name_value_embeddings)
                         
-        #                 sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
+                        sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
 
 
-        #                 G = global_topology_A * sample_sim
-        #                 threshold_ = G.max(dim=-1, keepdim=True)[0] * 0.1
+                        G = global_topology_A * sample_sim
+                        threshold_ = G.max(dim=-1, keepdim=True)[0] * model.layers[0].alpha_param.clamp(min=1e-5,max=1.0)
                         
-        #                 mask = (G < threshold_)
-        #                 adjacency = torch.softmax(G, dim=-1)
-        #                 adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
+                        mask = (G < threshold_)
+                        adjacency = torch.softmax(G, dim=-1)
+                        adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
                         
 
-        #                 # 남은 값들을 다시 정규화 (각 행의 합이 1이 되도록)
-        #                 row_sums = adjacency.sum(dim=-1, keepdim=True)
-        #                 row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)  # 0으로 나누기 방지
-        #                 adjacency = adjacency / row_sums
-        #                 for layer_idx in range(len(model.layers)):
-        #                     # 시각화 (현재 샘플 사용)
-        #                     fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+                        # 남은 값들을 다시 정규화 (각 행의 합이 1이 되도록)
+                        row_sums = adjacency.sum(dim=-1, keepdim=True)
+                        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)  # 0으로 나누기 방지
+                        adjacency = adjacency / row_sums
+                        for layer_idx in range(len(model.layers)):
+                            # 시각화 (현재 샘플 사용)
+                            fig, axes = plt.subplots(1, 3, figsize=(24, 8))
                             
-        #                     # 1. global_sim 히트맵
-        #                     global_sim_np = global_sim[sample_idx].cpu().numpy()
-        #                     im1 = axes[0].imshow(global_sim_np, cmap='viridis', interpolation='nearest')
-        #                     axes[0].set_title('Global Similarity (Cosine)', fontsize=14)
-        #                     fig.colorbar(im1, ax=axes[0])
+                            # 1. global_sim 히트맵
+                            global_sim_np = model.layers[layer_idx].global_sim[sample_idx].cpu().numpy()
+                            im1 = axes[0].imshow(global_sim_np, cmap='viridis', interpolation='nearest')
+                            axes[0].set_title('Global Similarity (Cosine)', fontsize=14)
+                            fig.colorbar(im1, ax=axes[0])
                             
-        #                     for i in range(len(feature_names)):
-        #                         for j in range(len(feature_names)):
-        #                             axes[0].text(j, i, f"{global_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+                            for i in range(len(feature_names)):
+                                for j in range(len(feature_names)):
+                                    axes[0].text(j, i, f"{global_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
 
-        #                     # 2. sample_sim 히트맵
-        #                     sample_sim_np = sample_sim[sample_idx].cpu().numpy()
-        #                     im2 = axes[1].imshow(sample_sim_np, cmap='plasma', interpolation='nearest')
-        #                     axes[1].set_title('Sample Similarity (Cosine)', fontsize=14)
-        #                     fig.colorbar(im2, ax=axes[1])
+                            # 2. sample_sim 히트맵
+                            global_topology_A = model.layers[layer_idx].global_topology_A[sample_idx].cpu().numpy()
+                            im2 = axes[1].imshow(global_topology_A, cmap='plasma', interpolation='nearest')
+                            axes[1].set_title('global_topology (Cosine + Sigmoid)', fontsize=14)
+                            fig.colorbar(im2, ax=axes[1])
                             
-        #                     for i in range(len(feature_names)):
-        #                         for j in range(len(feature_names)):
-        #                             axes[1].text(j, i, f"{sample_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+                            for i in range(len(feature_names)):
+                                for j in range(len(feature_names)):
+                                    axes[1].text(j, i, f"{global_topology_A[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
                             
-        #                     # 3. adjacency 히트맵
-        #                     adjacency_np = model.layers[layer_idx].adjacency[sample_idx].cpu()
-        #                     im3 = axes[2].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
-        #                     axes[2].set_title('Final Adjacency (Softmax)', fontsize=14)
-        #                     fig.colorbar(im3, ax=axes[2])
+                            # 3. adjacency 히트맵
+                            adjacency_np = model.layers[layer_idx].adjacency[sample_idx].cpu()
+                            im3 = axes[2].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
+                            axes[2].set_title('Final Adjacency (Softmax)', fontsize=14)
+                            fig.colorbar(im3, ax=axes[2])
 
-        #                     for i in range(len(feature_names)):
-        #                         for j in range(len(feature_names)):
-        #                             axes[2].text(j, i, f"{adjacency_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=5)
+                            for i in range(len(feature_names)):
+                                for j in range(len(feature_names)):
+                                    axes[2].text(j, i, f"{adjacency_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=5)
                             
-        #                     # 모든 축에 feature_names 적용
-        #                     for ax in axes:
-        #                         ax.set_xticks(np.arange(len(feature_names)))
-        #                         ax.set_yticks(np.arange(len(feature_names)))
-        #                         ax.set_xticklabels(feature_names, rotation=90, fontsize=8)
-        #                         ax.set_yticklabels(feature_names, fontsize=8)
-        #                         ax.grid(False)
+                            # 모든 축에 feature_names 적용
+                            for ax in axes:
+                                ax.set_xticks(np.arange(len(feature_names)))
+                                ax.set_yticks(np.arange(len(feature_names)))
+                                ax.set_xticklabels(feature_names, rotation=90, fontsize=8)
+                                ax.set_yticklabels(feature_names, fontsize=8)
+                                ax.grid(False)
                             
-        #                     # 전체 타이틀
-        #                     fig.suptitle(f'Graph Construction Process - Epoch {epoch} - Sample {sample_count}', fontsize=16)
-        #                     plt.tight_layout()
+                            # 전체 타이틀
+                            fig.suptitle(f'Graph Construction Process - Epoch {epoch} - Sample {sample_count}', fontsize=16)
+                            plt.tight_layout()
                             
-        #                     # cosine_similarity 폴더에 각 샘플별로 저장
-        #                     # viz_dir에서 graph_structure 부분을 cosine_similarity로 변경
-        #                     cosine_dir = viz_dir.replace('graph_structure', 'cosine_similarity')
-        #                     sample_cosine_dir = os.path.join(cosine_dir, f'sample_{sample_count}' ,f'layer_{layer_idx}')
-        #                     os.makedirs(sample_cosine_dir, exist_ok=True)
-        #                     #layer_dir = os.path.join(sample_dirs[sample_count], f'layer_{layer_idx}')
-        #                     sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
-        #                     fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
-        #                     plt.close(fig)
+                            # cosine_similarity 폴더에 각 샘플별로 저장
+                            # viz_dir에서 graph_structure 부분을 cosine_similarity로 변경
+                            cosine_dir = viz_dir.replace('graph_structure', 'cosine_similarity')
+                            sample_cosine_dir = os.path.join(cosine_dir, f'sample_{sample_count}' ,f'layer_{layer_idx}')
+                            os.makedirs(sample_cosine_dir, exist_ok=True)
+                            #layer_dir = os.path.join(sample_dirs[sample_count], f'layer_{layer_idx}')
+                            sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
+                            fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
+                            plt.close(fig)
                             
-        #                     logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
+                            logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
 
         #                 # 각 레이어별로 시각화 수행
         #                 for layer_idx in range(len(model.layers)):
@@ -596,13 +597,13 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
                             
         #                     logger.info(f"샘플 {sample_count} - 레이어 {layer_idx} - 에포크 {epoch} 종합 시각화 저장: {graph_path}")
 
-        #                 # 샘플 카운트 증가 (모든 레이어 처리 후)
-        #                 sample_count += 1
-        #                 if sample_count >= max_samples:
-        #                     break
+                        # 샘플 카운트 증가 (모든 레이어 처리 후)
+                        sample_count += 1
+                        if sample_count >= max_samples:
+                            break
 
-        #             if sample_count >= max_samples:
-        #                 break
+                    if sample_count >= max_samples:
+                        break
                 
         if is_binary:
             # Binary Classification

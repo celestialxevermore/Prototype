@@ -41,6 +41,7 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
+        self.alpha_param = nn.Parameter(torch.tensor(0.1))  
         self.global_topology_proj_head = nn.Linear(input_dim, hidden_dim)
         self.global_topology_proj_tail = nn.Linear(input_dim, hidden_dim)
         nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
@@ -79,6 +80,8 @@ class AdaptiveGraphAttention(nn.Module):
         self.G = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
         adjacency = torch.ones_like(self.G) / seq_len 
         
+
+        #self.learnable_desc = nn.Parameter(torch.tensor(feature_desc_embeddings), requires_grad=True)
         desc_embeddings_head = self.global_topology_proj_head(desc_embeddings)
         desc_embeddings_tail = self.global_topology_proj_tail(desc_embeddings)
         desc_embeddings_head = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
@@ -86,21 +89,19 @@ class AdaptiveGraphAttention(nn.Module):
         self.global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
         global_topology = torch.sigmoid(self.global_sim + self.topology_bias)
 
-        if not self.frozen:
-            global_topology_A = (global_topology > self.threshold).float() - global_topology.detach() + global_topology
-        else:
-            global_topology_A = (global_topology > self.threshold).float()
-
         var_embeddings_head = self.adaptive_weight_proj_head(name_value_embeddings[:, 1:, :])
         var_embeddings_tail = self.adaptive_weight_proj_tail(name_value_embeddings[:, 1:, :])
 
         self.sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
-        self.global_topology_A = self._no_self_interaction(global_topology_A)
+        self.global_topology_A = self._no_self_interaction(global_topology)
         
         self.G = self.global_topology_A * self.sample_sim
 
+
+
+        
         # 최대값의 10% 미만인 값들을 마스킹
-        threshold = self.G.max(dim=-1, keepdim=True)[0] * 0.1
+        threshold = self.G.max(dim=-1, keepdim=True)[0] * self.alpha_param.clamp(min=1e-5,max=1.0)
         mask = (self.G < threshold)
 
         # softmax 계산 (softmax 후에도 확률 분포를 유지)
