@@ -41,11 +41,32 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
-        self.alpha_param = nn.Parameter(torch.tensor(0.1))  
-        self.global_topology_proj_head = nn.Linear(input_dim, hidden_dim)
-        self.global_topology_proj_tail = nn.Linear(input_dim, hidden_dim)
-        nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
-        nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
+        self.alpha_param = nn.Parameter(torch.tensor(0.1))
+        self.global_topology_proj_head = self.desc_head_proj = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+                )
+        self.global_topology_proj_tail = self.desc_tail_proj = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+                )
+        for m in self.global_topology_proj_head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+                    
+        for m in self.global_topology_proj_tail.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        # self.global_topology_proj_head = nn.Linear(input_dim, hidden_dim)
+        # self.global_topology_proj_tail = nn.Linear(input_dim, hidden_dim)
+        # nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
+        # nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
 
         self.adaptive_weight_proj_head = nn.Linear(input_dim, hidden_dim)
         self.adaptive_weight_proj_tail = nn.Linear(input_dim, hidden_dim)
@@ -81,35 +102,37 @@ class AdaptiveGraphAttention(nn.Module):
         adjacency = torch.ones_like(self.G) / seq_len 
         
 
-        #self.learnable_desc = nn.Parameter(torch.tensor(feature_desc_embeddings), requires_grad=True)
+        """
+            Description embedding Self attention
+        """
+
         desc_embeddings_head = self.global_topology_proj_head(desc_embeddings)
         desc_embeddings_tail = self.global_topology_proj_tail(desc_embeddings)
         desc_embeddings_head = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
         desc_embeddings_tail = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
         self.global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
-        global_topology = torch.sigmoid(self.global_sim + self.topology_bias)
+        self.global_topology_A = torch.sigmoid(self.global_sim + self.topology_bias)
 
         var_embeddings_head = self.adaptive_weight_proj_head(name_value_embeddings[:, 1:, :])
         var_embeddings_tail = self.adaptive_weight_proj_tail(name_value_embeddings[:, 1:, :])
 
         self.sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
-        self.global_topology_A = self._no_self_interaction(global_topology)
+        self.global_topology_A = self._no_self_interaction(self.global_topology_A)
         
         self.G = self.global_topology_A * self.sample_sim
 
 
-
         
-        # 최대값의 10% 미만인 값들을 마스킹
+        #self.G = torch.clamp(self.G, min = 0.0)
+        #diag_indices = torch.arange(seq_len, device=self.G.device)
+        #self.G[:, diag_indices, diag_indices] = -1e9
         threshold = self.G.max(dim=-1, keepdim=True)[0] * self.alpha_param.clamp(min=1e-5,max=1.0)
         mask = (self.G < threshold)
 
-        # softmax 계산 (softmax 후에도 확률 분포를 유지)
+        ## 이 위치에 대각 제거 
         adjacency = torch.softmax(self.G, dim=-1)
-
         # softmax 후 마스킹된 위치를 정확히 0으로 설정
         adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
-
         
         # 남은 값들을 다시 정규화 (각 행의 합이 1이 되도록)
         row_sums = adjacency.sum(dim=-1, keepdim=True)
