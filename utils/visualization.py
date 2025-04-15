@@ -41,33 +41,26 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
         epoch: 현재 에포크
         max_samples: 시각화할 최대 샘플 수
     """
-    # 두 플래그가 모두 False면 시각화 수행하지 않음
-    if not args.viz_heatmap and not args.viz_graph:
-        return
+
     
-    # 디렉토리 설정
+    # 시각화 디렉토리 설정
     viz_dir = os.path.join(f"visualizations/{args.llm_model}/cosine_similarity/{args.source_dataset_name}/{mode}/{experiment_id}")
+    os.makedirs(viz_dir, exist_ok=True)
+    
     graph_viz_dir = os.path.join(f"visualizations/{args.llm_model}/graph_structure/{args.source_dataset_name}/{mode}/{experiment_id}")
-    
-    # 샘플별 디렉토리 구조
+    os.makedirs(graph_viz_dir, exist_ok=True)
+
+    # 샘플별 디렉토리 미리 생성
     sample_dirs = []
-    
-    # 히트맵 시각화 디렉토리
-    if args.viz_heatmap:
-        os.makedirs(viz_dir, exist_ok=True)
+    for i in range(max_samples):
+        sample_dir = os.path.join(graph_viz_dir, f'sample_{i}')
+        os.makedirs(sample_dir, exist_ok=True)
+        sample_dirs.append(sample_dir)
         
-    # 그래프 시각화 디렉토리
-    if args.viz_graph:
-        os.makedirs(graph_viz_dir, exist_ok=True)
-        for i in range(max_samples):
-            sample_dir = os.path.join(graph_viz_dir, f'sample_{i}')
-            os.makedirs(sample_dir, exist_ok=True)
-            sample_dirs.append(sample_dir)
-            
-            # 각 샘플 내에 레이어별 서브폴더 생성
-            for layer_idx in range(len(model.layers)):
-                layer_dir = os.path.join(sample_dir, f'layer_{layer_idx}')
-                os.makedirs(layer_dir, exist_ok=True)
+        # 각 샘플 내에 레이어별 서브폴더 생성
+        for layer_idx in range(len(model.layers)):
+            layer_dir = os.path.join(sample_dir, f'layer_{layer_idx}')
+            os.makedirs(layer_dir, exist_ok=True)
 
     with torch.no_grad():
         model.eval()
@@ -85,7 +78,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
             batch_size = model.layers[0].attn_weights.shape[0]
             
             for sample_idx in range(batch_size):
-                # Feature names 정리 (모든 레이어에서 공통으로 사용)
+                # 특성 이름 정리 (모든 레이어에서 공통으로 사용)
                 feature_names = []
                 if 'cat_desc_texts' in batch_on_device:
                     for feature in batch_on_device['cat_desc_texts']:
@@ -119,8 +112,8 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         seen.add(feat)
                         unique_features.append(feat)
                 feature_names = unique_features
-
-                # 히트맵 시각화
+                
+                # 1. 히트맵 시각화
                 if args.viz_heatmap:
                     for layer_idx in range(len(model.layers)):
                         fig, axes = plt.subplots(1, 3, figsize=(24, 8))
@@ -167,8 +160,9 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         fig.suptitle(f'Graph Construction Process - Epoch {epoch} - Sample {sample_count}', fontsize=16)
                         plt.tight_layout()
                         
-                       
-                        sample_cosine_dir = os.path.join(viz_dir, f'sample_{sample_count}', f'layer_{layer_idx}')
+                        # cosine_similarity 폴더에 각 샘플별로 저장
+                        cosine_dir = viz_dir.replace('graph_structure', 'cosine_similarity')
+                        sample_cosine_dir = os.path.join(cosine_dir, f'sample_{sample_count}', f'layer_{layer_idx}')
                         os.makedirs(sample_cosine_dir, exist_ok=True)
                         sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
                         fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
@@ -176,8 +170,9 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         
                         logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
 
-                # 그래프 구조 시각화
+                # 2. 그래프 구조 시각화
                 if args.viz_graph:
+                    # 각 레이어별로 시각화 수행
                     for layer_idx in range(len(model.layers)):
                         # 1) Attention 가중치(헤드 평균)
                         attn_weights = model.layers[layer_idx].attn_weights[sample_idx]  # [n_heads, seq, seq]
@@ -247,6 +242,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         # Figure & 2 Subplots 생성
                         fig, axes = plt.subplots(2, 2, figsize=(24, 20))
                         ax_bar = axes[0, 0]
+                        
                         # -----(A) Left Subplot: Barplot)-----
                         bars = ax_bar.bar(range(len(edge_weights)), edge_weights, color=bar_colors)
                         
@@ -308,57 +304,65 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         non_center_nodes = n_nodes - 1
                         radius = 1.0
                         for i_ in range(1, n_nodes):
-                            i = i_
-                            angle = 2 * np.pi * (i - 1) / non_center_nodes
-                            pos[i] = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+                            angle_ = 2 * np.pi * (i_ - 1) / non_center_nodes
+                            pos[i_] = np.array([radius * np.cos(angle_), radius * np.sin(angle_)])
 
-                        # 엣지 그리기
-                        edges = G.edges(data=True)
-                        
-                        # 1. CLS->Var 엣지
-                        cls_var_edges = [(u, v, d) for u, v, d in edges if d.get('cls_to_var', False)]
-                        edge_weights_cls_var = [d['weight'] for _, _, d in cls_var_edges]
-                        nx.draw_networkx_edges(G, pos, edgelist=[(u, v) for u, v, _ in cls_var_edges],
-                                              width=3, alpha=0.7, edge_color='red', 
-                                              connectionstyle='arc3,rad=0.1',
-                                              arrowsize=10, arrowstyle='->')
+                        # 배경 그리드
+                        for r_ in [0.25, 0.5, 0.75, 1.0]:
+                            circle = plt.Circle((0, 0), r_, fill=False, color='lightgray', linestyle='--', alpha=0.5)
+                            ax_graph.add_patch(circle)
+                        for i_ in range(1, n_nodes):
+                            angle__ = 2 * np.pi * (i_ - 1) / non_center_nodes
+                            x_ = 1.1 * np.cos(angle__)
+                            y_ = 1.1 * np.sin(angle__)
+                            ax_graph.plot([0, x_], [0, y_], color='lightgray', linestyle='--', alpha=0.5)
 
-                        # 2. Var->Var 엣지
-                        var_var_edges = [(u, v, d) for u, v, d in edges if not d.get('cls_to_var', False)]
-                        
-                        # 가장 강한 엣지만 선택
-                        top_var_var_edges = sorted(var_var_edges, key=lambda x: x[2]['weight'], reverse=True)
-                        top_var_var_edges = top_var_var_edges[:min(15, len(top_var_var_edges))]  # 상위 15개만
-                        
-                        edge_weights_var_var = [d['weight'] for _, _, d in top_var_var_edges]
-                        max_weight = max(edge_weights_var_var) if edge_weights_var_var else 1.0
-                        
-                        # 엣지 두께 스케일링
-                        edge_widths = [1.0 + 5.0 * (w / max_weight) for w in edge_weights_var_var]
-                        nx.draw_networkx_edges(G, pos, edgelist=[(u, v) for u, v, _ in top_var_var_edges],
-                                              width=edge_widths, alpha=0.6, edge_color='blue',
-                                              connectionstyle='arc3,rad=0.1',
-                                              arrowsize=10, arrowstyle='->')
+                        node_colors = [d["color"] for _, d in G.nodes(data=True)]
+                        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=800, ax=ax_graph, edgecolors='gray')
 
-                        # 엣지 레이블
-                        edge_labels = {}
-                        for u, v, d in top_var_var_edges:
-                            edge_labels[(u, v)] = f"{d['weight']:.2f}"
-                        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
+                        cls_edges = [(u, v) for u, v, d in G.edges(data=True) if d.get('cls_to_var')]
+                        var_edges = [(u, v) for u, v, d in G.edges(data=True) if not d.get('cls_to_var')]
 
-                        # 노드 그리기
-                        node_colors = [d['color'] for _, d in G.nodes(data=True)]
-                        nx.draw_networkx_nodes(G, pos, node_size=700, node_color=node_colors,
-                                             alpha=0.9, linewidths=2.0, edgecolors='black')
+                        cls_weights = [G[u][v]['weight'] for (u, v) in cls_edges]
+                        var_weights = [G[u][v]['weight'] for (u, v) in var_edges]
 
-                        # 노드 레이블
+                        # CLS->Var: 빨강 굵은선
+                        if cls_edges:
+                            nx.draw_networkx_edges(
+                                G, pos,
+                                edgelist=cls_edges,
+                                width=[2 + w * 5 for w in cls_weights],
+                                alpha=0.7,
+                                edge_color='crimson',
+                                connectionstyle='arc3,rad=0.1',  
+                                arrowstyle='-|>',  # 화살표 스타일 변경
+                                arrowsize=15,      # 화살표 크기 키우기 (기본값보다 크게)
+                                node_size=800,
+                                ax=ax_graph
+                            )
+
+                        # Var->Var: 파랑 점선
+                        if var_edges:
+                            nx.draw_networkx_edges(
+                                G, pos,
+                                edgelist=var_edges,
+                                width=[1 + w * 2 for w in var_weights],
+                                edge_color='blue',
+                                style='dashed',
+                                arrowstyle='-|>',
+                                arrowsize=30,
+                                alpha=0.5,
+                                ax=ax_graph,
+                                arrows=True
+                            )
+
                         label_options = {
                             "font_size": 9,
                             "font_color": "black",
                             "bbox": dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
                         }
                         nx.draw_networkx_labels(G, pos, labels=node_labels, ax=ax_graph, **label_options)
-                        
+
                         ax_graph.set_title(f'Graph Structure - Layer {layer_idx} - Epoch {epoch} - Sample {sample_count}', fontsize=12)
                         ax_graph.axis('off')
                         ax_graph.set_aspect('equal')
@@ -369,7 +373,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         ax_graph_matrix = axes[1, 0]
                         graph_matrix_np = graph_matrix.cpu().numpy() 
                         im_graph = ax_graph_matrix.imshow(graph_matrix_np, cmap="Blues", interpolation='nearest')
-                        ax_graph_matrix.set_title("Graph Matrix (with CLS)", fontsize= 14)
+                        ax_graph_matrix.set_title("Graph Matrix (with CLS)", fontsize=14)
                         fig.colorbar(im_graph, ax=ax_graph_matrix)
 
                         all_node_names = ["CLS"] + feature_names 
@@ -403,12 +407,12 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         # 각 셀에 값 표시
                         for i in range(len(all_node_names)):
                             for j in range(len(all_node_names)):
-                                # 상대적인 값에 따라 텍스트 색상 결정
+                                # 상대적인 값에 따라 텍스트 색상 결정 (0에 가까울수록 검정, 최대값에 가까울수록 흰색)
                                 relative_value = final_graph_matrix[i,j] / vmax if vmax > 0 else 0
                                 text_color = "black" if relative_value < 0.7 else "white"
                                 
-                                # 값이 0일 경우 빈 문자열 표시
-                                value_text = f"{final_graph_matrix[i,j]:.3f}" if final_graph_matrix[i,j] > 0.001 else ""
+                                # 값이 0일 경우 빈 문자열 표시할 수도 있음
+                                value_text = f"{final_graph_matrix[i,j]:.3f}"
                                 
                                 ax_final.text(j, i, value_text, 
                                             ha="center", va="center", 
@@ -426,14 +430,16 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         plt.close(fig)
                         
                         logger.info(f"샘플 {sample_count} - 레이어 {layer_idx} - 에포크 {epoch} 종합 시각화 저장: {graph_path}")
-                
-                # 샘플 카운트 증가 (모든 레이어 처리 후)
+
                 sample_count += 1
                 if sample_count >= max_samples:
                     break
-            
+
             if sample_count >= max_samples:
                 break
+
+
+
 
 def visualize_gmm_clusters(gmm, embeddings, output_dir="visualizations/gmm_clusters", step=None, filename=None):
     """

@@ -117,8 +117,6 @@ class AdaptiveGraphAttention(nn.Module):
         
         self.G = self.global_topology_A * self.sample_sim
 
-
-        
         #self.G = torch.clamp(self.G, min = 0.0)
         #diag_indices = torch.arange(seq_len, device=self.G.device)
         #self.G[:, diag_indices, diag_indices] = -1e9
@@ -136,6 +134,7 @@ class AdaptiveGraphAttention(nn.Module):
         adjacency = adjacency / row_sums
 
         self.adjacency = adjacency
+
         '''
             4. Edge Attributes & Adjacency 
         '''

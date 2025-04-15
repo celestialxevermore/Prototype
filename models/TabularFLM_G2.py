@@ -115,7 +115,7 @@ class AdaptiveGraphAttention(nn.Module):
 
     
 
-    def forward(self, desc_embeddings, name_value_embeddings):
+    def forward(self, desc_embeddings,global_table, name_value_embeddings):
         batch_size, new_seq, _ = name_value_embeddings.shape
         seq_len = new_seq - 1
 
@@ -125,10 +125,13 @@ class AdaptiveGraphAttention(nn.Module):
         """
             1. Global adjacency matrix
         """
-        global_table = self.global_table.expand(batch_size, seq_len, -1)
-        global_table = global_table / global_table.norm(dim=-1, keepdim=True)
-        global_sim = torch.matmul(global_table, global_table.transpose(-1, -2))
+        global_head = self.global_topology_proj_head(global_table)
+        global_tail = self.global_topology_proj_tail(global_table)
+        global_head = global_head / global_head.norm(dim=-1, keepdim=True)
+        global_tail = global_tail / global_tail.norm(dim=-1, keepdim=True)
+        global_sim = torch.matmul(global_head, global_tail.transpose(-1, -2))
         global_sim = torch.sigmoid(global_sim + self.topology_bias)
+        self.global_sim = global_sim
         """
             2. Sample-wise adjacency matrix
         """
@@ -139,12 +142,13 @@ class AdaptiveGraphAttention(nn.Module):
         sample_sim = torch.softmax(sample_sim, dim=-1)
 
         global_topology_A = global_sim + sample_sim
+        self.global_topology_A = global_topology_A
         if self.training:
             adjacency = self.gumbel_sigmoid(global_topology_A, tau=1.0, hard=False)
         else:
             adjacency = self.gumbel_sigmoid(global_topology_A, tau=0.5, hard=True)
         
-
+        self.adjacency = adjacency
         
         row_sums = adjacency.sum(dim=-1, keepdim=True)
         row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
@@ -227,7 +231,6 @@ class Model(nn.Module):
         llm_model = args.llm_model
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
-                # GMM 관련 속성 추가
         self.use_gmm = args.use_gmm 
         self.use_gmm2 = args.use_gmm2
         self.num_prototypes = args.num_prototypes
@@ -239,6 +242,9 @@ class Model(nn.Module):
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
+        max_seq_len = 100
+        self.global_table = nn.Parameter(torch.Tensor(1, max_seq_len, self.input_dim))
+        nn.init.kaiming_uniform_(self.global_table, a = math.sqrt(5))
 
         '''
             MLP(CONCAT[Name embedding, Value embedding])
@@ -329,15 +335,19 @@ class Model(nn.Module):
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
         name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
         x = name_value_embeddings
+        batch_size , seq_len, input_dim = x.size()
+        '''
+            2. Global Table Token
+        '''
+        global_table = self.global_table[:,:seq_len-1 ,:].expand(batch_size,-1,-1)
+
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
-            attn_output, attn_weights = layer(desc_embeddings, norm_x)
+            attn_output, attn_weights = layer(desc_embeddings,global_table, norm_x)
             attention_weights.append(attn_weights)
             x = x + attn_output
         pred = x[:, 0, :]
         pred = self.predictor(pred)
-
-        
         return pred
 
     def froze_topology(self):
