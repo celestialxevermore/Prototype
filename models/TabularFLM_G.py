@@ -118,8 +118,8 @@ class AdaptiveGraphAttention(nn.Module):
         self.G = self.global_topology_A * self.sample_sim
 
         #self.G = torch.clamp(self.G, min = 0.0)
-        #diag_indices = torch.arange(seq_len, device=self.G.device)
-        #self.G[:, diag_indices, diag_indices] = -1e9
+        diag_indices = torch.arange(seq_len, device=self.G.device)
+        self.G[:, diag_indices, diag_indices] = -1e9
         threshold = self.G.max(dim=-1, keepdim=True)[0] * self.alpha_param.clamp(min=1e-5,max=1.0)
         mask = (self.G < threshold)
 
@@ -127,7 +127,7 @@ class AdaptiveGraphAttention(nn.Module):
         adjacency = torch.softmax(self.G, dim=-1)
         # softmax 후 마스킹된 위치를 정확히 0으로 설정
         adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
-        
+        pdb.set_trace()
         # 남은 값들을 다시 정규화 (각 행의 합이 1이 되도록)
         row_sums = adjacency.sum(dim=-1, keepdim=True)
         row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
