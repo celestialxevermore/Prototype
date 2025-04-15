@@ -63,10 +63,6 @@ class AdaptiveGraphAttention(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        # self.global_topology_proj_head = nn.Linear(input_dim, hidden_dim)
-        # self.global_topology_proj_tail = nn.Linear(input_dim, hidden_dim)
-        # nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
-        # nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
 
         self.adaptive_weight_proj_head = nn.Linear(input_dim, hidden_dim)
         self.adaptive_weight_proj_tail = nn.Linear(input_dim, hidden_dim)

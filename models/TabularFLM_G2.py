@@ -18,6 +18,7 @@ class AdaptiveGraphAttention(nn.Module):
     def __init__(
         self,
         input_dim : int,
+        hidden_dim : int,
         n_heads : int, 
         dropout : float = 0.1,
         threshold : float = 0.5
@@ -27,7 +28,7 @@ class AdaptiveGraphAttention(nn.Module):
         self.n_heads = n_heads 
         self.head_dim = input_dim // n_heads 
         self.input_dim = input_dim
-        
+        self.hidden_dim = hidden_dim
         self.frozen = False  # 그래프 구조 고정 여부
         
         self.edge_update = nn.Sequential(
@@ -40,19 +41,44 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
-        # self.global_topology_proj = nn.Linear(input_dim, input_dim)
-        # nn.init.xavier_uniform_(self.global_topology_proj.weight, gain=1 / math.sqrt(2))
+        self.global_table = nn.Parameter(torch.Tensor(1, 1, input_dim))
+        nn.init.kaiming_uniform_(self.global_table, a = math.sqrt(5))
 
-        self.global_topology_proj_head = nn.Linear(input_dim, input_dim)
-        self.global_topology_proj_tail = nn.Linear(input_dim, input_dim)
-        nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
-        nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
 
-        self.adaptive_weight_proj_head = nn.Linear(input_dim, input_dim)
-        self.adaptive_weight_proj_tail = nn.Linear(input_dim, input_dim)
+        # self.var_head = nn.Linear(input_dim, hidden_dim)
+        # self.var_tail = nn.Linear(input_dim, hidden_dim)
+        # nn.init.xavier_uniform_(self.var_head.weight, gain=1 / math.sqrt(2))
+        # nn.init.xavier_uniform_(self.var_tail.weight, gain=1 / math.sqrt(2))
+
+
+        self.alpha_param = nn.Parameter(torch.tensor(0.1))
+        self.global_topology_proj_head = self.desc_head_proj = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+                )
+        self.global_topology_proj_tail = self.desc_tail_proj = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+                )
+        for m in self.global_topology_proj_head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+                    
+        for m in self.global_topology_proj_tail.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        self.adaptive_weight_proj_head = nn.Linear(input_dim, hidden_dim)
+        self.adaptive_weight_proj_tail = nn.Linear(input_dim, hidden_dim)
         nn.init.xavier_uniform_(self.adaptive_weight_proj_head.weight, gain=1 / math.sqrt(2))
         nn.init.xavier_uniform_(self.adaptive_weight_proj_tail.weight, gain=1 / math.sqrt(2))
-
+        
 
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
@@ -67,52 +93,63 @@ class AdaptiveGraphAttention(nn.Module):
         nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
     
+
+
+    def gumbel_sigmoid(self, logits, tau=1.0, hard=False):
+        """
+            logits : (B, seq_len, seq_len)
+            Gumbel-Sigmoid -> Bernoulli-like sampling
+        """
+        noise = torch.rand_like(logits).clamp_min(1e-6)
+        noise = -torch.log(-torch.log(noise))
+        y = torch.sigmoid((logits + noise) / tau)
+        if hard:
+            y_hard = (y > 0.5).float()
+            y = y_hard.detach() + y - y.detach() 
+        return y
+
     def _no_self_interaction(self, adjacency_matrix):
         batch_size, seq_len, _ = adjacency_matrix.shape
         diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
         return adjacency_matrix * diag_mask
 
-    def _debug_fr_graph(self, global_topology, global_topology_A, sample_sim, adjacency_matrix, adjacency):
-        """
-        FR-Graph 생성 과정의 디버깅 정보를 출력하는 함수
-        """
-        print(f"global_topology 범위: 최소={global_topology.min().item():.4f}, 최대={global_topology.max().item():.4f}")
-        print(f"global_topology 평균: {global_topology.mean().item():.4f}")
-        
-        print(f"sample_sim 범위: 최소={sample_sim.min().item():.4f}, 최대={sample_sim.max().item():.4f}")
-        print(f"sample_sim 평균: {sample_sim.mean().item():.4f}")
-        
-        print(f"adjacency_matrix 범위: 최소={adjacency_matrix.min().item():.4f}, 최대={adjacency_matrix.max().item():.4f}")
-        print(f"adjacency_matrix 평균: {adjacency_matrix.mean().item():.4f}")
-        print(f"임계값: {self.threshold}")
-        
-        print(f"adjacency 범위: 최소={adjacency.min().item():.4f}, 최대={adjacency.max().item():.4f}")
-        print(f"adjacency 평균: {adjacency.mean().item():.4f}")
-        
-        # 임계값 이상 엣지 비율 계산
-        threshold_ratio = (global_topology_A > 0).float().mean().item()
-        print(f"임계값 이상 엣지 비율: {threshold_ratio:.4f}")
-        
-        # 범위별 분포 분석
-        adj_flat = adjacency.flatten()
-        min_val = adj_flat.min().item()
-        max_val = adj_flat.max().item()
-        num_bins = 10
-        step = (max_val - min_val) / num_bins
-        
-        for i in range(num_bins):
-            lower = min_val + i * step
-            upper = min_val + (i + 1) * step
-            count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
-            print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
+    
 
     def forward(self, desc_embeddings, name_value_embeddings):
         batch_size, new_seq, _ = name_value_embeddings.shape
         seq_len = new_seq - 1
 
         self.G = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
-        adjacency = torch.ones_like(self.G) / seq_len 
         
+
+        """
+            1. Global adjacency matrix
+        """
+        global_table = self.global_table.expand(batch_size, seq_len, -1)
+        global_table = global_table / global_table.norm(dim=-1, keepdim=True)
+        global_sim = torch.matmul(global_table, global_table.transpose(-1, -2))
+        global_sim = torch.sigmoid(global_sim + self.topology_bias)
+        """
+            2. Sample-wise adjacency matrix
+        """
+        var_embeddings_head = self.adaptive_weight_proj_head(name_value_embeddings[:, 1:, :])
+        var_embeddings_tail = self.adaptive_weight_proj_tail(name_value_embeddings[:, 1:, :])
+        sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
+        sample_sim = self._no_self_interaction(sample_sim)
+        sample_sim = torch.softmax(sample_sim, dim=-1)
+
+        global_topology_A = global_sim + sample_sim
+        if self.training:
+            adjacency = self.gumbel_sigmoid(global_topology_A, tau=1.0, hard=False)
+        else:
+            adjacency = self.gumbel_sigmoid(global_topology_A, tau=0.5, hard=True)
+        
+
+        
+        row_sums = adjacency.sum(dim=-1, keepdim=True)
+        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
+        adjacency = adjacency / row_sums
+
         '''
             4. Edge Attributes & Adjacency 
         '''
@@ -138,8 +175,8 @@ class AdaptiveGraphAttention(nn.Module):
         new_adjacency[:, 1:, 1:] = adjacency 
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
         new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
+        
         self.new_adjacency = new_adjacency
-
         '''
             5. Attention
         '''
@@ -161,7 +198,6 @@ class AdaptiveGraphAttention(nn.Module):
         ], dim = -1)
 
         attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
-
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
@@ -183,6 +219,7 @@ class Model(nn.Module):
         self.args = args
         self.llm_model = llm_model
         self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.source_dataset_name = args.source_dataset_name
         num_layers = args.num_layers
@@ -217,6 +254,7 @@ class Model(nn.Module):
         self.layers = nn.ModuleList([
             AdaptiveGraphAttention(
                 input_dim = self.input_dim, 
+                hidden_dim = self.hidden_dim,
                 n_heads = args.n_heads,
                 dropout = args.dropout_rate,
                 threshold = self.threshold
@@ -250,6 +288,7 @@ class Model(nn.Module):
                     nn_init.zeros_(m.bias)
 
 
+        
     def forward(self, batch, y):
         target = y.to(self.device).view(-1,1).float()
         pred = self.predict(batch)
@@ -286,7 +325,7 @@ class Model(nn.Module):
         '''
             1. [CLS] Token
         '''
-        attention_weights = []
+        attention_weights = [] 
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
         name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
         x = name_value_embeddings

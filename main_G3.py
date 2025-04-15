@@ -57,7 +57,7 @@ def get_args():
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
     parser.add_argument('--source_lr_few', type=float, default=0.00001)
-    parser.add_argument('--llm_model', type=str, default='gpt2')
+    parser.add_argument('--llm_model', type=str, default='gpt2_mean')
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)

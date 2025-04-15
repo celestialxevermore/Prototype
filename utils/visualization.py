@@ -4,11 +4,10 @@ import os
 from datetime import datetime
 import pdb
 import torch
+import logging
 
 
 
-
-import torch
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -18,150 +17,423 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+logger = logging.getLogger(__name__)
+import torch
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+import os
+import logging
 
-def visualize_attention_graph(attention_weights, save_path=None, title="Graph"):
-    """
-    어텐션 가중치 행렬을 사용하여 그래프 구조를 시각화합니다.
-    
-    Parameters:
-    -----------
-    attention_weights : torch.Tensor
-        어텐션 가중치 행렬, 마지막 두 차원이 노드 간 관계를 나타냄 (batch_size, ...)
-    save_path : str, optional
-        결과를 저장할 경로, None이면 화면에 표시
-    title : str
-        그래프 제목
-    """
-    # 배치에서 첫 번째 항목만 사용
-    if isinstance(attention_weights, torch.Tensor):
-        if attention_weights.dim() > 3:
-            # 여러 헤드가 있는 경우 최대값을 취함
-            if attention_weights.dim() == 4:  # [batch, heads, seq, seq]
-                attn = attention_weights[0].max(dim=0)[0].cpu().numpy()
-            else:
-                attn = attention_weights[0].cpu().numpy()
-        else:
-            attn = attention_weights[0].cpu().numpy()
-    else:
-        attn = attention_weights
-    
-    # 그래프 생성
-    G = nx.DiGraph()
-    
-    # 노드 추가 (CLS 토큰 + 특성 노드들)
-    n_nodes = attn.shape[0]
-    
-    # 노드 이름 설정 (CLS + 특성1, 특성2, ...)
-    node_names = ['center'] + [f'feature_{i}' for i in range(1, n_nodes)]
-    
-    # 노드 추가
-    for i, name in enumerate(node_names):
-        G.add_node(i, name=name)
-    
-    # 엣지 추가 (0보다 큰 가중치를 가진 엣지만 - 자기 자신과의 연결 제외)
-    for i in range(n_nodes):
-        for j in range(n_nodes):
-            weight = attn[i, j]
-            if weight > 0 and i != j:  # 자기 자신과의 연결 제외
-                G.add_edge(i, j, weight=float(weight))
-    
-    # 그래프 그리기
-    plt.figure(figsize=(10, 10))
-    
-    # 노드 위치 계산 (원형 레이아웃)
-    if n_nodes <= 1:
-        pos = {0: (0, 0)}
-    else:
-        # CLS 토큰은 중앙에 배치
-        pos = {0: (0, 0)}
-        
-        # 나머지 노드는 원 위에 배치
-        angles = np.linspace(0, 2*np.pi, n_nodes, endpoint=False)
-        for i in range(1, n_nodes):
-            pos[i] = (np.cos(angles[i]), np.sin(angles[i]))
-    
-    # 노드 색상 설정 (CLS=빨강, 나머지=파랑)
-    node_colors = ['red' if i == 0 else 'blue' for i in range(n_nodes)]
-    
-    # 엣지 가중치 기반 굵기 계산
-    min_width = 1.0
-    max_width = 8.0
-    
-    if G.edges():
-        weights = [G[u][v]['weight'] for u, v in G.edges()]
-        min_weight = min(weights)
-        max_weight = max(weights)
-        
-        # 가중치 정규화 및 선 굵기 계산
-        if max_weight > min_weight:
-            edge_weights = [min_width + (max_width - min_width) * 
-                           (G[u][v]['weight'] - min_weight) / (max_weight - min_weight) 
-                           for u, v in G.edges()]
-        else:
-            edge_weights = [min_width + (max_width - min_width) / 2 for _ in G.edges()]
-    else:
-        edge_weights = []
-    
-    # 그래프 그리기
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=700)
-    nx.draw_networkx_labels(G, pos, labels={i: node_names[i] for i in range(n_nodes)})
-    nx.draw_networkx_edges(
-        G, pos, 
-        width=edge_weights,
-        arrows=True, 
-        arrowsize=20,
-        edge_color='gray',
-        alpha=0.7
-    )
-    
-    plt.title(title)
-    plt.axis('off')
-    
-    # 저장 또는 표시
-    if save_path:
-        plt.savefig(save_path, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
+logger = logging.getLogger(__name__)
 
-def visualize_attention_weights(model, batch, feature_names=None, threshold=0.1, save_path=None):
+def visualize_model_structure(model, data_loader, device, args, mode, experiment_id, epoch, max_samples=10):
     """
-    모델의 어텐션 가중치를 시각화합니다.
+    모델의 내부 구조(어텐션, 그래프 구조 등)를 시각화하는 함수
     
-    Parameters:
-    -----------
-    model : nn.Module
-        시각화할 모델
-    batch : dict
-        모델에 전달할 입력 배치
-    feature_names : list, optional
-        특성 이름 목록
-    threshold : float
-        이 값보다 작은 가중치를 가진 엣지는 표시하지 않음
-    save_path : str, optional
-        결과를 저장할 경로
+    Args:
+        model: 시각화할 모델
+        data_loader: 시각화에 사용할 데이터 로더
+        device: 계산에 사용할 디바이스
+        args: 실험 설정 인자 (args.viz_heatmap, args.viz_graph 플래그 사용)
+        mode: 'train' 또는 'val' 모드
+        experiment_id: 현재 실험 ID
+        epoch: 현재 에포크
+        max_samples: 시각화할 최대 샘플 수
     """
-    model.eval()
+    # 두 플래그가 모두 False면 시각화 수행하지 않음
+    if not args.viz_heatmap and not args.viz_graph:
+        return
+    
+    # 디렉토리 설정
+    viz_dir = os.path.join(f"visualizations/{args.llm_model}/cosine_similarity/{args.source_dataset_name}/{mode}/{experiment_id}")
+    graph_viz_dir = os.path.join(f"visualizations/{args.llm_model}/graph_structure/{args.source_dataset_name}/{mode}/{experiment_id}")
+    
+    # 샘플별 디렉토리 구조
+    sample_dirs = []
+    
+    # 히트맵 시각화 디렉토리
+    if args.viz_heatmap:
+        os.makedirs(viz_dir, exist_ok=True)
+        
+    # 그래프 시각화 디렉토리
+    if args.viz_graph:
+        os.makedirs(graph_viz_dir, exist_ok=True)
+        for i in range(max_samples):
+            sample_dir = os.path.join(graph_viz_dir, f'sample_{i}')
+            os.makedirs(sample_dir, exist_ok=True)
+            sample_dirs.append(sample_dir)
+            
+            # 각 샘플 내에 레이어별 서브폴더 생성
+            for layer_idx in range(len(model.layers)):
+                layer_dir = os.path.join(sample_dir, f'layer_{layer_idx}')
+                os.makedirs(layer_dir, exist_ok=True)
+
     with torch.no_grad():
-        # 모델의 첫 번째 레이어에서 어텐션 가중치 추출
-        if hasattr(model, 'layers') and len(model.layers) > 0:
-            # 예측 실행
-            _ = model.predict(batch)
+        model.eval()
+        
+        sample_count = 0
+        
+        for batch_idx, batch in enumerate(data_loader):
+            batch_on_device = {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in batch.items()
+            }
+            prediction = model.predict(batch_on_device)
             
-            # 어텐션 가중치 가져오기
-            if hasattr(model.layers[0], 'adjacency'):
-                attention_weights = model.layers[0].adjacency
-            # 특성 이름이 없으면 기본값 사용
-            if feature_names is None:
-                num_features = attention_weights.shape[1] - 1  # CLS 토큰 제외
-                feature_names = ['CLS'] + [f'Feature {i+1}' for i in range(num_features)]
+            # 배치 크기 확인
+            batch_size = model.layers[0].attn_weights.shape[0]
             
-            # 그래프 시각화
-            title = "Graph"
-            visualize_attention_graph(attention_weights, save_path, title)
-        else:
-            raise ValueError("모델에 layers 속성이 없거나 비어 있습니다.")
+            for sample_idx in range(batch_size):
+                # Feature names 정리 (모든 레이어에서 공통으로 사용)
+                feature_names = []
+                if 'cat_desc_texts' in batch_on_device:
+                    for feature in batch_on_device['cat_desc_texts']:
+                        if isinstance(feature, tuple):
+                            clean_name = str(feature[0])
+                        else:
+                            try:
+                                clean_name = feature.split("'")[1] if "'" in feature else feature
+                                clean_name = clean_name.split(',')[0]
+                            except:
+                                clean_name = str(feature)
+                        feature_names.append(clean_name)
 
+                if 'num_desc_texts' in batch_on_device:
+                    for feature in batch_on_device['num_desc_texts']:
+                        if isinstance(feature, tuple):
+                            clean_name = str(feature[0])
+                        else:
+                            try:
+                                clean_name = feature.split("'")[1] if "'" in feature else feature
+                                clean_name = clean_name.split(',')[0]
+                            except:
+                                clean_name = str(feature)
+                        feature_names.append(clean_name)
+                        
+                # 중복 제거 (순서 유지)
+                seen = set()
+                unique_features = []
+                for feat in feature_names:
+                    if feat not in seen:
+                        seen.add(feat)
+                        unique_features.append(feat)
+                feature_names = unique_features
+
+                # 히트맵 시각화
+                if args.viz_heatmap:
+                    for layer_idx in range(len(model.layers)):
+                        fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+                        
+                        # 1. global_sim 히트맵
+                        global_sim_np = model.layers[layer_idx].global_sim[sample_idx].cpu().numpy()
+                        im1 = axes[0].imshow(global_sim_np, cmap='viridis', interpolation='nearest')
+                        axes[0].set_title('Global Similarity (Cosine)', fontsize=14)
+                        fig.colorbar(im1, ax=axes[0])
+                        
+                        for i in range(len(feature_names)):
+                            for j in range(len(feature_names)):
+                                axes[0].text(j, i, f"{global_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+
+                        # 2. global_topology_A 히트맵
+                        global_topology_A = model.layers[layer_idx].global_topology_A[sample_idx].cpu().numpy()
+                        im2 = axes[1].imshow(global_topology_A, cmap='plasma', interpolation='nearest')
+                        axes[1].set_title('global_topology (Cosine + Sigmoid)', fontsize=14)
+                        fig.colorbar(im2, ax=axes[1])
+                        
+                        for i in range(len(feature_names)):
+                            for j in range(len(feature_names)):
+                                axes[1].text(j, i, f"{global_topology_A[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+                        
+                        # 3. adjacency 히트맵
+                        adjacency_np = model.layers[layer_idx].adjacency[sample_idx].cpu().numpy()
+                        im3 = axes[2].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
+                        axes[2].set_title('Final Adjacency (Softmax)', fontsize=14)
+                        fig.colorbar(im3, ax=axes[2])
+                        
+                        for i in range(len(feature_names)):
+                            for j in range(len(feature_names)):
+                                axes[2].text(j, i, f"{adjacency_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=5)
+                        
+                        # 모든 축에 feature_names 적용
+                        for ax in axes:
+                            ax.set_xticks(np.arange(len(feature_names)))
+                            ax.set_yticks(np.arange(len(feature_names)))
+                            ax.set_xticklabels(feature_names, rotation=90, fontsize=8)
+                            ax.set_yticklabels(feature_names, fontsize=8)
+                            ax.grid(False)
+                        
+                        # 전체 타이틀
+                        fig.suptitle(f'Graph Construction Process - Epoch {epoch} - Sample {sample_count}', fontsize=16)
+                        plt.tight_layout()
+                        
+                       
+                        sample_cosine_dir = os.path.join(viz_dir, f'sample_{sample_count}', f'layer_{layer_idx}')
+                        os.makedirs(sample_cosine_dir, exist_ok=True)
+                        sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
+                        fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+                        
+                        logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
+
+                # 그래프 구조 시각화
+                if args.viz_graph:
+                    for layer_idx in range(len(model.layers)):
+                        # 1) Attention 가중치(헤드 평균)
+                        attn_weights = model.layers[layer_idx].attn_weights[sample_idx]  # [n_heads, seq, seq]
+                        attn_weights_mean = attn_weights.mean(dim=0).cpu()
+
+                        # 원본 adjacency 사용 (히트맵과 일치하는 값)
+                        adjacency = model.layers[layer_idx].adjacency[sample_idx].cpu()
+                        new_seq = attn_weights_mean.shape[0]
+                        graph_matrix = torch.zeros((new_seq, new_seq), device=attn_weights_mean.device)
+
+                        graph_matrix[1:, 1:] = adjacency  # 변수 간 연결은 원본 adjacency 사용
+                        graph_matrix[0, 1:] = 1.0  # CLS->변수 연결
+                        graph_matrix[1:, 0] = 0.0  # 변수->CLS 연결
+                        
+                        mask = (graph_matrix == 0)
+                        final_graph_matrix = (attn_weights_mean * graph_matrix).numpy()
+                        final_graph_matrix[mask.numpy()] = 0.0 
+                        n_nodes = final_graph_matrix.shape[0]
+                        
+                        # 2) Edge 리스트(모든 i->j) 수집 (Barplot용)
+                        cls_edges_info = []  # CLS에서 나가는 엣지
+                        var_edges_info = []  # 나머지 엣지
+                        
+                        for i in range(n_nodes):
+                            for j in range(n_nodes):
+                                if i != j:
+                                    w = final_graph_matrix[i, j]
+                                    if i == 0:
+                                        cls_edges_info.append((f"{i}->{j}", w))
+                                    else:
+                                        var_edges_info.append((f"{i}->{j}", w))
+                        
+                        # topK 적용
+                        top_k = min(10, len(var_edges_info))
+                        var_edges_info.sort(key=lambda x: x[1], reverse=True)
+                        var_edges_info = var_edges_info[:top_k]
+                        
+                        # 전체 합치기
+                        edges_info = cls_edges_info + var_edges_info
+                        edges_info.sort(key=lambda x: x[1], reverse=True)
+                        edge_labels = [x[0] for x in edges_info]
+                        edge_weights = [x[1] for x in edges_info]
+                        
+                        # CLS 엣지와 일반 엣지 구분을 위한 색상 리스트
+                        bar_colors = []
+                        for label in edge_labels:
+                            if label.startswith("0->"):
+                                bar_colors.append("crimson")  # CLS 엣지는 빨간색
+                            else:
+                                bar_colors.append("cornflowerblue")  # 일반 엣지는 파란색
+                        
+                        # 노드 이름 매핑
+                        node_name_map = {0: "CLS"}
+                        for i in range(1, n_nodes):
+                            idx_feat = i - 1
+                            if idx_feat < len(feature_names):
+                                node_name_map[i] = feature_names[idx_feat]
+                            else:
+                                node_name_map[i] = f"feature_{i}"
+                                
+                        # x축 라벨에 사용할 이름 변환
+                        display_edge_labels = []
+                        for label in edge_labels:
+                            i, j = map(int, label.split('->'))
+                            display_edge_labels.append(f"{node_name_map[i]}->{node_name_map[j]}")
+                        
+                        # Figure & 2 Subplots 생성
+                        fig, axes = plt.subplots(2, 2, figsize=(24, 20))
+                        ax_bar = axes[0, 0]
+                        # -----(A) Left Subplot: Barplot)-----
+                        bars = ax_bar.bar(range(len(edge_weights)), edge_weights, color=bar_colors)
+                        
+                        # 각 바 위에 attention score 값 표시
+                        for i, (weight, label) in enumerate(zip(edge_weights, edge_labels)):
+                            ax_bar.text(i, weight + 0.01, f"{weight:.3f}", 
+                                      ha='center', va='bottom', rotation=45, 
+                                      fontsize=7, color='black')
+                        
+                        ax_bar.set_title(f'Top Edge Weights - Layer {layer_idx}', fontsize=12)
+                        ax_bar.set_xlabel('Edge (i->j)')
+                        ax_bar.set_ylabel('Attention Weight')
+                        # x축 라벨 (너무 많으면 회전)
+                        ax_bar.set_xticks(range(len(edge_labels)))
+                        ax_bar.set_xticklabels(display_edge_labels, rotation=90, fontsize=8)
+                        
+                        # -----(B) Right Subplot: Network Graph)-----
+                        ax_graph = axes[0, 1]
+                        G = nx.DiGraph()
+                        node_labels = {}
+
+                        for i in range(n_nodes):
+                            if i == 0:
+                                node_name = "CLS"
+                                node_color = "red"
+                            else:
+                                idx_feat = i - 1
+                                if idx_feat < len(feature_names):
+                                    node_name = feature_names[idx_feat]
+                                    node_color = "blue"
+                                else:
+                                    node_name = f"feature_{i}"
+                                    node_color = "blue"
+
+                            G.add_node(i, name=node_name, color=node_color)
+                            node_labels[i] = node_name
+
+                        # CLS->Var / Var->Var 구분해서 그리기
+                        min_edge_weight = 0.00
+                        for i in range(n_nodes):
+                            for j in range(n_nodes):
+                                if i == j:
+                                    continue
+
+                                w = final_graph_matrix[i, j]
+                                if w > min_edge_weight:
+                                    if i == 0 and j != 0:
+                                        # CLS->Var
+                                        G.add_edge(i, j, weight=w, cls_to_var=True)
+                                    elif j == 0:
+                                        # Var->CLS는 표시 안 함
+                                        continue
+                                    else:
+                                        # Var->Var
+                                        G.add_edge(i, j, weight=w, cls_to_var=False)
+
+                        pos = {}
+                        pos[0] = np.array([0, 0])
+                        non_center_nodes = n_nodes - 1
+                        radius = 1.0
+                        for i_ in range(1, n_nodes):
+                            i = i_
+                            angle = 2 * np.pi * (i - 1) / non_center_nodes
+                            pos[i] = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+
+                        # 엣지 그리기
+                        edges = G.edges(data=True)
+                        
+                        # 1. CLS->Var 엣지
+                        cls_var_edges = [(u, v, d) for u, v, d in edges if d.get('cls_to_var', False)]
+                        edge_weights_cls_var = [d['weight'] for _, _, d in cls_var_edges]
+                        nx.draw_networkx_edges(G, pos, edgelist=[(u, v) for u, v, _ in cls_var_edges],
+                                              width=3, alpha=0.7, edge_color='red', 
+                                              connectionstyle='arc3,rad=0.1',
+                                              arrowsize=10, arrowstyle='->')
+
+                        # 2. Var->Var 엣지
+                        var_var_edges = [(u, v, d) for u, v, d in edges if not d.get('cls_to_var', False)]
+                        
+                        # 가장 강한 엣지만 선택
+                        top_var_var_edges = sorted(var_var_edges, key=lambda x: x[2]['weight'], reverse=True)
+                        top_var_var_edges = top_var_var_edges[:min(15, len(top_var_var_edges))]  # 상위 15개만
+                        
+                        edge_weights_var_var = [d['weight'] for _, _, d in top_var_var_edges]
+                        max_weight = max(edge_weights_var_var) if edge_weights_var_var else 1.0
+                        
+                        # 엣지 두께 스케일링
+                        edge_widths = [1.0 + 5.0 * (w / max_weight) for w in edge_weights_var_var]
+                        nx.draw_networkx_edges(G, pos, edgelist=[(u, v) for u, v, _ in top_var_var_edges],
+                                              width=edge_widths, alpha=0.6, edge_color='blue',
+                                              connectionstyle='arc3,rad=0.1',
+                                              arrowsize=10, arrowstyle='->')
+
+                        # 엣지 레이블
+                        edge_labels = {}
+                        for u, v, d in top_var_var_edges:
+                            edge_labels[(u, v)] = f"{d['weight']:.2f}"
+                        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
+
+                        # 노드 그리기
+                        node_colors = [d['color'] for _, d in G.nodes(data=True)]
+                        nx.draw_networkx_nodes(G, pos, node_size=700, node_color=node_colors,
+                                             alpha=0.9, linewidths=2.0, edgecolors='black')
+
+                        # 노드 레이블
+                        label_options = {
+                            "font_size": 9,
+                            "font_color": "black",
+                            "bbox": dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                        }
+                        nx.draw_networkx_labels(G, pos, labels=node_labels, ax=ax_graph, **label_options)
+                        
+                        ax_graph.set_title(f'Graph Structure - Layer {layer_idx} - Epoch {epoch} - Sample {sample_count}', fontsize=12)
+                        ax_graph.axis('off')
+                        ax_graph.set_aspect('equal')
+                        ax_graph.set_xlim([-1.2, 1.2])
+                        ax_graph.set_ylim([-1.2, 1.2])
+
+                        # 3. 확장된 graph matrix heatmap
+                        ax_graph_matrix = axes[1, 0]
+                        graph_matrix_np = graph_matrix.cpu().numpy() 
+                        im_graph = ax_graph_matrix.imshow(graph_matrix_np, cmap="Blues", interpolation='nearest')
+                        ax_graph_matrix.set_title("Graph Matrix (with CLS)", fontsize= 14)
+                        fig.colorbar(im_graph, ax=ax_graph_matrix)
+
+                        all_node_names = ["CLS"] + feature_names 
+                        ax_graph_matrix.set_xticks(np.arange(len(all_node_names)))
+                        ax_graph_matrix.set_yticks(np.arange(len(all_node_names)))
+                        ax_graph_matrix.set_xticklabels(all_node_names, rotation=90, fontsize=8)
+                        ax_graph_matrix.set_yticklabels(all_node_names, fontsize=8)
+
+                        for i in range(len(all_node_names)):
+                            for j in range(len(all_node_names)):
+                                ax_graph_matrix.text(j, i, f"{graph_matrix_np[i,j]:.2f}", ha="center", va="center", color="black" if graph_matrix_np[i,j] < 0.5 else "white", fontsize=8)
+
+                        ax_final = axes[1, 1]
+                        vmax = final_graph_matrix.max()
+                        vmin = 0.0  # 0부터 시작하도록 설정
+
+                        # 다른 컬러맵 사용 및 범위 조정
+                        im_final = ax_final.imshow(final_graph_matrix, 
+                                                cmap='YlOrRd',  # 'YlOrRd', 'hot', 'OrRd' 등 시도해볼 수 있음
+                                                interpolation='nearest',
+                                                vmin=vmin, 
+                                                vmax=vmax)
+                        ax_final.set_title("Final Graph Matrix (Attention * Graph_matrix)", fontsize=14)
+                        fig.colorbar(im_final, ax=ax_final)
+                        
+                        ax_final.set_xticks(np.arange(len(all_node_names)))
+                        ax_final.set_yticks(np.arange(len(all_node_names)))
+                        ax_final.set_xticklabels(all_node_names, rotation=90, fontsize=8)
+                        ax_final.set_yticklabels(all_node_names, fontsize=8)
+                        
+                        # 각 셀에 값 표시
+                        for i in range(len(all_node_names)):
+                            for j in range(len(all_node_names)):
+                                # 상대적인 값에 따라 텍스트 색상 결정
+                                relative_value = final_graph_matrix[i,j] / vmax if vmax > 0 else 0
+                                text_color = "black" if relative_value < 0.7 else "white"
+                                
+                                # 값이 0일 경우 빈 문자열 표시
+                                value_text = f"{final_graph_matrix[i,j]:.3f}" if final_graph_matrix[i,j] > 0.001 else ""
+                                
+                                ax_final.text(j, i, value_text, 
+                                            ha="center", va="center", 
+                                            color=text_color, 
+                                            fontsize=7)
+                        
+                        # 전체 제목 설정
+                        fig.suptitle(f'Layer {layer_idx} - Epoch {epoch} - Sample {sample_count}', fontsize=18)
+                        fig.tight_layout(rect=[0, 0.03, 1, 0.97])  # suptitle을 위한 여백 확보
+                        
+                        # 레이어별 폴더에 저장
+                        layer_dir = os.path.join(sample_dirs[sample_count], f'layer_{layer_idx}')
+                        graph_path = os.path.join(layer_dir, f'epoch_{epoch}_complete.png')
+                        fig.savefig(graph_path, dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+                        
+                        logger.info(f"샘플 {sample_count} - 레이어 {layer_idx} - 에포크 {epoch} 종합 시각화 저장: {graph_path}")
+                
+                # 샘플 카운트 증가 (모든 레이어 처리 후)
+                sample_count += 1
+                if sample_count >= max_samples:
+                    break
+            
+            if sample_count >= max_samples:
+                break
 
 def visualize_gmm_clusters(gmm, embeddings, output_dir="visualizations/gmm_clusters", step=None, filename=None):
     """
