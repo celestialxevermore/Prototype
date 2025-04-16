@@ -372,7 +372,7 @@ def prepare_results_ss(full_ours_results, few_ours_results):
 
 def save_results_(args, results):
     exp_dir = os.path.join(
-        f'experiments/source_to_source_{args.base_dir}',
+        f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
         args.source_dataset_name,f"args_seed:{args.random_seed}",
         args.model_type, f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
     )

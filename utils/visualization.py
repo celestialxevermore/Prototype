@@ -43,24 +43,29 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
     """
 
     
-    # 시각화 디렉토리 설정
-    viz_dir = os.path.join(f"visualizations/{args.llm_model}/cosine_similarity/{args.source_dataset_name}/{mode}/{experiment_id}")
-    os.makedirs(viz_dir, exist_ok=True)
-    
-    graph_viz_dir = os.path.join(f"visualizations/{args.llm_model}/graph_structure/{args.source_dataset_name}/{mode}/{experiment_id}")
-    os.makedirs(graph_viz_dir, exist_ok=True)
+    base_viz_dir = os.path.join(f"/storage/personal/eungyeop/experiments/visualization/{args.llm_model}/{args.source_dataset_name}/{mode}/{experiment_id}")
+    os.makedirs(base_viz_dir, exist_ok=True)
 
     # 샘플별 디렉토리 미리 생성
     sample_dirs = []
     for i in range(max_samples):
-        sample_dir = os.path.join(graph_viz_dir, f'sample_{i}')
+        # 각 샘플 디렉토리
+        sample_dir = os.path.join(base_viz_dir, f'sample_{i}')
         os.makedirs(sample_dir, exist_ok=True)
         sample_dirs.append(sample_dir)
         
-        # 각 샘플 내에 레이어별 서브폴더 생성
+        # 각 샘플 내에 heatmap과 graph 폴더 생성
+        heatmap_dir = os.path.join(sample_dir, 'heatmap')
+        graph_dir = os.path.join(sample_dir, 'graph')
+        os.makedirs(heatmap_dir, exist_ok=True)
+        os.makedirs(graph_dir, exist_ok=True)
+        
+        # 각 폴더 내에 레이어별 서브폴더 생성
         for layer_idx in range(len(model.layers)):
-            layer_dir = os.path.join(sample_dir, f'layer_{layer_idx}')
-            os.makedirs(layer_dir, exist_ok=True)
+            heatmap_layer_dir = os.path.join(heatmap_dir, f'layer_{layer_idx}')
+            graph_layer_dir = os.path.join(graph_dir, f'layer_{layer_idx}')
+            os.makedirs(heatmap_layer_dir, exist_ok=True)
+            os.makedirs(graph_layer_dir, exist_ok=True)
 
     with torch.no_grad():
         model.eval()
@@ -116,60 +121,76 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                 # 1. 히트맵 시각화
                 if args.viz_heatmap:
                     for layer_idx in range(len(model.layers)):
-                        fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+                        fig, axes = plt.subplots(2, 2, figsize=(24, 18))
                         
                         # 1. global_sim 히트맵
                         global_sim_np = model.layers[layer_idx].global_sim[sample_idx].cpu().numpy()
-                        im1 = axes[0].imshow(global_sim_np, cmap='viridis', interpolation='nearest')
-                        axes[0].set_title('Global Similarity (Cosine)', fontsize=14)
-                        fig.colorbar(im1, ax=axes[0])
+                        im1 = axes[0,0].imshow(global_sim_np, cmap='viridis', interpolation='nearest')
+                        axes[0,0].set_title('Global Similarity (Cosine)', fontsize=14)
+                        fig.colorbar(im1, ax=axes[0,0])
                         
                         for i in range(len(feature_names)):
                             for j in range(len(feature_names)):
-                                axes[0].text(j, i, f"{global_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+                                axes[0,0].text(j, i, f"{global_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
 
                         # 2. global_topology_A 히트맵
                         global_topology_A = model.layers[layer_idx].global_topology_A[sample_idx].cpu().numpy()
-                        im2 = axes[1].imshow(global_topology_A, cmap='plasma', interpolation='nearest')
-                        axes[1].set_title('global_topology (Cosine + Sigmoid)', fontsize=14)
-                        fig.colorbar(im2, ax=axes[1])
+                        im2 = axes[0,1].imshow(global_topology_A, cmap='plasma', interpolation='nearest')
+                        axes[0,1].set_title('global_topology_A = torch.sigmoid(self.global_sim + self.topology_bias)', fontsize=14)
+                        fig.colorbar(im2, ax=axes[0,1])
                         
                         for i in range(len(feature_names)):
                             for j in range(len(feature_names)):
-                                axes[1].text(j, i, f"{global_topology_A[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+                                axes[0,1].text(j, i, f"{global_topology_A[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
                         
-                        # 3. adjacency 히트맵
+                        # 3. Sample_sim 히트맵
+                        sample_sim_np = model.layers[layer_idx].sample_sim[sample_idx].cpu().numpy() 
+                        im3 = axes[1,0].imshow(sample_sim_np, cmap='viridis', interpolation='nearest')
+                        axes[1,0].set_title('Sample Similarity (Self attention)', fontsize=14)
+                        fig.colorbar(im3, ax=axes[1,0])
+
+                        for i in range(len(feature_names)):
+                            for j in range(len(feature_names)):
+                                axes[1,0].text(j, i, f"{sample_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+
+
+
+                        # 4. adjacency 히트맵
                         adjacency_np = model.layers[layer_idx].adjacency[sample_idx].cpu().numpy()
-                        im3 = axes[2].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
-                        axes[2].set_title('Final Adjacency (Softmax)', fontsize=14)
-                        fig.colorbar(im3, ax=axes[2])
+                        im3 = axes[1,1].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
+                        axes[1,1].set_title('Final Adjacency self.G = self.global_topology_A * self.sample_sim', fontsize=14)
+                        fig.colorbar(im3, ax=axes[1,1])
                         
                         for i in range(len(feature_names)):
                             for j in range(len(feature_names)):
-                                axes[2].text(j, i, f"{adjacency_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=5)
+                                axes[1,1].text(j, i, f"{adjacency_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=5)
                         
                         # 모든 축에 feature_names 적용
-                        for ax in axes:
-                            ax.set_xticks(np.arange(len(feature_names)))
-                            ax.set_yticks(np.arange(len(feature_names)))
-                            ax.set_xticklabels(feature_names, rotation=90, fontsize=8)
-                            ax.set_yticklabels(feature_names, fontsize=8)
-                            ax.grid(False)
+                        for row in axes:
+                            for ax in row:
+                                ax.set_xticks(np.arange(len(feature_names)))
+                                ax.set_yticks(np.arange(len(feature_names)))
+                                ax.set_xticklabels(feature_names, rotation=90, fontsize=8)
+                                ax.set_yticklabels(feature_names, fontsize=8)
+                                ax.grid(False)
                         
                         # 전체 타이틀
                         fig.suptitle(f'Graph Construction Process - Epoch {epoch} - Sample {sample_count}', fontsize=16)
                         plt.tight_layout()
                         
                         # cosine_similarity 폴더에 각 샘플별로 저장
-                        cosine_dir = viz_dir.replace('graph_structure', 'cosine_similarity')
-                        sample_cosine_dir = os.path.join(cosine_dir, f'sample_{sample_count}', f'layer_{layer_idx}')
-                        os.makedirs(sample_cosine_dir, exist_ok=True)
-                        sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
-                        fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
-                        plt.close(fig)
+                        # cosine_dir = viz_dir.replace('graph_structure', 'cosine_similarity')
+                        # sample_cosine_dir = os.path.join(cosine_dir, f'sample_{sample_count}', f'layer_{layer_idx}')
+                        # os.makedirs(sample_cosine_dir, exist_ok=True)
+                        # sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
+                        # fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
+                        # plt.close(fig)
                         
-                        logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
-
+                        # logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
+                        heatmap_path = os.path.join(sample_dirs[sample_count], 'heatmap', f'layer_{layer_idx}', f'epoch_{epoch}.png')
+                        fig.savefig(heatmap_path, dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+                        logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {heatmap_path}")
                 # 2. 그래프 구조 시각화
                 if args.viz_graph:
                     # 각 레이어별로 시각화 수행
@@ -281,21 +302,23 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                             node_labels[i] = node_name
 
                         # CLS->Var / Var->Var 구분해서 그리기
-                        min_edge_weight = 0.00
+                        cls_min_edge_weight = 0.001
+                        min_edge_weight = 0.001
                         for i in range(n_nodes):
                             for j in range(n_nodes):
                                 if i == j:
                                     continue
 
                                 w = final_graph_matrix[i, j]
-                                if w > min_edge_weight:
-                                    if i == 0 and j != 0:
-                                        # CLS->Var
+                                if i == 0 and j != 0:
+                                    # CLS->Var
+                                    if w > cls_min_edge_weight:
                                         G.add_edge(i, j, weight=w, cls_to_var=True)
-                                    elif j == 0:
-                                        # Var->CLS는 표시 안 함
-                                        continue
-                                    else:
+                                elif j == 0:
+                                    # Var->CLS는 표시 안 함
+                                    continue
+                                else:
+                                    if w > min_edge_weight:
                                         # Var->Var
                                         G.add_edge(i, j, weight=w, cls_to_var=False)
 
@@ -423,14 +446,17 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         fig.suptitle(f'Layer {layer_idx} - Epoch {epoch} - Sample {sample_count}', fontsize=18)
                         fig.tight_layout(rect=[0, 0.03, 1, 0.97])  # suptitle을 위한 여백 확보
                         
-                        # 레이어별 폴더에 저장
-                        layer_dir = os.path.join(sample_dirs[sample_count], f'layer_{layer_idx}')
-                        graph_path = os.path.join(layer_dir, f'epoch_{epoch}_complete.png')
+                        # # 레이어별 폴더에 저장
+                        # layer_dir = os.path.join(sample_dirs[sample_count], f'layer_{layer_idx}')
+                        # graph_path = os.path.join(layer_dir, f'epoch_{epoch}_complete.png')
+                        # fig.savefig(graph_path, dpi=300, bbox_inches='tight')
+                        # plt.close(fig)
+                        
+                        # logger.info(f"샘플 {sample_count} - 레이어 {layer_idx} - 에포크 {epoch} 종합 시각화 저장: {graph_path}")
+                        graph_path = os.path.join(sample_dirs[sample_count], 'graph', f'layer_{layer_idx}', f'epoch_{epoch}_complete.png')
                         fig.savefig(graph_path, dpi=300, bbox_inches='tight')
                         plt.close(fig)
-                        
-                        logger.info(f"샘플 {sample_count} - 레이어 {layer_idx} - 에포크 {epoch} 종합 시각화 저장: {graph_path}")
-
+                        logger.info(f"샘플 {sample_count} - 레이어 {layer_idx} - 에포크 {epoch} 그래프 시각화 저장: {graph_path}")
                 sample_count += 1
                 if sample_count >= max_samples:
                     break

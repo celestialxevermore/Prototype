@@ -30,7 +30,7 @@ class AdaptiveGraphAttention(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.frozen = False  # 그래프 구조 고정 여부
-        
+        self.prelu = nn.PReLU()
         self.edge_update = nn.Sequential(
             nn.Linear(input_dim * 2, input_dim),
             nn.LayerNorm(input_dim),
@@ -41,26 +41,18 @@ class AdaptiveGraphAttention(nn.Module):
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
-        self.global_table = nn.Parameter(torch.Tensor(1, 1, input_dim))
-        nn.init.kaiming_uniform_(self.global_table, a = math.sqrt(5))
-
-
-        # self.var_head = nn.Linear(input_dim, hidden_dim)
-        # self.var_tail = nn.Linear(input_dim, hidden_dim)
-        # nn.init.xavier_uniform_(self.var_head.weight, gain=1 / math.sqrt(2))
-        # nn.init.xavier_uniform_(self.var_tail.weight, gain=1 / math.sqrt(2))
-
-
         self.alpha_param = nn.Parameter(torch.tensor(0.1))
         self.global_topology_proj_head = self.desc_head_proj = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
+                nn.Linear(input_dim, input_dim),
+                nn.LayerNorm(input_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
+                nn.Linear(input_dim, input_dim)
                 )
         self.global_topology_proj_tail = self.desc_tail_proj = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
+                nn.Linear(input_dim, input_dim),
+                nn.LayerNorm(input_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
+                nn.Linear(input_dim, input_dim)
                 )
         for m in self.global_topology_proj_head.modules():
             if isinstance(m, nn.Linear):
@@ -74,8 +66,8 @@ class AdaptiveGraphAttention(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        self.adaptive_weight_proj_head = nn.Linear(input_dim, hidden_dim)
-        self.adaptive_weight_proj_tail = nn.Linear(input_dim, hidden_dim)
+        self.adaptive_weight_proj_head = nn.Linear(input_dim, input_dim)
+        self.adaptive_weight_proj_tail = nn.Linear(input_dim, input_dim)
         nn.init.xavier_uniform_(self.adaptive_weight_proj_head.weight, gain=1 / math.sqrt(2))
         nn.init.xavier_uniform_(self.adaptive_weight_proj_tail.weight, gain=1 / math.sqrt(2))
         
@@ -93,21 +85,6 @@ class AdaptiveGraphAttention(nn.Module):
         nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
     
-
-
-    def gumbel_sigmoid(self, logits, tau=1.0, hard=False):
-        """
-            logits : (B, seq_len, seq_len)
-            Gumbel-Sigmoid -> Bernoulli-like sampling
-        """
-        noise = torch.rand_like(logits).clamp_min(1e-6)
-        noise = -torch.log(-torch.log(noise))
-        y = torch.sigmoid((logits + noise) / tau)
-        if hard:
-            y_hard = (y > 0.5).float()
-            y = y_hard.detach() + y - y.detach() 
-        return y
-
     def _no_self_interaction(self, adjacency_matrix):
         batch_size, seq_len, _ = adjacency_matrix.shape
         diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
@@ -115,44 +92,50 @@ class AdaptiveGraphAttention(nn.Module):
 
     
 
-    def forward(self, desc_embeddings,global_table, name_value_embeddings):
+    def forward(self, desc_embeddings, global_table, name_value_embeddings):
         batch_size, new_seq, _ = name_value_embeddings.shape
         seq_len = new_seq - 1
 
         self.G = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
+        adjacency = torch.ones_like(self.G) / seq_len 
         
 
         """
-            1. Global adjacency matrix
+            1. Description embedding
         """
-        global_head = self.global_topology_proj_head(global_table)
-        global_tail = self.global_topology_proj_tail(global_table)
-        global_head = global_head / global_head.norm(dim=-1, keepdim=True)
-        global_tail = global_tail / global_tail.norm(dim=-1, keepdim=True)
-        global_sim = torch.matmul(global_head, global_tail.transpose(-1, -2))
-        global_sim = torch.sigmoid(global_sim + self.topology_bias)
-        self.global_sim = global_sim
-        """
-            2. Sample-wise adjacency matrix
-        """
+
+        desc_embeddings_head = self.global_topology_proj_head(global_table)
+        desc_embeddings_tail = self.global_topology_proj_tail(global_table)
+        desc_embeddings_head = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
+        desc_embeddings_tail = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
+        self.global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
+        self.global_topology_A = self.prelu(self.global_sim + self.topology_bias)
+
+        '''
+            2. Sample Self-attention
+        '''
+        
         var_embeddings_head = self.adaptive_weight_proj_head(name_value_embeddings[:, 1:, :])
         var_embeddings_tail = self.adaptive_weight_proj_tail(name_value_embeddings[:, 1:, :])
-        sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
-        sample_sim = self._no_self_interaction(sample_sim)
-        sample_sim = torch.softmax(sample_sim, dim=-1)
+        self.sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
+        self.sample_sim = torch.softmax(self.sample_sim, dim = -1)
+        self.global_topology_A = self._no_self_interaction(self.global_topology_A)
+        
+        self.G = self.global_topology_A * self.sample_sim
 
-        global_topology_A = global_sim + sample_sim
-        self.global_topology_A = global_topology_A
-        if self.training:
-            adjacency = self.gumbel_sigmoid(global_topology_A, tau=1.0, hard=False)
-        else:
-            adjacency = self.gumbel_sigmoid(global_topology_A, tau=0.5, hard=True)
-        
+        diag_indices = torch.arange(seq_len, device=self.G.device)
+        self.G[:, diag_indices, diag_indices] = -1e9
+
+
+        # G_row_max = self.G.max(dim=-1, keepdim=True)[0]
+        # G_row_min = self.G.min(dim=-1, keepdim=True)[0]
+        # threshold = G_row_min + (G_row_max - G_row_min) * self.alpha_param.clamp(0,1)
+        # mask = (self.G < threshold)
+        threshold = self.G.max(dim=-1, keepdim=True)[0] * self.alpha_param.clamp(min=1e-5,max=1.0)
+        mask = (self.G < threshold)
+        adjacency = self.G
+        adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
         self.adjacency = adjacency
-        
-        row_sums = adjacency.sum(dim=-1, keepdim=True)
-        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
-        adjacency = adjacency / row_sums
 
         '''
             4. Edge Attributes & Adjacency 
@@ -231,6 +214,7 @@ class Model(nn.Module):
         llm_model = args.llm_model
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
+                # GMM 관련 속성 추가
         self.use_gmm = args.use_gmm 
         self.use_gmm2 = args.use_gmm2
         self.num_prototypes = args.num_prototypes
@@ -256,7 +240,7 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(input_dim, input_dim)
         )
-
+       
         self.layers = nn.ModuleList([
             AdaptiveGraphAttention(
                 input_dim = self.input_dim, 
@@ -340,7 +324,8 @@ class Model(nn.Module):
             2. Global Table Token
         '''
         global_table = self.global_table[:,:seq_len-1 ,:].expand(batch_size,-1,-1)
-
+        #global_table = torch.cat([global_table, desc_embeddings], dim = -1)
+        
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
             attn_output, attn_weights = layer(desc_embeddings,global_table, norm_x)
@@ -348,6 +333,8 @@ class Model(nn.Module):
             x = x + attn_output
         pred = x[:, 0, :]
         pred = self.predictor(pred)
+
+        
         return pred
 
     def froze_topology(self):

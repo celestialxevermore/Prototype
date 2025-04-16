@@ -138,24 +138,6 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
     
     best_threshold = 0.5
     best_model_state = None
-    
-    viz_dir = os.path.join(f"visualizations/{args.llm_model}/cosine_similarity/{args.source_dataset_name}/{mode}/{experiment_id}")
-    os.makedirs(viz_dir, exist_ok=True)
-    
-    graph_viz_dir = os.path.join(f"visualizations/{args.llm_model}/graph_structure/{args.source_dataset_name}/{mode}/{experiment_id}")
-    os.makedirs(graph_viz_dir, exist_ok=True)
-
-    #에포크 디렉토리 대신 샘플별 디렉토리 구조로 변경
-    sample_dirs = []
-    for i in range(20):  # 최대 20개 샘플 디렉토리 미리 생성
-        sample_dir = os.path.join(graph_viz_dir, f'sample_{i}')
-        os.makedirs(sample_dir, exist_ok=True)
-        sample_dirs.append(sample_dir)
-        
-        # 각 샘플 내에 레이어별 서브폴더 생성
-        for layer_idx in range(len(model.layers)):
-            layer_dir = os.path.join(sample_dir, f'layer_{layer_idx}')
-            os.makedirs(layer_dir, exist_ok=True)
 
     for epoch in range(epochs):
         # 1) Training
@@ -165,9 +147,10 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
-        if epoch % 10 == 0 or epoch == epochs - 1:
-            visualize_model_structure(model, val_loader, device, args, mode, experiment_id, epoch, max_samples=5)
-        
+        if args.viz_graph or args.viz_heatmap:
+            if epoch % 10 == 0 or epoch == epochs - 1:
+                visualize_model_structure(model, val_loader, device, args, mode, experiment_id, epoch, max_samples=5)
+                
         if is_binary:
             # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)
