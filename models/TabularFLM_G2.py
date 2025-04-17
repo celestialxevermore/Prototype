@@ -37,35 +37,17 @@ class AdaptiveGraphAttention(nn.Module):
             nn.ReLU(),
             nn.Linear(input_dim, input_dim)
         )
+        
         self.threshold = threshold
         self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
 
         self.alpha_param = nn.Parameter(torch.tensor(0.1))
-        self.global_topology_proj_head = self.desc_head_proj = nn.Sequential(
-                nn.Linear(input_dim, input_dim),
-                nn.LayerNorm(input_dim),
-                nn.ReLU(),
-                nn.Linear(input_dim, input_dim)
-                )
-        self.global_topology_proj_tail = self.desc_tail_proj = nn.Sequential(
-                nn.Linear(input_dim, input_dim),
-                nn.LayerNorm(input_dim),
-                nn.ReLU(),
-                nn.Linear(input_dim, input_dim)
-                )
-        for m in self.global_topology_proj_head.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-                    
-        for m in self.global_topology_proj_tail.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
 
+        self.global_topology_proj_head = nn.Linear(input_dim, input_dim)
+        self.global_topology_proj_tail = nn.Linear(input_dim, input_dim)
+        nn.init.xavier_uniform_(self.global_topology_proj_head.weight, gain=1 / math.sqrt(2))
+        nn.init.xavier_uniform_(self.global_topology_proj_tail.weight, gain=1 / math.sqrt(2))
         self.adaptive_weight_proj_head = nn.Linear(input_dim, input_dim)
         self.adaptive_weight_proj_tail = nn.Linear(input_dim, input_dim)
         nn.init.xavier_uniform_(self.adaptive_weight_proj_head.weight, gain=1 / math.sqrt(2))
@@ -110,7 +92,7 @@ class AdaptiveGraphAttention(nn.Module):
         desc_embeddings_tail = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
         self.global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
         self.global_topology_A = self.prelu(self.global_sim + self.topology_bias)
-
+        self.global_topology_A = self._no_self_interaction(self.global_topology_A)
         '''
             2. Sample Self-attention
         '''
@@ -118,25 +100,21 @@ class AdaptiveGraphAttention(nn.Module):
         var_embeddings_head = self.adaptive_weight_proj_head(name_value_embeddings[:, 1:, :])
         var_embeddings_tail = self.adaptive_weight_proj_tail(name_value_embeddings[:, 1:, :])
         self.sample_sim = torch.matmul(var_embeddings_head, var_embeddings_tail.transpose(-1, -2))
-        self.sample_sim = torch.softmax(self.sample_sim, dim = -1)
-        self.global_topology_A = self._no_self_interaction(self.global_topology_A)
+        diag_mask = torch.eye(seq_len, device=self.sample_sim.device).bool().unsqueeze(0)
+        self.sample_sim = self.sample_sim.masked_fill(diag_mask, float('-inf'))
+        self.sample_sim = torch.softmax(self.sample_sim / 0.3, dim = -1)
         
         self.G = self.global_topology_A * self.sample_sim
 
         diag_indices = torch.arange(seq_len, device=self.G.device)
         self.G[:, diag_indices, diag_indices] = -1e9
-
-
-        # G_row_max = self.G.max(dim=-1, keepdim=True)[0]
-        # G_row_min = self.G.min(dim=-1, keepdim=True)[0]
-        # threshold = G_row_min + (G_row_max - G_row_min) * self.alpha_param.clamp(0,1)
-        # mask = (self.G < threshold)
         threshold = self.G.max(dim=-1, keepdim=True)[0] * self.alpha_param.clamp(min=1e-5,max=1.0)
         mask = (self.G < threshold)
         adjacency = self.G
         adjacency = torch.where(mask, torch.zeros_like(adjacency), adjacency)
         self.adjacency = adjacency
-
+        self.adjacency = self.adjacency / (self.adjacency.sum(dim=-1, keepdim=True) + 1e-9)
+        
         '''
             4. Edge Attributes & Adjacency 
         '''
@@ -253,6 +231,9 @@ class Model(nn.Module):
         self.layer_norms = nn.ModuleList([
             nn.LayerNorm(self.input_dim) for _ in range(args.num_layers)
         ])
+        # self.post_norms = nn.ModuleList([
+        #     nn.LayerNorm(self.input_dim) for _ in range(args.num_layers)
+        # ])
         self.dropout = nn.Dropout(args.dropout_rate)
         self.predictor = nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
@@ -331,10 +312,10 @@ class Model(nn.Module):
             attn_output, attn_weights = layer(desc_embeddings,global_table, norm_x)
             attention_weights.append(attn_weights)
             x = x + attn_output
+            #x = self.post_norms[i](x)
         pred = x[:, 0, :]
         pred = self.predictor(pred)
 
-        
         return pred
 
     def froze_topology(self):

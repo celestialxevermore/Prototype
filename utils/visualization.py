@@ -157,6 +157,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
 
                         # 4. adjacency 히트맵
                         adjacency_np = model.layers[layer_idx].adjacency[sample_idx].cpu().numpy()
+                        adjacency_np = adjacency_np / (adjacency_np.sum(axis=1, keepdims=True) + 1e-9)
                         im3 = axes[1,1].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
                         axes[1,1].set_title('Final Adjacency self.G = self.global_topology_A * self.sample_sim', fontsize=14)
                         fig.colorbar(im3, ax=axes[1,1])
@@ -201,8 +202,10 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
 
                         # 원본 adjacency 사용 (히트맵과 일치하는 값)
                         adjacency = model.layers[layer_idx].adjacency[sample_idx].cpu()
+                        adj_row_sums = adjacency.sum(axis=1, keepdims=True) + 1e-9
+                        adjacency = adjacency / adj_row_sums
                         new_seq = attn_weights_mean.shape[0]
-                        graph_matrix = torch.zeros((new_seq, new_seq), device=attn_weights_mean.device)
+                        graph_matrix = torch.zeros((new_seq, new_seq), device=attn_weights_mean.device, dtype = torch.float)
 
                         graph_matrix[1:, 1:] = adjacency  # 변수 간 연결은 원본 adjacency 사용
                         graph_matrix[0, 1:] = 1.0  # CLS->변수 연결
@@ -210,7 +213,9 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         
                         mask = (graph_matrix == 0)
                         final_graph_matrix = (attn_weights_mean * graph_matrix).numpy()
-                        final_graph_matrix[mask.numpy()] = 0.0 
+                        final_graph_matrix[mask.numpy()] = 0.0
+                        row_sums = final_graph_matrix.sum(axis=1, keepdims=True)
+                        final_graph_matrix = final_graph_matrix / (row_sums + 1e-9)  # stability 위해 1e-9 더함 
                         n_nodes = final_graph_matrix.shape[0]
                         
                         # 2) Edge 리스트(모든 i->j) 수집 (Barplot용)
