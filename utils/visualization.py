@@ -120,78 +120,170 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                 
                 # 1. 히트맵 시각화
                 if args.viz_heatmap:
+                    # 시각화 시점에 클러스터링 업데이트
+                    clustering_updated = model.update_attention_clustering()
+                    
+                    # 클러스터링 정보 가져오기
+                    clustering_info = model.get_clustering_info()
+                    
+                    # 1. 기존: 각 레이어별 시각화 (sample_*/heatmap/layer_*/에 저장)
                     for layer_idx in range(len(model.layers)):
-                        fig, axes = plt.subplots(2, 2, figsize=(24, 18))
+                        fig, axes = plt.subplots(1, 2, figsize=(20, 8))
                         
-                        # 1. global_sim 히트맵
-                        global_sim_np = model.layers[layer_idx].global_sim[sample_idx].cpu().numpy()
-                        im1 = axes[0,0].imshow(global_sim_np, cmap='viridis', interpolation='nearest')
-                        axes[0,0].set_title('Global Similarity (Cosine)', fontsize=14)
-                        fig.colorbar(im1, ax=axes[0,0])
+                        # 1. Attention Map 히트맵 
+                        attn_weights = model.layers[layer_idx].attn_weights[sample_idx]  # [n_heads, seq, seq]
+                        attn_weights_mean = attn_weights.mean(dim=0).cpu().numpy()  # 헤드별 평균
                         
-                        for i in range(len(feature_names)):
-                            for j in range(len(feature_names)):
-                                axes[0,0].text(j, i, f"{global_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
-
-                        # 2. global_topology_A 히트맵
-                        global_topology_A = model.layers[layer_idx].global_topology_A[sample_idx].cpu().numpy()
-                        im2 = axes[0,1].imshow(global_topology_A, cmap='plasma', interpolation='nearest')
-                        axes[0,1].set_title('global_topology_A = torch.sigmoid(self.global_sim + self.topology_bias)', fontsize=14)
-                        fig.colorbar(im2, ax=axes[0,1])
+                        # CLS 토큰 포함한 feature names
+                        all_node_names = ["CLS"] + feature_names 
                         
-                        for i in range(len(feature_names)):
-                            for j in range(len(feature_names)):
-                                axes[0,1].text(j, i, f"{global_topology_A[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
+                        im1 = axes[0].imshow(attn_weights_mean, cmap='viridis', interpolation='nearest')
+                        axes[0].set_title(f'Attention Map - Layer {layer_idx}', fontsize=14)
+                        fig.colorbar(im1, ax=axes[0])
                         
-                        # 3. Sample_sim 히트맵
-                        sample_sim_np = model.layers[layer_idx].sample_sim[sample_idx].cpu().numpy() 
-                        im3 = axes[1,0].imshow(sample_sim_np, cmap='viridis', interpolation='nearest')
-                        axes[1,0].set_title('Sample Similarity (Self attention)', fontsize=14)
-                        fig.colorbar(im3, ax=axes[1,0])
-
-                        for i in range(len(feature_names)):
-                            for j in range(len(feature_names)):
-                                axes[1,0].text(j, i, f"{sample_sim_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=7)
-
-
-
-                        # 4. adjacency 히트맵
-                        adjacency_np = model.layers[layer_idx].adjacency[sample_idx].cpu().numpy()
-                        adjacency_np = adjacency_np / (adjacency_np.sum(axis=1, keepdims=True) + 1e-9)
-                        im3 = axes[1,1].imshow(adjacency_np, cmap='cividis', interpolation='nearest')
-                        axes[1,1].set_title('Final Adjacency self.G = self.global_topology_A * self.sample_sim', fontsize=14)
-                        fig.colorbar(im3, ax=axes[1,1])
+                        # 축 라벨 설정
+                        axes[0].set_xticks(np.arange(len(all_node_names)))
+                        axes[0].set_yticks(np.arange(len(all_node_names)))
+                        axes[0].set_xticklabels(all_node_names, rotation=90, fontsize=8)
+                        axes[0].set_yticklabels(all_node_names, fontsize=8)
                         
-                        for i in range(len(feature_names)):
-                            for j in range(len(feature_names)):
-                                axes[1,1].text(j, i, f"{adjacency_np[i,j]:.2f}", ha="center", va="center", color="white", fontsize=5)
+                        # 각 셀에 값 표시
+                        for i in range(len(all_node_names)):
+                            for j in range(len(all_node_names)):
+                                axes[0].text(j, i, f"{attn_weights_mean[i,j]:.2f}", 
+                                        ha="center", va="center", 
+                                        color="white" if attn_weights_mean[i,j] > 0.5 else "black", 
+                                        fontsize=7)
                         
-                        # 모든 축에 feature_names 적용
-                        for row in axes:
-                            for ax in row:
-                                ax.set_xticks(np.arange(len(feature_names)))
-                                ax.set_yticks(np.arange(len(feature_names)))
-                                ax.set_xticklabels(feature_names, rotation=90, fontsize=8)
-                                ax.set_yticklabels(feature_names, fontsize=8)
-                                ax.grid(False)
+                        # 2. 레이어별 간단한 정보 표시 (클러스터링은 clustering 폴더에서)
+                        axes[1].text(0.5, 0.5, f'Layer {layer_idx} Attention Pattern\n\nFull clustering results\navailable in clustering/ folder\n\nLayer 2 = Final clustering layer', 
+                                ha='center', va='center', transform=axes[1].transAxes, fontsize=14,
+                                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightcyan", alpha=0.8))
+                        axes[1].set_title(f'Layer {layer_idx} - See clustering/ for full results', fontsize=14)
+                        axes[1].axis('off')
                         
                         # 전체 타이틀
-                        fig.suptitle(f'Graph Construction Process - Epoch {epoch} - Sample {sample_count}', fontsize=16)
+                        fig.suptitle(f'Layer {layer_idx} Attention Analysis - Epoch {epoch} - Sample {sample_count}', fontsize=16)
                         plt.tight_layout()
                         
-                        # cosine_similarity 폴더에 각 샘플별로 저장
-                        # cosine_dir = viz_dir.replace('graph_structure', 'cosine_similarity')
-                        # sample_cosine_dir = os.path.join(cosine_dir, f'sample_{sample_count}', f'layer_{layer_idx}')
-                        # os.makedirs(sample_cosine_dir, exist_ok=True)
-                        # sim_viz_path = os.path.join(sample_cosine_dir, f'epoch_{epoch}.png')
-                        # fig.savefig(sim_viz_path, dpi=300, bbox_inches='tight')
-                        # plt.close(fig)
-                        
-                        # logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {sim_viz_path}")
+                        # 기존 경로에 저장
                         heatmap_path = os.path.join(sample_dirs[sample_count], 'heatmap', f'layer_{layer_idx}', f'epoch_{epoch}.png')
                         fig.savefig(heatmap_path, dpi=300, bbox_inches='tight')
                         plt.close(fig)
-                        logger.info(f"Epoch {epoch} - 샘플 {sample_count} 히트맵 저장: {heatmap_path}")
+                        logger.info(f"Epoch {epoch} - 샘플 {sample_count} 레이어 {layer_idx} 히트맵 저장: {heatmap_path}")
+
+                    # 2. 새로운: 전체 클러스터링 결과 (clustering/ 폴더에 저장) - 첫 번째 샘플에서만 생성
+                    if sample_count == 0:  # 중복 방지: 첫 번째 샘플에서만 클러스터링 시각화 생성
+                        # clustering 폴더 생성
+                        clustering_dir = os.path.join(base_viz_dir, 'clustering')
+                        os.makedirs(clustering_dir, exist_ok=True)
+                        
+                        # 전체 데이터셋 클러스터링 결과 시각화
+                        if (clustering_info['cluster_centroids'] is not None and 
+                            len(clustering_info['cluster_assignments']) > 0):
+                            
+                            cluster_assignments = clustering_info['cluster_assignments']
+                            attention_maps = clustering_info['attention_maps']
+                            
+                            if len(cluster_assignments) > 0 and len(attention_maps) > 0:
+                                fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+                                
+                                cluster_assignments = np.array(cluster_assignments)
+                                
+                                try:
+                                    from sklearn.manifold import TSNE
+                                    
+                                    # attention maps를 numpy로 변환 (시각화용)
+                                    attention_np = torch.stack(attention_maps).detach().cpu().numpy()
+                                    n_maps, seq_len, seq_len2 = attention_np.shape
+                                    
+                                    # 평탄화해서 t-SNE 적용
+                                    flattened_maps = attention_np.reshape(n_maps, -1)
+                                    
+                                    if n_maps >= 2:
+                                        perplexity = min(30, n_maps-1, max(1, n_maps//3))
+                                        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                                        tsne_embeddings = tsne.fit_transform(flattened_maps)
+                                        
+                                        # 클러스터별로 다른 색상으로 플롯
+                                        unique_clusters = np.unique(cluster_assignments)
+                                        colors = plt.cm.Set3(np.linspace(0, 1, max(len(unique_clusters), 1)))
+                                        
+                                        for i, cluster_id in enumerate(unique_clusters):
+                                            cluster_mask = cluster_assignments == cluster_id
+                                            cluster_points = tsne_embeddings[cluster_mask]
+                                            
+                                            if len(cluster_points) > 0:
+                                                ax.scatter(cluster_points[:, 0], cluster_points[:, 1], 
+                                                        c=[colors[i]], label=f'Cluster {cluster_id}', 
+                                                        alpha=0.7, s=50)
+                                        
+                                        ax.set_title(f'Dataset-wide Final Layer Clustering (Epoch {epoch})\nCumulative Layer 2 Attention Maps', fontsize=16)
+                                        ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
+                                        ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
+                                        
+                                        if len(unique_clusters) > 0:
+                                            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                                        ax.grid(True, alpha=0.3)
+                                        
+                                        # 클러스터 통계 정보
+                                        cluster_stats = []
+                                        for cluster_id in unique_clusters:
+                                            count = np.sum(cluster_assignments == cluster_id)
+                                            percentage = (count / len(cluster_assignments)) * 100
+                                            cluster_stats.append(f"Cluster {cluster_id}: {count} maps ({percentage:.1f}%)")
+                                        
+                                        if cluster_stats:
+                                            stats_text = "\n".join(cluster_stats)
+                                            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                                                fontsize=10, verticalalignment='top',
+                                                bbox=dict(boxstyle="round,pad=0.4", facecolor="lightgray", alpha=0.9))
+                                        
+                                        # 전체 통계
+                                        total_samples_processed = n_maps
+                                        ax.text(0.02, 0.02, f"Total Layer 2 Maps: {total_samples_processed}\nEpoch: {epoch}\nUpdate Freq: {model.clustering_update_freq}", 
+                                            transform=ax.transAxes, fontsize=10, verticalalignment='bottom',
+                                            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8))
+                                        
+                                        plt.tight_layout()
+                                        
+                                        # clustering 폴더에 저장
+                                        clustering_path = os.path.join(clustering_dir, f'epoch_{epoch}.png')
+                                        fig.savefig(clustering_path, dpi=300, bbox_inches='tight')
+                                        plt.close(fig)
+                                        logger.info(f"Epoch {epoch} - 전체 데이터셋 클러스터링 저장: {clustering_path}")
+                                        
+                                    else:
+                                        # 데이터 부족한 경우
+                                        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+                                        ax.text(0.5, 0.5, f'Dataset-wide Clustering (Epoch {epoch})\n\nNeed more data for t-SNE\nCurrent maps: {n_maps}\nMinimum required: 2', 
+                                            ha='center', va='center', transform=ax.transAxes, fontsize=14,
+                                            bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8))
+                                        ax.set_title(f'Dataset-wide Final Layer Clustering (Epoch {epoch})', fontsize=16)
+                                        ax.axis('off')
+                                        
+                                        clustering_path = os.path.join(clustering_dir, f'epoch_{epoch}.png')
+                                        fig.savefig(clustering_path, dpi=300, bbox_inches='tight')
+                                        plt.close(fig)
+                                        logger.info(f"Epoch {epoch} - 클러스터링 대기 상태 저장: {clustering_path}")
+                                        
+                                except Exception as e:
+                                    logger.error(f"Clustering visualization error: {e}")
+                                    
+                            else:
+                                # 클러스터링 데이터 없는 경우
+                                fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+                                total_maps = clustering_info.get('attention_count', 0)
+                                ax.text(0.5, 0.5, f'Dataset-wide Clustering (Epoch {epoch})\n\nNo clustering data available\nTotal maps collected: {total_maps}\nRequired: {model.num_clusters}', 
+                                    ha='center', va='center', transform=ax.transAxes, fontsize=14,
+                                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightcoral", alpha=0.8))
+                                ax.set_title(f'Dataset-wide Final Layer Clustering (Epoch {epoch})', fontsize=16)
+                                ax.axis('off')
+                                
+                                clustering_path = os.path.join(clustering_dir, f'epoch_{epoch}.png')
+                                fig.savefig(clustering_path, dpi=300, bbox_inches='tight')
+                                plt.close(fig)
+                                logger.info(f"Epoch {epoch} - 클러스터링 없음 상태 저장: {clustering_path}")
                 # 2. 그래프 구조 시각화
                 if args.viz_graph:
                     # 각 레이어별로 시각화 수행
@@ -202,8 +294,8 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
 
                         # 원본 adjacency 사용 (히트맵과 일치하는 값)
                         adjacency = model.layers[layer_idx].adjacency[sample_idx].cpu()
-                        adj_row_sums = adjacency.sum(axis=1, keepdims=True) + 1e-9
-                        adjacency = adjacency / adj_row_sums
+                        # adj_row_sums = adjacency.sum(axis=1, keepdims=True) + 1e-9
+                        # adjacency = adjacency / adj_row_sums
                         new_seq = attn_weights_mean.shape[0]
                         graph_matrix = torch.zeros((new_seq, new_seq), device=attn_weights_mean.device, dtype = torch.float)
 
@@ -214,8 +306,8 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         mask = (graph_matrix == 0)
                         final_graph_matrix = (attn_weights_mean * graph_matrix).numpy()
                         final_graph_matrix[mask.numpy()] = 0.0
-                        row_sums = final_graph_matrix.sum(axis=1, keepdims=True)
-                        final_graph_matrix = final_graph_matrix / (row_sums + 1e-9)  # stability 위해 1e-9 더함 
+                        # row_sums = final_graph_matrix.sum(axis=1, keepdims=True)
+                        # final_graph_matrix = final_graph_matrix / (row_sums + 1e-9)  # stability 위해 1e-9 더함 
                         n_nodes = final_graph_matrix.shape[0]
                         
                         # 2) Edge 리스트(모든 i->j) 수집 (Barplot용)

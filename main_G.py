@@ -19,7 +19,7 @@ from utils.train_test import binary_train, binary_evaluate, multi_train, multi_e
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM_G2 import Model
+from models.TabularFLM import Model
 import psutil
 from utils.visualization import visualize_model_structure
 from torch_geometric.data import Batch
@@ -147,9 +147,10 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
-        if epoch % 10 == 0 or epoch == epochs - 1:
-            visualize_model_structure(model, val_loader, device, args, mode, experiment_id, epoch, max_samples=5)
-        
+        if args.viz_graph or args.viz_heatmap:
+            if epoch % 10 == 0 or epoch == epochs - 1:
+                visualize_model_structure(model, val_loader, device, args, mode, experiment_id, epoch, max_samples=5)
+                
         if is_binary:
             # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)

@@ -86,8 +86,8 @@ class AdaptiveGraphAttention(nn.Module):
             1. Description embedding
         """
 
-        desc_embeddings_head = self.global_topology_proj_head(global_table)
-        desc_embeddings_tail = self.global_topology_proj_tail(global_table)
+        desc_embeddings_head = self.global_topology_proj_head(desc_embeddings)
+        desc_embeddings_tail = self.global_topology_proj_tail(desc_embeddings)
         desc_embeddings_head = desc_embeddings_head / desc_embeddings_head.norm(dim=-1, keepdim=True)
         desc_embeddings_tail = desc_embeddings_tail / desc_embeddings_tail.norm(dim=-1, keepdim=True)
         self.global_sim = torch.matmul(desc_embeddings_head, desc_embeddings_tail.transpose(-1, -2))
