@@ -149,7 +149,7 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         val_losses.append(val_loss)
         if args.viz_graph or args.viz_heatmap:
             if epoch % 10 == 0 or epoch == epochs - 1:
-                visualize_model_structure(model, val_loader, device, args, mode, experiment_id, epoch, max_samples=5)
+                visualize_model_structure(model, train_loader, device, args, mode, experiment_id, epoch, max_samples=5)
                 
         if is_binary:
             # Binary Classification

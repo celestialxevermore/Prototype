@@ -145,6 +145,14 @@ class Model(nn.Module):
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
                 # GMM 관련 속성 추가
+        self.use_gmm = args.use_gmm 
+        self.use_gmm2 = args.use_gmm2
+        self.num_prototypes = args.num_prototypes
+        self.stage_num = args.gmm_stage_num
+        self.momentum = args.gmm_momentum 
+        self.beta = args.gmm_beta 
+        self.lambd = args.gmm_lambda
+        self.eps = args.gmm_eps
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
@@ -153,13 +161,14 @@ class Model(nn.Module):
         nn.init.kaiming_uniform_(self.global_table, a = math.sqrt(5))
 
         # PyTorch Attention Map Clustering 관련 변수들
-        self.attention_maps = []  # List of attention map tensors
+        self.attention_maps = []  # List of attention map tensors (현재 에포크만)
         self.cluster_centroids = None  # [num_clusters, seq_len, seq_len]
         self.cluster_assignments = []  # 각 attention map의 클러스터 할당
         self.num_clusters = getattr(args, 'num_attention_clusters', 5)
         self.clustering_update_freq = getattr(args, 'clustering_update_freq', 10)
         self.attention_count = 0
-        self.max_attention_maps = getattr(args, 'max_attention_maps', 100000)  # 메모리 관리
+        self.current_epoch = -1  # 현재 에포크 추적용
+        self.collect_attention = False  # 🆕 attention 수집 모드 플래그
 
         '''
             MLP(CONCAT[Name embedding, Value embedding])
@@ -279,6 +288,24 @@ class Model(nn.Module):
 
         logger.info(f"PyTorch clustering updated: {len(self.attention_maps)} maps, {self.num_clusters} clusters")
 
+    def reset_epoch_clustering(self):
+        """
+        시각화 에포크에서만 attention maps 리셋 및 수집 시작
+        """
+        self.attention_maps = []  # 새로운 수집을 위해 리셋
+        self.cluster_assignments = []  # 클러스터 할당도 리셋
+        self.cluster_centroids = None  # 클러스터 중심도 리셋
+        self.attention_count = 0
+        self.collect_attention = True  # 🆕 수집 모드 활성화
+        logger.info(f"Attention clustering reset and collection started for visualization epoch")
+    
+    def stop_attention_collection(self):
+        """
+        attention 수집 중단
+        """
+        self.collect_attention = False
+        logger.info(f"Attention collection stopped")
+
     def update_attention_clustering(self):
         """
         외부에서 호출 가능한 클러스터링 업데이트 메소드 (시각화용)
@@ -305,6 +332,29 @@ class Model(nn.Module):
             'num_clusters': self.num_clusters,
             'attention_count': self.attention_count
         }
+
+
+    def save_cluster_centroids(self, save_dir, epoch):
+        if self.cluster_centroids is None:
+            return 
+        
+        # centroids 폴더 생성
+        centroid_dir = os.path.join(save_dir, 'centroids')
+        os.makedirs(centroid_dir, exist_ok=True)
+
+        for cluster_id, centroid in enumerate(self.cluster_centroids):
+            # 클러스터별 폴더 생성 (centroids 하위에)
+            cluster_folder = os.path.join(centroid_dir, f'cluster_{cluster_id}')
+            os.makedirs(cluster_folder, exist_ok=True)
+            
+            centroid_np = centroid.detach().cpu().numpy() 
+
+            # 클러스터별 폴더에 저장
+            filename = f"epoch_{epoch}.npy"
+            filepath = os.path.join(cluster_folder, filename)
+            np.save(filepath, centroid_np)
+            logger.info(f"Saved centroid for cluster {cluster_id}: {filepath}")
+
 
     def forward(self, batch, y):
         target = y.to(self.device).view(-1,1).float()
@@ -338,7 +388,7 @@ class Model(nn.Module):
 
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
         name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
-        name_value_embeddings = self.sample_fusion(name_value_embeddings)
+        #name_value_embeddings = self.sample_fusion(name_value_embeddings)
         '''
             1. [CLS] Token
         '''
@@ -356,27 +406,17 @@ class Model(nn.Module):
             attention_weights.append(attn_weights)
             x = x + attn_output
             
-            # 모든 레이어 처리 완료 후, 마지막 레이어의 attention만 클러스터링에 사용
-        if self.training:
+        # 모든 레이어 처리 완료 후, 마지막 레이어의 attention만 클러스터링에 사용
+        if self.training and self.collect_attention:  # 🆕 수집 모드일 때만
             final_layer_attention = attention_weights[-1]  # 마지막 레이어 (Layer 2)
             batch_size = final_layer_attention.shape[0]
             
             for batch_idx in range(batch_size):
                 sample_attention = final_layer_attention[batch_idx].mean(dim=0)  # [seq_len, seq_len]
                 
-                # 최종 attention map만 저장
+                # 최종 attention map만 저장 (현재 에포크만)
                 self.attention_maps.append(sample_attention.detach().clone())
-                self.attention_count += 1
-            
-            # 메모리 관리
-            if len(self.attention_maps) > self.max_attention_maps:
-                self.attention_maps = self.attention_maps[-self.max_attention_maps//2:]
-                self.cluster_assignments = self.cluster_assignments[-self.max_attention_maps//2:] if self.cluster_assignments else []
-            
-            # 주기적으로 클러스터링 업데이트
-            if self.attention_count % self.clustering_update_freq == 0:
-                self._update_clustering()
-                    
+                self.attention_count += 1        
         pred = x[:, 0, :]
         pred = self.predictor(pred)
 

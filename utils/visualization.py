@@ -27,6 +27,54 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def visualize_cluster_centroids(clustering_info, clustering_dir, epoch, feature_names):
+    """
+    각 클러스터의 centroid attention map을 히트맵으로 시각화
+    클러스터별 폴더 구조로 정리
+    """
+    if clustering_info['cluster_centroids'] is None:
+        return
+    
+    # visualizations 폴더 생성
+    visualizations_dir = os.path.join(clustering_dir, 'visualizations')
+    os.makedirs(visualizations_dir, exist_ok=True)
+        
+    for cluster_id, centroid in enumerate(clustering_info['cluster_centroids']):
+        # 클러스터별 폴더 생성 (visualizations 하위에)
+        cluster_folder = os.path.join(visualizations_dir, f'cluster_{cluster_id}')
+        os.makedirs(cluster_folder, exist_ok=True)
+        
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        
+        centroid_np = centroid.detach().cpu().numpy()
+        all_node_names = ["CLS"] + feature_names
+        
+        im = ax.imshow(centroid_np, cmap='viridis', interpolation='nearest')
+        ax.set_title(f'Cluster {cluster_id} Centroid - Epoch {epoch}', fontsize=14)
+        plt.colorbar(im, ax=ax)
+        
+        # 축 라벨 설정
+        ax.set_xticks(np.arange(len(all_node_names)))
+        ax.set_yticks(np.arange(len(all_node_names)))
+        ax.set_xticklabels(all_node_names, rotation=90, fontsize=8)
+        ax.set_yticklabels(all_node_names, fontsize=8)
+        
+        # 값 표시
+        for i in range(len(all_node_names)):
+            for j in range(len(all_node_names)):
+                ax.text(j, i, f"{centroid_np[i,j]:.2f}", 
+                       ha="center", va="center", 
+                       color="white" if centroid_np[i,j] > 0.5 else "black", 
+                       fontsize=6)
+        
+        # visualizations 폴더의 클러스터별 폴더에 저장
+        centroid_viz_path = os.path.join(cluster_folder, f'epoch_{epoch}.png')
+        fig.savefig(centroid_viz_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f"Saved centroid visualization for cluster {cluster_id}: {centroid_viz_path}")
+
+
+
 def visualize_model_structure(model, data_loader, device, args, mode, experiment_id, epoch, max_samples=10):
     """
     모델의 내부 구조(어텐션, 그래프 구조 등)를 시각화하는 함수
@@ -120,7 +168,24 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                 
                 # 1. 히트맵 시각화
                 if args.viz_heatmap:
-                    # 시각화 시점에 클러스터링 업데이트
+                    # 🆕 시각화 시점에서만 클러스터링 리셋 (첫 번째 샘플에서만)
+                    if sample_count == 0:
+                        model.reset_epoch_clustering()
+                        
+                        # 현재 에포크의 데이터 수집을 위해 data_loader 순회
+                        model.train()  # attention 수집용
+                        with torch.no_grad():
+                            for batch in data_loader:
+                                batch_on_device = {
+                                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                    for k, v in batch.items()
+                                }
+                                _ = model.predict(batch_on_device)  # attention maps 수집
+                        
+                        model.stop_attention_collection()
+                        model.eval()
+                    
+                    # 수집 완료 후 클러스터링 업데이트
                     clustering_updated = model.update_attention_clustering()
                     
                     # 클러스터링 정보 가져오기
@@ -131,7 +196,9 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         fig, axes = plt.subplots(1, 2, figsize=(20, 8))
                         
                         # 1. Attention Map 히트맵 
-                        attn_weights = model.layers[layer_idx].attn_weights[sample_idx]  # [n_heads, seq, seq]
+                        batch_size = model.layers[layer_idx].attn_weights.shape[0]
+                        actual_sample_idx = min(sample_idx, batch_size - 1)  # 배치 크기 초과 방지
+                        attn_weights = model.layers[layer_idx].attn_weights[actual_sample_idx]  # [n_heads, seq, seq]
                         attn_weights_mean = attn_weights.mean(dim=0).cpu().numpy()  # 헤드별 평균
                         
                         # CLS 토큰 포함한 feature names
@@ -155,12 +222,53 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                         color="white" if attn_weights_mean[i,j] > 0.5 else "black", 
                                         fontsize=7)
                         
-                        # 2. 레이어별 간단한 정보 표시 (클러스터링은 clustering 폴더에서)
-                        axes[1].text(0.5, 0.5, f'Layer {layer_idx} Attention Pattern\n\nFull clustering results\navailable in clustering/ folder\n\nLayer 2 = Final clustering layer', 
-                                ha='center', va='center', transform=axes[1].transAxes, fontsize=14,
-                                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightcyan", alpha=0.8))
-                        axes[1].set_title(f'Layer {layer_idx} - See clustering/ for full results', fontsize=14)
-                        axes[1].axis('off')
+                        # 2. 오른쪽: 해당하는 클러스터 centroid 표시
+                        if (layer_idx == len(model.layers) - 1 and  # 마지막 레이어(Layer 2)이고
+                            clustering_info['cluster_centroids'] is not None and 
+                            len(clustering_info['cluster_assignments']) > 0):
+                            
+                            # 현재 샘플의 attention map이 어느 클러스터에 속하는지 찾기
+                            sample_attention = attn_weights_mean  # 현재 샘플의 attention map
+                            
+                            # 모든 centroid와의 거리 계산
+                            min_distance = float('inf')
+                            assigned_cluster = 0
+                            
+                            for cluster_id, centroid in enumerate(clustering_info['cluster_centroids']):
+                                centroid_np = centroid.detach().cpu().numpy()
+                                # Frobenius norm 거리 계산
+                                distance = np.linalg.norm(sample_attention - centroid_np, 'fro')
+                                if distance < min_distance:
+                                    min_distance = distance
+                                    assigned_cluster = cluster_id
+                            
+                            # 해당 클러스터의 centroid 표시
+                            assigned_centroid = clustering_info['cluster_centroids'][assigned_cluster].detach().cpu().numpy()
+                            
+                            im2 = axes[1].imshow(assigned_centroid, cmap='viridis', interpolation='nearest')
+                            axes[1].set_title(f'Closest Cluster Centroid - Cluster {assigned_cluster}\n(Distance: {min_distance:.3f})', fontsize=14)
+                            fig.colorbar(im2, ax=axes[1])
+                            
+                            # 축 라벨 설정
+                            axes[1].set_xticks(np.arange(len(all_node_names)))
+                            axes[1].set_yticks(np.arange(len(all_node_names)))
+                            axes[1].set_xticklabels(all_node_names, rotation=90, fontsize=8)
+                            axes[1].set_yticklabels(all_node_names, fontsize=8)
+                            
+                            # 각 셀에 값 표시
+                            for i in range(len(all_node_names)):
+                                for j in range(len(all_node_names)):
+                                    axes[1].text(j, i, f"{assigned_centroid[i,j]:.2f}", 
+                                            ha="center", va="center", 
+                                            color="white" if assigned_centroid[i,j] > 0.5 else "black", 
+                                            fontsize=7)
+                        else:
+                            # 마지막 레이어가 아니거나 클러스터링 데이터가 없는 경우 기존 방식
+                            axes[1].text(0.5, 0.5, f'Layer {layer_idx} Attention Pattern\n\nFull clustering results\navailable in clustering/ folder\n\nLayer 2 = Final clustering layer', 
+                                    ha='center', va='center', transform=axes[1].transAxes, fontsize=14,
+                                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightcyan", alpha=0.8))
+                            axes[1].set_title(f'Layer {layer_idx} - See clustering/ for full results', fontsize=14)
+                            axes[1].axis('off')
                         
                         # 전체 타이틀
                         fig.suptitle(f'Layer {layer_idx} Attention Analysis - Epoch {epoch} - Sample {sample_count}', fontsize=16)
@@ -177,7 +285,10 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         # clustering 폴더 생성
                         clustering_dir = os.path.join(base_viz_dir, 'clustering')
                         os.makedirs(clustering_dir, exist_ok=True)
-                        
+                        model.save_cluster_centroids(clustering_dir, epoch)
+                        if clustering_info['cluster_centroids'] is not None:
+                            visualize_cluster_centroids(clustering_info, clustering_dir, epoch, feature_names)
+    
                         # 전체 데이터셋 클러스터링 결과 시각화
                         if (clustering_info['cluster_centroids'] is not None and 
                             len(clustering_info['cluster_assignments']) > 0):
@@ -202,8 +313,33 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                     
                                     if n_maps >= 2:
                                         perplexity = min(30, n_maps-1, max(1, n_maps//3))
-                                        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
-                                        tsne_embeddings = tsne.fit_transform(flattened_maps)
+                                        
+                                        # 🆕 Centroid 처리 추가
+                                        if clustering_info['cluster_centroids'] is not None:
+                                            cluster_centroids = clustering_info['cluster_centroids']
+                                            
+                                            # Centroid를 numpy로 변환 (타입 확인)
+                                            if isinstance(cluster_centroids, torch.Tensor):
+                                                centroids_np = cluster_centroids.detach().cpu().numpy()
+                                            else:
+                                                # 리스트인 경우 stack
+                                                centroids_np = torch.stack(cluster_centroids).detach().cpu().numpy()
+                                            
+                                            centroids_flat = centroids_np.reshape(len(centroids_np), -1)
+                                            
+                                            # 전체 데이터(attention maps + centroids)를 함께 t-SNE 변환
+                                            all_data = np.vstack([flattened_maps, centroids_flat])
+                                            tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                                            tsne_all_embeddings = tsne.fit_transform(all_data)
+                                            
+                                            # 원본 데이터와 centroid 분리
+                                            tsne_embeddings = tsne_all_embeddings[:n_maps]
+                                            centroid_embeddings = tsne_all_embeddings[n_maps:]
+                                        else:
+                                            # Centroid가 없으면 기존 방식
+                                            tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                                            tsne_embeddings = tsne.fit_transform(flattened_maps)
+                                            centroid_embeddings = None
                                         
                                         # 클러스터별로 다른 색상으로 플롯
                                         unique_clusters = np.unique(cluster_assignments)
@@ -217,6 +353,15 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                                 ax.scatter(cluster_points[:, 0], cluster_points[:, 1], 
                                                         c=[colors[i]], label=f'Cluster {cluster_id}', 
                                                         alpha=0.7, s=50)
+                                        
+                                        # 🆕 Centroid를 별표로 표시
+                                        if centroid_embeddings is not None:
+                                            for i, cluster_id in enumerate(unique_clusters):
+                                                if i < len(centroid_embeddings):
+                                                    ax.scatter(centroid_embeddings[i, 0], centroid_embeddings[i, 1], 
+                                                            marker='*', s=300, c='black', 
+                                                            edgecolors=colors[i], linewidth=3,
+                                                            label='Centroids' if i == 0 else "", zorder=5)
                                         
                                         ax.set_title(f'Dataset-wide Final Layer Clustering (Epoch {epoch})\nCumulative Layer 2 Attention Maps', fontsize=16)
                                         ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
