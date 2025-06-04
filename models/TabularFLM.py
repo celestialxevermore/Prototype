@@ -293,6 +293,7 @@ class Model(nn.Module):
         시각화 에포크에서만 attention maps 리셋 및 수집 시작
         """
         self.attention_maps = []  # 새로운 수집을 위해 리셋
+        self.attention_labels = []
         self.cluster_assignments = []  # 클러스터 할당도 리셋
         self.cluster_centroids = None  # 클러스터 중심도 리셋
         self.attention_count = 0
@@ -327,6 +328,7 @@ class Model(nn.Module):
         """
         return {
             'attention_maps': self.attention_maps,
+            'attention_labels':self.attention_labels,
             'cluster_centroids': self.cluster_centroids,
             'cluster_assignments': self.cluster_assignments,
             'num_clusters': self.num_clusters,
@@ -410,12 +412,14 @@ class Model(nn.Module):
         if self.training and self.collect_attention:  # 🆕 수집 모드일 때만
             final_layer_attention = attention_weights[-1]  # 마지막 레이어 (Layer 2)
             batch_size = final_layer_attention.shape[0]
+            batch_labels = batch.get('y', torch.zeros(batch_size))
             
             for batch_idx in range(batch_size):
                 sample_attention = final_layer_attention[batch_idx].mean(dim=0)  # [seq_len, seq_len]
-                
+                sample_label = batch_labels[batch_idx].item()
                 # 최종 attention map만 저장 (현재 에포크만)
                 self.attention_maps.append(sample_attention.detach().clone())
+                self.attention_labels.append(sample_label)
                 self.attention_count += 1        
         pred = x[:, 0, :]
         pred = self.predictor(pred)

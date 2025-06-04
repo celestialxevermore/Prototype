@@ -166,9 +166,9 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         unique_features.append(feat)
                 feature_names = unique_features
                 
-                # 1. 히트맵 시각화
+                # 1. 히트맵 시각화 (원래 코드 그대로)
                 if args.viz_heatmap:
-                    # 🆕 시각화 시점에서만 클러스터링 리셋 (첫 번째 샘플에서만)
+                    # 시각화 시점에서만 클러스터링 리셋 (첫 번째 샘플에서만)
                     if sample_count == 0:
                         model.reset_epoch_clustering()
                         
@@ -280,7 +280,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         plt.close(fig)
                         logger.info(f"Epoch {epoch} - 샘플 {sample_count} 레이어 {layer_idx} 히트맵 저장: {heatmap_path}")
 
-                    # 2. 새로운: 전체 클러스터링 결과 (clustering/ 폴더에 저장) - 첫 번째 샘플에서만 생성
+                    # 2. 전체 클러스터링 결과 (clustering/ 폴더에 저장) - 첫 번째 샘플에서만 생성
                     if sample_count == 0:  # 중복 방지: 첫 번째 샘플에서만 클러스터링 시각화 생성
                         # clustering 폴더 생성
                         clustering_dir = os.path.join(base_viz_dir, 'clustering')
@@ -289,17 +289,19 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                         if clustering_info['cluster_centroids'] is not None:
                             visualize_cluster_centroids(clustering_info, clustering_dir, epoch, feature_names)
     
-                        # 전체 데이터셋 클러스터링 결과 시각화
+                        # 🆕 전체 데이터셋 클러스터링 결과 시각화 (Label 정보 포함)
                         if (clustering_info['cluster_centroids'] is not None and 
                             len(clustering_info['cluster_assignments']) > 0):
                             
                             cluster_assignments = clustering_info['cluster_assignments']
                             attention_maps = clustering_info['attention_maps']
+                            attention_labels = clustering_info['attention_labels']  # 🆕 label 정보 가져오기
                             
                             if len(cluster_assignments) > 0 and len(attention_maps) > 0:
                                 fig, ax = plt.subplots(1, 1, figsize=(12, 10))
                                 
                                 cluster_assignments = np.array(cluster_assignments)
+                                attention_labels = np.array(attention_labels)  # 🆕 label 배열로 변환
                                 
                                 try:
                                     from sklearn.manifold import TSNE
@@ -314,7 +316,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                     if n_maps >= 2:
                                         perplexity = min(30, n_maps-1, max(1, n_maps//3))
                                         
-                                        # 🆕 Centroid 처리 추가
+                                        # Centroid 처리 추가
                                         if clustering_info['cluster_centroids'] is not None:
                                             cluster_centroids = clustering_info['cluster_centroids']
                                             
@@ -341,26 +343,45 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                             tsne_embeddings = tsne.fit_transform(flattened_maps)
                                             centroid_embeddings = None
                                         
-                                        # 클러스터별로 다른 색상으로 플롯
+                                        # 🆕 클러스터별로 다른 색상, label별로 명도 조절
                                         unique_clusters = np.unique(cluster_assignments)
-                                        colors = plt.cm.Set3(np.linspace(0, 1, max(len(unique_clusters), 1)))
+                                        unique_labels = np.unique(attention_labels)
+                                        
+                                        # 클러스터별 기본 색상 설정
+                                        base_colors = plt.cm.Set3(np.linspace(0, 1, max(len(unique_clusters), 1)))
                                         
                                         for i, cluster_id in enumerate(unique_clusters):
                                             cluster_mask = cluster_assignments == cluster_id
                                             cluster_points = tsne_embeddings[cluster_mask]
+                                            cluster_labels = attention_labels[cluster_mask]
                                             
                                             if len(cluster_points) > 0:
-                                                ax.scatter(cluster_points[:, 0], cluster_points[:, 1], 
-                                                        c=[colors[i]], label=f'Cluster {cluster_id}', 
-                                                        alpha=0.7, s=50)
+                                                # 🆕 label별로 모양 구분: Label 0=원형, Label 1=네모
+                                                for label in unique_labels:
+                                                    label_mask = cluster_labels == label
+                                                    if np.any(label_mask):
+                                                        label_points = cluster_points[label_mask]
+                                                        
+                                                        # 모양 구분: label 0은 원형, label 1은 네모
+                                                        if label == 0:
+                                                            marker = 'o'  # 원형
+                                                            marker_name = 'Label 0'
+                                                        else:
+                                                            marker = 's'  # 네모
+                                                            marker_name = 'Label 1'
+                                                        
+                                                        ax.scatter(label_points[:, 0], label_points[:, 1], 
+                                                                c=base_colors[i], 
+                                                                label=f'Cluster {cluster_id} ({marker_name})', 
+                                                                alpha=0.7, s=50, marker=marker)
                                         
-                                        # 🆕 Centroid를 별표로 표시
+                                        # Centroid를 별표로 표시
                                         if centroid_embeddings is not None:
                                             for i, cluster_id in enumerate(unique_clusters):
                                                 if i < len(centroid_embeddings):
                                                     ax.scatter(centroid_embeddings[i, 0], centroid_embeddings[i, 1], 
                                                             marker='*', s=300, c='black', 
-                                                            edgecolors=colors[i], linewidth=3,
+                                                            edgecolors=base_colors[i], linewidth=3,
                                                             label='Centroids' if i == 0 else "", zorder=5)
                                         
                                         ax.set_title(f'Dataset-wide Final Layer Clustering (Epoch {epoch})\nCumulative Layer 2 Attention Maps', fontsize=16)
@@ -371,12 +392,21 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
                                         ax.grid(True, alpha=0.3)
                                         
-                                        # 클러스터 통계 정보
+                                        # 🆕 클러스터 및 label 통계 정보
                                         cluster_stats = []
                                         for cluster_id in unique_clusters:
-                                            count = np.sum(cluster_assignments == cluster_id)
-                                            percentage = (count / len(cluster_assignments)) * 100
-                                            cluster_stats.append(f"Cluster {cluster_id}: {count} maps ({percentage:.1f}%)")
+                                            cluster_mask = cluster_assignments == cluster_id
+                                            cluster_labels_subset = attention_labels[cluster_mask]
+                                            total_count = np.sum(cluster_mask)
+                                            total_percentage = (total_count / len(cluster_assignments)) * 100
+                                            
+                                            label_counts = {}
+                                            for label in unique_labels:
+                                                count = np.sum(cluster_labels_subset == label)
+                                                label_counts[int(label)] = count
+                                            
+                                            label_str = ", ".join([f"L{k}:{v}" for k, v in label_counts.items()])
+                                            cluster_stats.append(f"Cluster {cluster_id}: {total_count} maps ({total_percentage:.1f}%) [{label_str}]")
                                         
                                         if cluster_stats:
                                             stats_text = "\n".join(cluster_stats)
@@ -386,7 +416,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                         
                                         # 전체 통계
                                         total_samples_processed = n_maps
-                                        ax.text(0.02, 0.02, f"Total Layer 2 Maps: {total_samples_processed}\nEpoch: {epoch}\nUpdate Freq: {model.clustering_update_freq}", 
+                                        ax.text(0.02, 0.02, f"Total Layer 2 Maps: {total_samples_processed}\nEpoch: {epoch}\nUpdate Freq: {model.clustering_update_freq}\nCircle=Label 0, Square=Label 1", 
                                             transform=ax.transAxes, fontsize=10, verticalalignment='bottom',
                                             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8))
                                         
@@ -429,6 +459,8 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
                                 fig.savefig(clustering_path, dpi=300, bbox_inches='tight')
                                 plt.close(fig)
                                 logger.info(f"Epoch {epoch} - 클러스터링 없음 상태 저장: {clustering_path}")
+
+
                 # 2. 그래프 구조 시각화
                 if args.viz_graph:
                     # 각 레이어별로 시각화 수행
