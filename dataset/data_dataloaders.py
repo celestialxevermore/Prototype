@@ -117,25 +117,51 @@ def ml_prepare_tabular_dataloaders(args, dataset_name, random_seed):
     
     return (X_train, X_val, X_test, y_train, y_val, y_test), num_classes
 
+# def get_few_shot_tabular_samples(X_train, y_train, args):
+#     """이미 분할된 train set에서 few-shot 샘플링을 수행"""
+#     #np.random.seed(4)
+#     num_classes = len(np.unique(y_train))
+#     shot = args.few_shot
+#     samples_per_class = shot // num_classes
+#     remainder = shot % num_classes
+    
+#     support_X, support_y = [], []
+#     for cls in range(num_classes):
+#         cls_indices = np.where(y_train == cls)[0]
+#         sample_num = samples_per_class + (1 if remainder > 0 else 0)
+#         if remainder > 0:
+#             remainder -= 1
+        
+#         selected_indices = np.random.choice(
+#             cls_indices, 
+#             size=min(sample_num, len(cls_indices)), 
+#             replace=len(cls_indices) < sample_num
+#         )
+        
+#         support_X.append(X_train.iloc[selected_indices])
+#         support_y.extend([cls] * len(selected_indices))
+    
+#     X_train_few = pd.concat(support_X, ignore_index=True)
+#     y_train_few = np.array(support_y)
+    
+#     print(f"Few-shot 학습 데이터 크기: {len(X_train_few)}")
+#     print(f"클래스별 분포: {Counter(y_train_few)}")
+    
+#     return X_train_few, y_train_few
+
 def get_few_shot_tabular_samples(X_train, y_train, args):
-    """이미 분할된 train set에서 few-shot 샘플링을 수행"""
-    #np.random.seed(4)
+    """이미 분할된 train set에서 few-shot 샘플링을 수행 (표준 K-shot)"""
     num_classes = len(np.unique(y_train))
-    shot = args.few_shot
-    samples_per_class = shot // num_classes
-    remainder = shot % num_classes
+    shot_per_class = args.few_shot  # 각 클래스당 shot 개수
     
     support_X, support_y = [], []
     for cls in range(num_classes):
         cls_indices = np.where(y_train == cls)[0]
-        sample_num = samples_per_class + (1 if remainder > 0 else 0)
-        if remainder > 0:
-            remainder -= 1
         
         selected_indices = np.random.choice(
             cls_indices, 
-            size=min(sample_num, len(cls_indices)), 
-            replace=len(cls_indices) < sample_num
+            size=min(shot_per_class, len(cls_indices)), 
+            replace=len(cls_indices) < shot_per_class
         )
         
         support_X.append(X_train.iloc[selected_indices])
@@ -144,10 +170,14 @@ def get_few_shot_tabular_samples(X_train, y_train, args):
     X_train_few = pd.concat(support_X, ignore_index=True)
     y_train_few = np.array(support_y)
     
-    print(f"Few-shot 학습 데이터 크기: {len(X_train_few)}")
+    total_samples = num_classes * shot_per_class
+    print(f"Few-shot 학습 데이터 크기: {len(X_train_few)} (={num_classes} classes × {shot_per_class} shots)")
     print(f"클래스별 분포: {Counter(y_train_few)}")
     
     return X_train_few, y_train_few
+
+
+    
 
 
 # def prepare_full_source_dataset(args):
@@ -395,40 +425,67 @@ def prepare_embedding_dataloaders(args, dataset_name):
     }
 
 
+# def get_few_shot_embedding_samples(train_loader, args):
+#     """train_loader에서 embedding data의 few-shot 샘플링을 수행"""
+#     np.random.seed(args.random_seed)
+#     dataset = train_loader.dataset
+#     labels = [data['y'].item() for data in dataset]
+#     num_classes = len(set(labels))
+    
+#     shot = args.few_shot
+#     base_samples_per_class = shot // num_classes
+#     remainder = shot % num_classes
+    
+#     # 남은 샘플을 랜덤하게 분배
+#     extra_samples = random.sample(range(num_classes), remainder)
+    
+#     support_data = []
+#     for cls in range(num_classes):
+#         # embedding data는 dictionary 형태이므로 y key로 label 접근
+#         cls_data = [data for data in dataset if data['y'].item() == cls]
+#         sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
+        
+#         if len(cls_data) < sample_num:
+#             warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({sample_num}). Using replacement sampling.")
+#             selected = random.choices(cls_data, k=sample_num)
+#         else:
+#             selected = random.sample(cls_data, k=sample_num)
+        
+#         support_data.extend(selected)
+    
+#     print(f"Few-shot training data size: {len(support_data)}")
+#     class_dist = Counter([data['y'].item() for data in support_data])
+#     print(f"Class distribution in few-shot data: {dict(class_dist)}")
+    
+#     return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 def get_few_shot_embedding_samples(train_loader, args):
-    """train_loader에서 embedding data의 few-shot 샘플링을 수행"""
-    np.random.seed(args.random_seed)
-    dataset = train_loader.dataset
-    labels = [data['y'].item() for data in dataset]
-    num_classes = len(set(labels))
-    
-    shot = args.few_shot
-    base_samples_per_class = shot // num_classes
-    remainder = shot % num_classes
-    
-    # 남은 샘플을 랜덤하게 분배
-    extra_samples = random.sample(range(num_classes), remainder)
-    
-    support_data = []
-    for cls in range(num_classes):
-        # embedding data는 dictionary 형태이므로 y key로 label 접근
-        cls_data = [data for data in dataset if data['y'].item() == cls]
-        sample_num = base_samples_per_class + (1 if cls in extra_samples else 0)
-        
-        if len(cls_data) < sample_num:
-            warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({sample_num}). Using replacement sampling.")
-            selected = random.choices(cls_data, k=sample_num)
-        else:
-            selected = random.sample(cls_data, k=sample_num)
-        
-        support_data.extend(selected)
-    
-    print(f"Few-shot training data size: {len(support_data)}")
-    class_dist = Counter([data['y'].item() for data in support_data])
-    print(f"Class distribution in few-shot data: {dict(class_dist)}")
-    
-    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
-
+   """train_loader에서 embedding data의 few-shot 샘플링을 수행 (표준 K-shot)"""
+   np.random.seed(args.random_seed)
+   dataset = train_loader.dataset
+   labels = [data['y'].item() for data in dataset]
+   num_classes = len(set(labels))
+   
+   shot_per_class = args.few_shot  # 각 클래스당 shot 개수
+   
+   support_data = []
+   for cls in range(num_classes):
+       # embedding data는 dictionary 형태이므로 y key로 label 접근
+       cls_data = [data for data in dataset if data['y'].item() == cls]
+       
+       if len(cls_data) < shot_per_class:
+           warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({shot_per_class}). Using replacement sampling.")
+           selected = random.choices(cls_data, k=shot_per_class)
+       else:
+           selected = random.sample(cls_data, k=shot_per_class)
+       
+       support_data.extend(selected)
+   
+   total_samples = num_classes * shot_per_class
+   print(f"Few-shot training data size: {len(support_data)} (={num_classes} classes × {shot_per_class} shots)")
+   class_dist = Counter([data['y'].item() for data in support_data])
+   print(f"Class distribution in few-shot data: {dict(class_dist)}")
+   
+   return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 
 ''' 
     GRAPH

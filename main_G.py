@@ -133,8 +133,6 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
     no_improve = 0
     best_epoch = 0
     
-    # T2G 스타일의 2단계 학습을 위한 변수 추가
-    frozen_switch = True  # 그래프 구조 고정 전환 여부
     
     best_threshold = 0.5
     best_model_state = None
@@ -214,22 +212,23 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             best_model_state = model.state_dict()
             if current_threshold is not None:
                 best_threshold = current_threshold
+            
+            # 체크포인트 저장
+            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_dataset_name}/{mode}/{experiment_id}"
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoint_dir, f"best_model_epoch_{epoch}.pt")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'epoch': epoch,
+                'val_auc': val_auc,
+                'threshold': best_threshold,
+                'args': args
+            }, checkpoint_path)
         else:
             no_improve += 1
-        
-        # 2단계 학습 전환 로직 (T2G와 동일)
         if no_improve >= patience:
-            if frozen_switch and hasattr(model, 'froze_topology'):
-                # 첫 번째 단계 종료 후 그래프 구조 고정
-                model.froze_topology()
-                logger.info(f"[Epoch {epoch+1}] Freezing graph topology and continuing training")
-                frozen_switch = False
-                no_improve = 0  # 카운터 초기화
-            else:
-                # 두 번째 단계도 개선이 없으면 완전히 종료
-                logger.info(f"Early stopping at epoch {epoch+1}")
-                break
-
+            logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+            break
     # 학습 종료 후, Best 모델로 복원
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -307,8 +306,8 @@ def main():
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
     
-    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model)
-    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model)
+    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model,experiment_id, mode="Full")
+    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode = "Few")
     model_full = model_full.to(device)
     model_few = model_few.to(device)
     optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)

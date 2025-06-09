@@ -127,7 +127,7 @@ class AdaptiveGraphAttention(nn.Module):
 
 class Model(nn.Module):
     def __init__(
-            self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model):
+            self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model, experiment_id, mode):
         super(Model, self).__init__()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -144,7 +144,10 @@ class Model(nn.Module):
         llm_model = args.llm_model
         self.meta_type = args.meta_type
         self.enc_type = args.enc_type
-                # GMM 관련 속성 추가
+        self.experiment_id = experiment_id
+        self.mode = mode
+        
+        # GMM 관련 속성 추가
         self.use_gmm = args.use_gmm 
         self.use_gmm2 = args.use_gmm2
         self.num_prototypes = args.num_prototypes
@@ -156,19 +159,9 @@ class Model(nn.Module):
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
-        max_seq_len = 100
-        self.global_table = nn.Parameter(torch.Tensor(1, max_seq_len, self.input_dim))
-        nn.init.kaiming_uniform_(self.global_table, a = math.sqrt(5))
-
-        # PyTorch Attention Map Clustering 관련 변수들
-        self.attention_maps = []  # List of attention map tensors (현재 에포크만)
-        self.cluster_centroids = None  # [num_clusters, seq_len, seq_len]
-        self.cluster_assignments = []  # 각 attention map의 클러스터 할당
-        self.num_clusters = getattr(args, 'num_attention_clusters', 5)
-        self.clustering_update_freq = getattr(args, 'clustering_update_freq', 10)
-        self.attention_count = 0
-        self.current_epoch = -1  # 현재 에포크 추적용
-        self.collect_attention = False  # 🆕 attention 수집 모드 플래그
+        # Attention Map 저장을 위한 변수들
+        #self.attention_counter = 0
+        #self.set_attention_save_dir(experiment_id=self.experiment_id, mode = self.mode)
 
         '''
             MLP(CONCAT[Name embedding, Value embedding])
@@ -193,9 +186,6 @@ class Model(nn.Module):
         self.layer_norms = nn.ModuleList([
             nn.LayerNorm(self.input_dim) for _ in range(args.num_layers)
         ])
-        # self.post_norms = nn.ModuleList([
-        #     nn.LayerNorm(self.input_dim) for _ in range(args.num_layers)
-        # ])
         self.dropout = nn.Dropout(args.dropout_rate)
         self.predictor = nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
@@ -220,142 +210,113 @@ class Model(nn.Module):
                 if m.bias is not None:
                     nn_init.zeros_(m.bias)
 
-    def _frobenius_distance(self, A, B):
+    def set_attention_save_dir(self, experiment_id, mode):
         """
-        두 attention map 간의 Frobenius norm 거리 계산 (PyTorch)
-        A, B: [seq_len, seq_len]
-        """
-        diff = A - B
-        return torch.norm(diff, p='fro')
-
-    def _compute_attention_distances(self, attention_maps, centroids):
-        """
-        모든 attention map과 centroid 간의 거리 행렬 계산
-        attention_maps: [n_maps, seq_len, seq_len]
-        centroids: [n_clusters, seq_len, seq_len]
-        return: [n_maps, n_clusters]
-        """
-        n_maps = len(attention_maps)
-        n_clusters = centroids.shape[0]
-        distances = torch.zeros(n_maps, n_clusters, device=centroids.device)
+        Attention map 저장 디렉토리를 기존 clustering과 동일한 구조로 설정
         
-        for i, attn_map in enumerate(attention_maps):
-            for j in range(n_clusters):
-                distances[i, j] = self._frobenius_distance(attn_map, centroids[j])
-        
-        return distances
+        Args:
+            experiment_id (str): 실험 ID (예: "20250604_224705")
+            mode (str): "Full" 또는 "Few"
+        """
+        base_viz_dir = f"/storage/personal/eungyeop/experiments/visualization/{self.args.llm_model}/{self.args.source_dataset_name}/{mode}/{experiment_id}"
+        self.attention_save_dir = os.path.join(base_viz_dir, 'attention_maps')
+        os.makedirs(self.attention_save_dir, exist_ok=True)
+        logger.info(f"Attention maps will be saved to: {self.attention_save_dir}")
 
-    def _update_clustering(self):
+    def extract_feature_names(self, batch):
         """
-        PyTorch 기반 K-means 스타일 클러스터링
+        배치에서 feature names를 추출하는 함수 (시각화 코드에서 가져옴)
+        
+        Args:
+            batch: 입력 배치 데이터
+            
+        Returns:
+            list: feature names 리스트
         """
-        if len(self.attention_maps) < self.num_clusters:
+        feature_names = []
+        
+        # Categorical features
+        if 'cat_desc_texts' in batch:
+            for feature in batch['cat_desc_texts']:
+                if isinstance(feature, tuple):
+                    clean_name = str(feature[0])
+                else:
+                    try:
+                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                        clean_name = clean_name.split(',')[0]
+                    except:
+                        clean_name = str(feature)
+                feature_names.append(clean_name)
+
+        # Numerical features
+        if 'num_desc_texts' in batch:
+            for feature in batch['num_desc_texts']:
+                if isinstance(feature, tuple):
+                    clean_name = str(feature[0])
+                else:
+                    try:
+                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                        clean_name = clean_name.split(',')[0]
+                    except:
+                        clean_name = str(feature)
+                feature_names.append(clean_name)
+        
+        # 중복 제거 (순서 유지)
+        seen = set()
+        unique_features = []
+        for feat in feature_names:
+            if feat not in seen:
+                seen.add(feat)
+                unique_features.append(feat)
+        
+        return unique_features
+
+    def save_attention_maps_to_file(self, attention_weights, batch, labels=None, sample_ids=None):
+        """
+        Attention maps을 feature names와 함께 numpy 파일로 저장합니다.
+        
+        Args:
+            attention_weights (list): 각 레이어의 attention weights
+            batch: 입력 배치 (feature names 추출용)
+            labels (torch.Tensor, optional): 샘플의 라벨
+            sample_ids (list, optional): 샘플 ID들
+        """
+        if not hasattr(self, 'attention_save_dir') or self.attention_save_dir is None:
+            logger.warning("Attention save directory not set. Skipping attention map saving.")
             return
         
-        # attention maps를 tensor stack으로 변환
-        attention_tensor = torch.stack(self.attention_maps)  # [n_maps, seq_len, seq_len]
-        n_maps, seq_len, _ = attention_tensor.shape
+        # Feature names 추출
+        feature_names = self.extract_feature_names(batch)
+        all_node_names = ["CLS"] + feature_names
         
-        # 초기 centroid 설정 (첫 번째 클러스터링이면 랜덤 선택)
-        if self.cluster_centroids is None:
-            indices = torch.randperm(n_maps)[:self.num_clusters]
-            self.cluster_centroids = attention_tensor[indices].clone()
-        
-        max_iterations = 10
-        for iteration in range(max_iterations):
-            # 1. 각 attention map을 가장 가까운 centroid에 할당
-            distances = self._compute_attention_distances(self.attention_maps, self.cluster_centroids)
-            old_assignments = self.cluster_assignments.copy() if self.cluster_assignments else None
-            self.cluster_assignments = torch.argmin(distances, dim=1).tolist()
+        # 각 레이어별로 처리
+        for layer_idx, layer_attention in enumerate(attention_weights):
+            # [batch_size, n_heads, seq_len, seq_len]
+            batch_size = layer_attention.shape[0]
             
-            # 수렴 체크
-            if old_assignments is not None and self.cluster_assignments == old_assignments:
-                break
-            
-            # 2. Centroid 업데이트
-            new_centroids = torch.zeros_like(self.cluster_centroids)
-            for cluster_id in range(self.num_clusters):
-                cluster_mask = [i for i, assign in enumerate(self.cluster_assignments) if assign == cluster_id]
+            for batch_idx in range(batch_size):
+                # Multi-head attention을 평균내어 단일 attention map으로 변환
+                attention_map = layer_attention[batch_idx].mean(dim=0)  # [seq_len, seq_len]
+                attention_numpy = attention_map.detach().cpu().numpy()
                 
-                if cluster_mask:  # 빈 클러스터가 아니면
-                    cluster_maps = torch.stack([self.attention_maps[i] for i in cluster_mask])
-                    new_centroids[cluster_id] = torch.mean(cluster_maps, dim=0)
-                else:  # 빈 클러스터면 랜덤 재할당
-                    random_idx = torch.randint(0, n_maps, (1,)).item()
-                    new_centroids[cluster_id] = self.attention_maps[random_idx].clone()
-            
-            self.cluster_centroids = new_centroids
-
-        logger.info(f"PyTorch clustering updated: {len(self.attention_maps)} maps, {self.num_clusters} clusters")
-
-    def reset_epoch_clustering(self):
-        """
-        시각화 에포크에서만 attention maps 리셋 및 수집 시작
-        """
-        self.attention_maps = []  # 새로운 수집을 위해 리셋
-        self.attention_labels = []
-        self.cluster_assignments = []  # 클러스터 할당도 리셋
-        self.cluster_centroids = None  # 클러스터 중심도 리셋
-        self.attention_count = 0
-        self.collect_attention = True  # 🆕 수집 모드 활성화
-        logger.info(f"Attention clustering reset and collection started for visualization epoch")
-    
-    def stop_attention_collection(self):
-        """
-        attention 수집 중단
-        """
-        self.collect_attention = False
-        logger.info(f"Attention collection stopped")
-
-    def update_attention_clustering(self):
-        """
-        외부에서 호출 가능한 클러스터링 업데이트 메소드 (시각화용)
-        """
-        if len(self.attention_maps) < self.num_clusters:
-            logger.info(f"Not enough attention maps for clustering: {len(self.attention_maps)}/{self.num_clusters}")
-            return False
+                # 메타데이터 준비
+                sample_id = sample_ids[batch_idx] if sample_ids is not None else self.attention_counter
+                label = labels[batch_idx].item() if labels is not None else "unknown"
+                
+                # numpy.savez로 attention map과 feature names를 함께 저장
+                filename = f"layer_{layer_idx}_sample_{sample_id}_label_{label}.npz"
+                filepath = os.path.join(self.attention_save_dir, filename)
+                
+                np.savez(filepath,
+                        attention_map=attention_numpy,
+                        feature_names=np.array(all_node_names),
+                        layer_idx=layer_idx,
+                        sample_id=sample_id,
+                        label=label)
+                
+                self.attention_counter += 1
         
-        try:
-            self._update_clustering()
-            return True
-        except Exception as e:
-            logger.error(f"Clustering update failed: {e}")
-            return False
-
-    def get_clustering_info(self):
-        """
-        클러스터링 정보 반환 (시각화용)
-        """
-        return {
-            'attention_maps': self.attention_maps,
-            'attention_labels':self.attention_labels,
-            'cluster_centroids': self.cluster_centroids,
-            'cluster_assignments': self.cluster_assignments,
-            'num_clusters': self.num_clusters,
-            'attention_count': self.attention_count
-        }
-
-
-    def save_cluster_centroids(self, save_dir, epoch):
-        if self.cluster_centroids is None:
-            return 
-        
-        # centroids 폴더 생성
-        centroid_dir = os.path.join(save_dir, 'centroids')
-        os.makedirs(centroid_dir, exist_ok=True)
-
-        for cluster_id, centroid in enumerate(self.cluster_centroids):
-            # 클러스터별 폴더 생성 (centroids 하위에)
-            cluster_folder = os.path.join(centroid_dir, f'cluster_{cluster_id}')
-            os.makedirs(cluster_folder, exist_ok=True)
-            
-            centroid_np = centroid.detach().cpu().numpy() 
-
-            # 클러스터별 폴더에 저장
-            filename = f"epoch_{epoch}.npy"
-            filepath = os.path.join(cluster_folder, filename)
-            np.save(filepath, centroid_np)
-            logger.info(f"Saved centroid for cluster {cluster_id}: {filepath}")
+        logger.info(f"Attention maps saved for {batch_size} samples across {len(attention_weights)} layers to {self.attention_save_dir}")
 
 
     def forward(self, batch, y):
@@ -390,7 +351,7 @@ class Model(nn.Module):
 
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
         name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
-        #name_value_embeddings = self.sample_fusion(name_value_embeddings)
+        
         '''
             1. [CLS] Token
         '''
@@ -398,34 +359,23 @@ class Model(nn.Module):
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
         name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
         x = name_value_embeddings
-        batch_size , seq_len, input_dim = x.size()
+        
         '''
-            2. Global Table Token
+            2. Graph Attention Layers
         '''
         for i, layer in enumerate(self.layers):
             norm_x = self.layer_norms[i](x)
             attn_output, attn_weights = layer(desc_embeddings, norm_x)
             attention_weights.append(attn_weights)
             x = x + attn_output
+        
+        # # Attention maps 저장 (학습 시에만)
+        # if self.training:
+        #     labels = batch.get('y', None)
+        #     sample_ids = batch.get('sample_ids', None)
+        #     self.save_attention_maps_to_file(attention_weights, batch, labels, sample_ids)
             
-        # 모든 레이어 처리 완료 후, 마지막 레이어의 attention만 클러스터링에 사용
-        if self.training and self.collect_attention:  # 🆕 수집 모드일 때만
-            final_layer_attention = attention_weights[-1]  # 마지막 레이어 (Layer 2)
-            batch_size = final_layer_attention.shape[0]
-            batch_labels = batch.get('y', torch.zeros(batch_size))
-            
-            for batch_idx in range(batch_size):
-                sample_attention = final_layer_attention[batch_idx].mean(dim=0)  # [seq_len, seq_len]
-                sample_label = batch_labels[batch_idx].item()
-                # 최종 attention map만 저장 (현재 에포크만)
-                self.attention_maps.append(sample_attention.detach().clone())
-                self.attention_labels.append(sample_label)
-                self.attention_count += 1        
         pred = x[:, 0, :]
         pred = self.predictor(pred)
 
         return pred
-
-    def froze_topology(self):
-        self.frozen = True
-        logger.info("Graph topology frozen. Continuing with fixed structure.")
