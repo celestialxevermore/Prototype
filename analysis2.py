@@ -87,15 +87,29 @@ class ClusterPerformanceAnalyzer:
         logger.info("Model and data loaded successfully")
     
     def _load_clustering_results(self):
-        """클러스터링 결과 로드"""
+        """클러스터링 결과 디렉토리에서 데이터 로드 - 새로운 경로 구조에 맞게 수정"""
         self.layer_results = {}
         
-        for layer_dir in self.clustering_dir.glob('layer_*'):
+        # clustering_results 폴더 확인
+        clustering_results_dir = self.clustering_dir / 'clustering_results'
+        if not clustering_results_dir.exists():
+            # 구버전 호환성을 위해 clustering_dir 직접 확인
+            clustering_results_dir = self.clustering_dir
+            logger.info("Using legacy clustering directory structure")
+        else:
+            logger.info("Using new clustering_results directory structure")
+        
+        # 각 레이어별 결과 로드
+        for layer_dir in clustering_results_dir.glob('layer_*'):
             if not layer_dir.is_dir():
                 continue
                 
             layer_idx = int(layer_dir.name.split('_')[1])
+            logger.info(f"Loading clustering results for layer {layer_idx}...")
+            
+            # 클러스터별 샘플 정보 수집
             cluster_data = {}
+            total_samples = 0
             
             for cluster_dir in layer_dir.glob('cluster_*'):
                 if not cluster_dir.is_dir():
@@ -104,6 +118,7 @@ class ClusterPerformanceAnalyzer:
                 cluster_id = int(cluster_dir.name.split('_')[1])
                 samples = []
                 
+                # 클러스터 내 모든 샘플 로드
                 for sample_file in cluster_dir.glob('sample_*.npz'):
                     data = np.load(sample_file)
                     sample_info = {
@@ -114,13 +129,17 @@ class ClusterPerformanceAnalyzer:
                         'feature_names': data['feature_names'].tolist()
                     }
                     samples.append(sample_info)
+                    total_samples += 1
                 
                 cluster_data[cluster_id] = samples
             
             self.layer_results[layer_idx] = {
                 'clusters': cluster_data,
+                'total_samples': total_samples,
                 'n_clusters': len(cluster_data)
             }
+            
+            logger.info(f"Layer {layer_idx}: {total_samples} samples in {len(cluster_data)} clusters")
     
     def extract_predictions_and_labels(self, data_loader):
         """모든 샘플의 예측값과 라벨 추출"""
@@ -1398,11 +1417,8 @@ def main():
     # 출력 디렉토리 설정
     if args.output_dir is None:
         clustering_dir = Path(args.clustering_dir)
-        import time 
-        
         # 현재 시간 정보 추가
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        args.output_dir = clustering_dir.parent / f'performance_impact_analysis_{timestamp}'
+        args.output_dir = clustering_dir / f'cluster_analysis2'
 
     # 분석기 초기화
     analyzer = ClusterPerformanceAnalyzer(args.clustering_dir, args.checkpoint_dir)

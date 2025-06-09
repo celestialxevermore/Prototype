@@ -100,12 +100,12 @@ class AdaptiveGraphAttention(nn.Module):
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-
+        
         edge_attr = self.edge_update(edge_attr)
         edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
         edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
         edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
-
+        
         q_expanded = q.unsqueeze(3)
         k_expanded = k.unsqueeze(2)
         qke_expanded = torch.cat([
@@ -368,13 +368,7 @@ class Model(nn.Module):
             attn_output, attn_weights = layer(desc_embeddings, norm_x)
             attention_weights.append(attn_weights)
             x = x + attn_output
-        
-        # # Attention maps 저장 (학습 시에만)
-        # if self.training:
-        #     labels = batch.get('y', None)
-        #     sample_ids = batch.get('sample_ids', None)
-        #     self.save_attention_maps_to_file(attention_weights, batch, labels, sample_ids)
-            
+    
         pred = x[:, 0, :]
         pred = self.predictor(pred)
 

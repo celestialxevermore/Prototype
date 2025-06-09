@@ -86,11 +86,20 @@ class ClusterAnalyzer:
         logger.info("Model and data loaded successfully")
     
     def _load_clustering_results(self):
-        """클러스터링 결과 디렉토리에서 데이터 로드"""
+        """클러스터링 결과 디렉토리에서 데이터 로드 - 새로운 경로 구조에 맞게 수정"""
         self.layer_results = {}
         
+        # clustering_results 폴더 확인
+        clustering_results_dir = self.clustering_dir / 'clustering_results'
+        if not clustering_results_dir.exists():
+            # 구버전 호환성을 위해 clustering_dir 직접 확인
+            clustering_results_dir = self.clustering_dir
+            logger.info("Using legacy clustering directory structure")
+        else:
+            logger.info("Using new clustering_results directory structure")
+        
         # 각 레이어별 결과 로드
-        for layer_dir in self.clustering_dir.glob('layer_*'):
+        for layer_dir in clustering_results_dir.glob('layer_*'):
             if not layer_dir.is_dir():
                 continue
                 
@@ -130,7 +139,7 @@ class ClusterAnalyzer:
             }
             
             logger.info(f"Layer {layer_idx}: {total_samples} samples in {len(cluster_data)} clusters")
-    
+
     def extract_predictions_and_features(self, data_loader):
         """모든 샘플의 예측값과 피처값 추출"""
         predictions = {}
@@ -912,58 +921,64 @@ class ClusterAnalyzer:
         
         layers = sorted(all_results.keys())
         
-        # Chi-square p-values
         chi2_pvalues = []
         anova_pvalues = []
         
         for layer_idx in layers:
             stats = all_results[layer_idx]['stats_results']
             
-            # Chi-square p-value
             if stats['label_chi2']:
-                chi2_pvalues.append(stats['label_chi2']['p_value'])
+                # ✅ 극도로 작은 p-value 제한
+                p_val = max(stats['label_chi2']['p_value'], 1e-50)
+                chi2_pvalues.append(p_val)
             else:
-                chi2_pvalues.append(1.0)  # 테스트 실패시 1.0
+                chi2_pvalues.append(1.0)
             
-            # ANOVA p-value
             if stats['prediction_anova']:
-                anova_pvalues.append(stats['prediction_anova']['p_value'])
+                # ✅ 극도로 작은 p-value 제한  
+                p_val = max(stats['prediction_anova']['p_value'], 1e-50)
+                anova_pvalues.append(p_val)
             else:
                 anova_pvalues.append(1.0)
         
+        # 디버깅용
+        print(f"Chi2 p-values: {chi2_pvalues}")
+        print(f"ANOVA p-values: {anova_pvalues}")
+        
         # Chi-square 결과
         bars1 = ax1.bar([f'Layer {l}' for l in layers], chi2_pvalues, 
-                       color=['red' if p < 0.05 else 'lightcoral' for p in chi2_pvalues])
+                    color=['red' if p < 0.05 else 'lightcoral' for p in chi2_pvalues])
         ax1.axhline(y=0.05, color='black', linestyle='--', alpha=0.7, label='α=0.05')
         ax1.set_title('Chi-square Test p-values\n(Label Distribution)')
         ax1.set_ylabel('p-value')
         ax1.set_yscale('log')
+        ax1.set_ylim(1e-50, 1.1)  # ✅ Y축 범위 강제 제한
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # 유의한 결과에 별표 추가
-        for i, p in enumerate(chi2_pvalues):
-            if p < 0.05:
-                ax1.text(i, p, '*', ha='center', va='bottom', fontsize=16, color='white')
-        
         # ANOVA 결과
         bars2 = ax2.bar([f'Layer {l}' for l in layers], anova_pvalues,
-                       color=['blue' if p < 0.05 else 'lightblue' for p in anova_pvalues])
+                    color=['blue' if p < 0.05 else 'lightblue' for p in anova_pvalues])
         ax2.axhline(y=0.05, color='black', linestyle='--', alpha=0.7, label='α=0.05')
         ax2.set_title('ANOVA Test p-values\n(Prediction Distribution)')
         ax2.set_ylabel('p-value')
         ax2.set_yscale('log')
+        ax2.set_ylim(1e-50, 1.1)  # ✅ Y축 범위 강제 제한
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # 유의한 결과에 별표 추가
+        # 별표 추가 (안전하게)
+        for i, p in enumerate(chi2_pvalues):
+            if p < 0.05:
+                ax1.text(i, max(p, 1e-45), '*', ha='center', va='bottom', fontsize=16, color='white')
+        
         for i, p in enumerate(anova_pvalues):
             if p < 0.05:
-                ax2.text(i, p, '*', ha='center', va='bottom', fontsize=16, color='white')
+                ax2.text(i, max(p, 1e-45), '*', ha='center', va='bottom', fontsize=16, color='white')
         
         plt.suptitle('Statistical Significance Across Layers', fontsize=16)
         plt.tight_layout()
-        fig.savefig(output_dir / 'cross_layer_significance.png', dpi=300, bbox_inches='tight')
+        fig.savefig(output_dir / 'cross_layer_significance.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
         
         logger.info("Cross-layer significance plot saved")
@@ -1042,9 +1057,7 @@ def main():
     # 출력 디렉토리 설정
     if args.output_dir is None:
         clustering_dir = Path(args.clustering_dir)
-        import time 
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        args.output_dir = clustering_dir.parent / f'cluster_analysis_{timestamp}'
+        args.output_dir = clustering_dir / f'cluster_analysis1'
     
     # 분석기 초기화
     analyzer = ClusterAnalyzer(args.clustering_dir, args.checkpoint_dir)

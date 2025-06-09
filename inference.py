@@ -22,6 +22,7 @@ from sklearn.cluster import KMeans
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import networkx as nx
+import pandas as pd
 
 # 기존 모듈들 import
 from models.TabularFLM import Model
@@ -616,7 +617,7 @@ class AttentionInference:
         flattened_maps = attention_maps.reshape(len(attention_maps), -1)
         
         # K-means 클러스터링
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
         cluster_assignments = kmeans.fit_predict(flattened_maps)
         
         # 클러스터링 결과 출력
@@ -631,6 +632,10 @@ class AttentionInference:
                 label_dist[f'label_{label}'] = count
             
             logger.info(f"Cluster {cluster_id}: {cluster_samples} samples, distribution: {label_dist}")
+        
+        # 🔥 CENTROID NPY 저장 추가
+        if output_dir:
+            self._save_centroids_npy(kmeans.cluster_centers_, feature_names, layer_idx, output_dir, n_clusters)
         
         # 클러스터링 시각화 (t-SNE)
         if len(flattened_maps) >= 2 and output_dir:
@@ -649,6 +654,444 @@ class AttentionInference:
             'sample_ids': sample_ids,
             'layer_idx': layer_idx
         }
+
+    def _save_centroids_npy(self, cluster_centers, feature_names, layer_idx, output_dir, n_clusters):
+        """
+        클러스터 센트로이드를 NPY 파일로 저장
+        
+        Args:
+            cluster_centers: K-means 센트로이드 [n_clusters, flattened_dim]
+            feature_names: 피처 이름 리스트
+            layer_idx: 레이어 인덱스
+            output_dir: 출력 디렉토리
+            n_clusters: 클러스터 수
+        """
+        seq_len = len(feature_names)
+        centroids_reshaped = cluster_centers.reshape(-1, seq_len, seq_len)
+        
+        # centroid 폴더 생성
+        centroid_dir = output_dir / 'centroid'
+        centroid_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 각 클러스터별로 NPY 저장
+        for i, centroid in enumerate(centroids_reshaped):
+            npy_filename = f'cluster_{i}_centroid.npy'
+            npy_path = centroid_dir / npy_filename
+            
+            np.save(npy_path, centroid)
+            logger.info(f"Saved centroid NPY: {npy_path}")
+        
+        # 메타데이터도 함께 저장
+        metadata = {
+            'layer_idx': layer_idx,
+            'n_clusters': n_clusters,
+            'feature_names': feature_names,
+            'centroid_shape': [seq_len, seq_len],
+            'description': f'Layer {layer_idx} K-means centroids with {n_clusters} clusters'
+        }
+        
+        metadata_path = centroid_dir / 'metadata.json'
+        with open(metadata_path, 'w') as f:
+            # feature_names는 numpy array일 수 있으므로 리스트로 변환
+            metadata_json = metadata.copy()
+            metadata_json['feature_names'] = list(feature_names)
+            json.dump(metadata_json, f, indent=2)
+        
+        logger.info(f"Saved centroid metadata: {metadata_path}")
+        logger.info(f"✅ All {n_clusters} centroid NPY files saved in {centroid_dir}")
+
+    def generate_centroid_summary(self, main_output_dir, n_clusters):
+        """
+        모든 레이어의 centroid 결과를 비교 요약하는 함수
+        
+        Args:
+            main_output_dir: clustering_{n_clusters} 메인 디렉토리
+            n_clusters: 클러스터 수
+        """
+        main_output_dir = Path(main_output_dir)
+        summary_dir = main_output_dir / 'centroid_summary'
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 모든 레이어의 centroid 데이터 수집
+        layer_data = {}
+        feature_names = None
+        
+        for layer_idx in range(3):  # Layer 0, 1, 2
+            layer_dir = main_output_dir / f'layer_{layer_idx}' / 'centroid'
+            if not layer_dir.exists():
+                logger.warning(f"Centroid directory not found for layer {layer_idx}: {layer_dir}")
+                continue
+            
+            # 메타데이터 로드
+            metadata_path = layer_dir / 'metadata.json'
+            if metadata_path.exists():
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    if feature_names is None:
+                        feature_names = metadata['feature_names']
+            
+            # 각 클러스터의 centroid 로드
+            layer_centroids = []
+            for cluster_id in range(n_clusters):
+                npy_path = layer_dir / f'cluster_{cluster_id}_centroid.npy'
+                if npy_path.exists():
+                    centroid = np.load(npy_path)
+                    layer_centroids.append(centroid)
+                else:
+                    logger.warning(f"Centroid not found: {npy_path}")
+            
+            if layer_centroids:
+                layer_data[layer_idx] = np.stack(layer_centroids)
+                logger.info(f"Loaded {len(layer_centroids)} centroids for layer {layer_idx}")
+        
+        if not layer_data:
+            logger.error("No centroid data found for summary generation")
+            return
+        
+        # 1. 레이어별 클러스터 간 차이 분석
+        self._analyze_layer_cluster_differences(layer_data, feature_names, summary_dir, n_clusters)
+        
+        # 2. 동일 클러스터의 레이어간 진화 분석
+        self._analyze_cluster_evolution_across_layers(layer_data, feature_names, summary_dir, n_clusters)
+        
+        # 3. 전체 요약 통계
+        self._generate_overall_summary_statistics(layer_data, feature_names, summary_dir, n_clusters)
+        
+        logger.info(f"✅ Centroid summary analysis completed! Results saved in {summary_dir}")
+
+    def _analyze_layer_cluster_differences(self, layer_data, feature_names, summary_dir, n_clusters):
+        """레이어별 클러스터 간 차이 분석"""
+        
+        # 각 레이어별로 클러스터 간 차이 계산
+        for layer_idx, centroids in layer_data.items():
+            differences = []
+            pairs = []
+            
+            # 모든 클러스터 쌍의 차이 계산
+            for i in range(n_clusters):
+                for j in range(i+1, n_clusters):
+                    diff = np.linalg.norm(centroids[i] - centroids[j])
+                    differences.append(diff)
+                    pairs.append(f"C{i}-C{j}")
+            
+            # 차이 시각화
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # Bar plot
+            bars = ax1.bar(range(len(differences)), differences, color='skyblue')
+            ax1.set_title(f'Layer {layer_idx}: Pairwise Centroid Distances')
+            ax1.set_xlabel('Cluster Pairs')
+            ax1.set_ylabel('Euclidean Distance')
+            ax1.set_xticks(range(len(pairs)))
+            ax1.set_xticklabels(pairs, rotation=45)
+            
+            # 값 표시
+            for i, (bar, diff) in enumerate(zip(bars, differences)):
+                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
+                        f'{diff:.3f}', ha='center', va='bottom', fontsize=9)
+            
+            # 히스토그램
+            ax2.hist(differences, bins=10, alpha=0.7, color='lightgreen', edgecolor='black')
+            ax2.set_title(f'Layer {layer_idx}: Distance Distribution')
+            ax2.set_xlabel('Distance')
+            ax2.set_ylabel('Frequency')
+            ax2.axvline(np.mean(differences), color='red', linestyle='--', 
+                       label=f'Mean: {np.mean(differences):.3f}')
+            ax2.legend()
+            
+            plt.tight_layout()
+            plt.savefig(summary_dir / f'layer_{layer_idx}_cluster_differences.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            # 통계 저장
+            stats = {
+                'layer': layer_idx,
+                'mean_distance': float(np.mean(differences)),
+                'std_distance': float(np.std(differences)),
+                'max_distance': float(np.max(differences)),
+                'min_distance': float(np.min(differences)),
+                'most_different_pair': pairs[np.argmax(differences)],
+                'most_similar_pair': pairs[np.argmin(differences)]
+            }
+            
+            with open(summary_dir / f'layer_{layer_idx}_cluster_stats.json', 'w') as f:
+                json.dump(stats, f, indent=2)
+
+    def _analyze_cluster_evolution_across_layers(self, layer_data, feature_names, summary_dir, n_clusters):
+        """동일 클러스터의 레이어간 진화 분석"""
+        
+        if len(layer_data) < 2:
+            logger.warning("Need at least 2 layers for evolution analysis")
+            return
+        
+        # 각 클러스터별로 레이어간 변화 추적
+        evolution_data = []
+        
+        for cluster_id in range(n_clusters):
+            cluster_evolution = {'cluster_id': cluster_id, 'layer_changes': []}
+            
+            layer_indices = sorted(layer_data.keys())
+            for i in range(len(layer_indices) - 1):
+                layer_curr = layer_indices[i]
+                layer_next = layer_indices[i + 1]
+                
+                if cluster_id < len(layer_data[layer_curr]) and cluster_id < len(layer_data[layer_next]):
+                    centroid_curr = layer_data[layer_curr][cluster_id]
+                    centroid_next = layer_data[layer_next][cluster_id]
+                    
+                    # 변화량 계산
+                    change = np.linalg.norm(centroid_next - centroid_curr)
+                    
+                    cluster_evolution['layer_changes'].append({
+                        'from_layer': layer_curr,
+                        'to_layer': layer_next,
+                        'change_magnitude': float(change)
+                    })
+            
+            evolution_data.append(cluster_evolution)
+        
+        # 진화 패턴 시각화
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # 클러스터별 변화량 추이
+        layer_transitions = []
+        for cluster in evolution_data:
+            changes = [change['change_magnitude'] for change in cluster['layer_changes']]
+            transitions = [f"L{change['from_layer']}→L{change['to_layer']}" 
+                         for change in cluster['layer_changes']]
+            
+            if changes:  # 변화가 있는 경우만
+                ax1.plot(range(len(changes)), changes, marker='o', 
+                        label=f"Cluster {cluster['cluster_id']}", linewidth=2)
+                if not layer_transitions:
+                    layer_transitions = transitions
+        
+        ax1.set_title('Cluster Evolution Across Layers')
+        ax1.set_xlabel('Layer Transition')
+        ax1.set_ylabel('Change Magnitude')
+        ax1.set_xticks(range(len(layer_transitions)))
+        ax1.set_xticklabels(layer_transitions)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 전체 변화량 분포
+        all_changes = []
+        cluster_labels = []
+        boxplot_data = []
+        boxplot_labels = []
+        
+        for cluster in evolution_data:
+            cluster_changes = [change['change_magnitude'] for change in cluster['layer_changes']]
+            if cluster_changes:  # 변화가 있는 클러스터만
+                boxplot_data.append(cluster_changes)
+                boxplot_labels.append(f"C{cluster['cluster_id']}")
+                
+            for change in cluster['layer_changes']:
+                all_changes.append(change['change_magnitude'])
+                cluster_labels.append(f"C{cluster['cluster_id']}")
+        
+        if boxplot_data:
+            ax2.boxplot(boxplot_data, labels=boxplot_labels)
+            ax2.set_title('Change Magnitude Distribution by Cluster')
+            ax2.set_xlabel('Cluster')
+            ax2.set_ylabel('Change Magnitude')
+        else:
+            ax2.text(0.5, 0.5, 'No evolution data available', 
+                    ha='center', va='center', transform=ax2.transAxes)
+            ax2.set_title('Change Magnitude Distribution by Cluster')
+        
+        plt.tight_layout()
+        plt.savefig(summary_dir / 'cluster_evolution_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 진화 데이터 저장
+        with open(summary_dir / 'cluster_evolution_data.json', 'w') as f:
+            json.dump(evolution_data, f, indent=2)
+
+    def _generate_overall_summary_statistics(self, layer_data, feature_names, summary_dir, n_clusters):
+        """전체 요약 통계 생성"""
+        
+        summary_stats = {
+            'experiment_info': {
+                'n_clusters': n_clusters,
+                'n_layers': len(layer_data),
+                'n_features': len(feature_names),
+                'feature_names': feature_names
+            },
+            'layer_statistics': {},
+            'cross_layer_analysis': {}
+        }
+        
+        # 레이어별 통계
+        for layer_idx, centroids in layer_data.items():
+            layer_stats = {
+                'mean_attention_per_cluster': [],
+                'max_attention_per_cluster': [],
+                'attention_spread_per_cluster': []
+            }
+            
+            for cluster_id, centroid in enumerate(centroids):
+                layer_stats['mean_attention_per_cluster'].append(float(np.mean(centroid)))
+                layer_stats['max_attention_per_cluster'].append(float(np.max(centroid)))
+                layer_stats['attention_spread_per_cluster'].append(float(np.std(centroid)))
+            
+            summary_stats['layer_statistics'][f'layer_{layer_idx}'] = layer_stats
+        
+        # 교차 레이어 분석
+        if len(layer_data) > 1:
+            # 전체적인 attention 진화 패턴
+            layer_means = {}
+            for layer_idx, centroids in layer_data.items():
+                layer_means[layer_idx] = [float(np.mean(centroid)) for centroid in centroids]
+            
+            summary_stats['cross_layer_analysis']['attention_evolution'] = layer_means
+            
+            # 가장 변화가 큰 클러스터 찾기
+            max_change_cluster = -1
+            max_change_value = 0
+            
+            for cluster_id in range(n_clusters):
+                total_change = 0
+                layer_indices = sorted(layer_data.keys())
+                
+                for i in range(len(layer_indices) - 1):
+                    if (cluster_id < len(layer_data[layer_indices[i]]) and 
+                        cluster_id < len(layer_data[layer_indices[i+1]])):
+                        
+                        change = np.linalg.norm(
+                            layer_data[layer_indices[i+1]][cluster_id] - 
+                            layer_data[layer_indices[i]][cluster_id]
+                        )
+                        total_change += change
+                
+                if total_change > max_change_value:
+                    max_change_value = total_change
+                    max_change_cluster = cluster_id
+            
+            summary_stats['cross_layer_analysis']['most_dynamic_cluster'] = {
+                'cluster_id': max_change_cluster,
+                'total_change': float(max_change_value)
+            }
+        
+        # 종합 시각화
+        self._create_comprehensive_summary_plot(layer_data, feature_names, summary_dir, summary_stats)
+        
+        # 요약 통계 저장
+        with open(summary_dir / 'comprehensive_summary.json', 'w') as f:
+            json.dump(summary_stats, f, indent=2)
+        
+        logger.info("✅ Comprehensive summary statistics generated")
+
+    def _create_comprehensive_summary_plot(self, layer_data, feature_names, summary_dir, summary_stats):
+        """종합 요약 플롯 생성"""
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # 1. 레이어별 평균 attention
+        ax = axes[0, 0]
+        for layer_idx in sorted(layer_data.keys()):
+            layer_stats = summary_stats['layer_statistics'][f'layer_{layer_idx}']
+            means = layer_stats['mean_attention_per_cluster']
+            ax.plot(range(len(means)), means, marker='o', label=f'Layer {layer_idx}', linewidth=2)
+        
+        ax.set_title('Mean Attention per Cluster by Layer')
+        ax.set_xlabel('Cluster ID')
+        ax.set_ylabel('Mean Attention')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 2. 레이어별 최대 attention
+        ax = axes[0, 1]
+        for layer_idx in sorted(layer_data.keys()):
+            layer_stats = summary_stats['layer_statistics'][f'layer_{layer_idx}']
+            maxes = layer_stats['max_attention_per_cluster']
+            ax.plot(range(len(maxes)), maxes, marker='s', label=f'Layer {layer_idx}', linewidth=2)
+        
+        ax.set_title('Max Attention per Cluster by Layer')
+        ax.set_xlabel('Cluster ID')
+        ax.set_ylabel('Max Attention')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 3. Attention 분산
+        ax = axes[0, 2]
+        for layer_idx in sorted(layer_data.keys()):
+            layer_stats = summary_stats['layer_statistics'][f'layer_{layer_idx}']
+            spreads = layer_stats['attention_spread_per_cluster']
+            ax.plot(range(len(spreads)), spreads, marker='^', label=f'Layer {layer_idx}', linewidth=2)
+        
+        ax.set_title('Attention Spread (Std) per Cluster by Layer')
+        ax.set_xlabel('Cluster ID')
+        ax.set_ylabel('Standard Deviation')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 4. 클러스터 간 거리 히트맵 (Layer 0)
+        ax = axes[1, 0]
+        if 0 in layer_data:
+            centroids = layer_data[0]
+            n_clusters = len(centroids)
+            distance_matrix = np.zeros((n_clusters, n_clusters))
+            
+            for i in range(n_clusters):
+                for j in range(n_clusters):
+                    distance_matrix[i, j] = np.linalg.norm(centroids[i] - centroids[j])
+            
+            im = ax.imshow(distance_matrix, cmap='viridis')
+            ax.set_title('Cluster Distance Matrix (Layer 0)')
+            ax.set_xlabel('Cluster ID')
+            ax.set_ylabel('Cluster ID')
+            plt.colorbar(im, ax=ax)
+            
+            # 값 표시
+            for i in range(n_clusters):
+                for j in range(n_clusters):
+                    ax.text(j, i, f'{distance_matrix[i,j]:.2f}', 
+                           ha="center", va="center", color="white" if distance_matrix[i,j] > 0.5 else "black")
+        
+        # 5. 레이어별 attention 히스토그램
+        ax = axes[1, 1]
+        for layer_idx in sorted(layer_data.keys()):
+            all_attentions = []
+            for centroid in layer_data[layer_idx]:
+                all_attentions.extend(centroid.flatten())
+            ax.hist(all_attentions, bins=30, alpha=0.6, label=f'Layer {layer_idx}', density=True)
+        
+        ax.set_title('Attention Value Distribution by Layer')
+        ax.set_xlabel('Attention Value')
+        ax.set_ylabel('Density')
+        ax.legend()
+        
+        # 6. 요약 텍스트
+        ax = axes[1, 2]
+        ax.axis('off')
+        
+        summary_text = f"Centroid Analysis Summary\n\n"
+        summary_text += f"Clusters: {summary_stats['experiment_info']['n_clusters']}\n"
+        summary_text += f"Layers: {summary_stats['experiment_info']['n_layers']}\n"
+        summary_text += f"Features: {summary_stats['experiment_info']['n_features']}\n\n"
+        
+        if 'most_dynamic_cluster' in summary_stats['cross_layer_analysis']:
+            dynamic_info = summary_stats['cross_layer_analysis']['most_dynamic_cluster']
+            summary_text += f"Most Dynamic Cluster: {dynamic_info['cluster_id']}\n"
+            summary_text += f"Total Change: {dynamic_info['total_change']:.3f}\n\n"
+        
+        # 각 레이어별 가장 활성화된 클러스터
+        summary_text += "Highest Mean Attention:\n"
+        for layer_idx in sorted(layer_data.keys()):
+            layer_stats = summary_stats['layer_statistics'][f'layer_{layer_idx}']
+            means = layer_stats['mean_attention_per_cluster']
+            best_cluster = np.argmax(means)
+            summary_text += f"Layer {layer_idx}: Cluster {best_cluster} ({means[best_cluster]:.3f})\n"
+        
+        ax.text(0.1, 0.9, summary_text, transform=ax.transAxes, fontsize=12,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
+        
+        plt.suptitle('Comprehensive Centroid Analysis Summary', fontsize=16, y=0.98)
+        plt.tight_layout()
+        plt.savefig(summary_dir / 'comprehensive_summary.png', dpi=300, bbox_inches='tight')
+        plt.close()
     
     def _visualize_clustering_distribution(self, flattened_maps, cluster_assignments, labels, 
                                  layer_idx, output_dir):
@@ -949,7 +1392,7 @@ def main():
                        help='Layer index for clustering (default: 2)')
     parser.add_argument('--n_clusters', type=int, default=4,
                        help='Number of clusters for K-means')
-    parser.add_argument('--max_samples', type=int, default=10,
+    parser.add_argument('--max_samples', type=int, default=5,
                        help='Maximum number of samples for graph visualization ONLY')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory for results')
@@ -990,6 +1433,10 @@ def main():
         data_loader = inference.train_loader_few if hasattr(inference, 'train_loader_few') else inference.test_loader
         logger.info("Using Few-shot dataset loader")
     
+    # 🔥 클러스터링 결과를 위한 상위 폴더 생성
+    clustering_results_dir = Path(args.output_dir) / 'clustering_results'
+    clustering_results_dir.mkdir(parents=True, exist_ok=True)
+    
     # 그래프 시각화 (max_samples 개수만큼만)
     if args.viz_graph:
         logger.info(f"Generating graph visualizations for {args.max_samples} samples...")
@@ -1008,7 +1455,8 @@ def main():
     # 모든 레이어에 대해 클러스터링
     for layer_idx in range(len(inference.model.layers)):
         logger.info(f"Performing clustering on layer {layer_idx}...")
-        layer_output_dir = Path(args.output_dir) / f'layer_{layer_idx}'
+        # 🔥 레이어별 결과를 clustering_results 폴더 아래에 저장
+        layer_output_dir = clustering_results_dir / f'layer_{layer_idx}'
         clustering_results = inference.perform_clustering(
             attention_data, 
             layer_idx=layer_idx,
@@ -1019,9 +1467,14 @@ def main():
         inference.save_attention_maps_by_cluster(
             attention_data, 
             clustering_results, 
-            args.output_dir,  # 메인 output_dir 사용
+            clustering_results_dir,  # 🔥 clustering_results 디렉토리 사용
             layer_idx
-    )
+        )
+    
+    # 🔥 전체 센트로이드 요약 분석 - clustering_results 폴더 사용
+    logger.info("Generating comprehensive centroid summary...")
+    inference.generate_centroid_summary(clustering_results_dir, args.n_clusters)
+    
     logger.info(f"Inference completed! Results saved to {args.output_dir}")
 
 if __name__ == "__main__":
