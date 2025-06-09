@@ -2,7 +2,16 @@
     # 현재: i→j와 j→i가 다른 edge attribute
     var_edge_attr[i,j] = [desc_i | desc_j]  # i→j
     var_edge_attr[j,i] = [desc_j | desc_i]  # j→i (순서만 다름)
-edge_update라는 문제가 있어서 잘못됨. 
+    edge_update라는 문제가 있어서 잘못됨. 
+    그래서 수정한 버전임. i - > j로 갈 때, j에 해당하는 description embedding만 사용하도록 만듬. 
+    target_desc[i,j] = desc_j  # i→j 연결에서 목적지 j의 description
+
+    target_desc = [
+    [[V1_desc, V2_desc, V3_desc],   # 첫 번째 행: 모든 열에 각각 V1,V2,V3 desc
+     [V1_desc, V2_desc, V3_desc],   # 두 번째 행: 모든 열에 각각 V1,V2,V3 desc  
+     [V1_desc, V2_desc, V3_desc]]   # 세 번째 행: 모든 열에 각각 V1,V2,V3 desc
+    ]
+    에서 대각선을 죽여버림. 
 """
 
 
