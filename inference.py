@@ -459,7 +459,7 @@ class AttentionInference:
                         }
                         nx.draw_networkx_labels(G, pos, labels=node_labels, ax=ax_graph, **label_options)
 
-                        ax_graph.set_title(f'Graph Structure - Layer {layer_idx} - Epoch {epoch} - Sample {sample_count}', fontsize=12)
+                        ax_graph.set_title(f'Graph Structure - Layer {layer_idx} - Sample {sample_count}', fontsize=12)
                         ax_graph.axis('off')
                         ax_graph.set_aspect('equal')
                         ax_graph.set_xlim([-1.2, 1.2])
@@ -514,7 +514,7 @@ class AttentionInference:
                                             fontsize=7)
                         
                         # 전체 제목 설정
-                        fig.suptitle(f'Layer {layer_idx} - Epoch {epoch} - Sample {sample_count}', fontsize=18)
+                        fig.suptitle(f'Layer {layer_idx} - Sample {sample_count}', fontsize=18)
                         fig.tight_layout(rect=[0, 0.03, 1, 0.97])
                         
                         # 저장
@@ -590,22 +590,168 @@ class AttentionInference:
                         label=label)
         
         logger.info(f"Saved {num_samples * num_layers} attention map files to {output_dir}")
+        
+    def _plot_improved_pairwise_distances(self, flattened_maps, optimal_k, layer_idx, output_dir):
+        """
+        개선된 pairwise distance 시각화 - 3가지 방식으로 표현 (가독성 개선)
+        """
+        # K-means 클러스터링 수행
+        kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=20)
+        cluster_labels = kmeans.fit_predict(flattened_maps)
+        centroids = kmeans.cluster_centers_
+        
+        # 클러스터 간 거리 계산
+        from sklearn.metrics import pairwise_distances
+        distance_matrix = pairwise_distances(centroids, metric='euclidean')
+        
+        # 클러스터 쌍별 거리 추출
+        cluster_pairs = []
+        distances = []
+        
+        for i in range(optimal_k):
+            for j in range(i+1, optimal_k):
+                cluster_pairs.append(f"C{i}-C{j}")
+                distances.append(distance_matrix[i, j])
+        
+        # 거리 순으로 정렬 (오름차순 - 가까운 거리부터, 세번째 그림과 동일)
+        sorted_indices = np.argsort(distances)
+        sorted_pairs = [cluster_pairs[i] for i in sorted_indices]
+        sorted_distances = [distances[i] for i in sorted_indices]
+        
+        # 3개 서브플롯 생성 - 크기 및 간격 조정
+        fig = plt.figure(figsize=(20, 7))
+        
+        # ========== 1. Frobenius Distance Matrix ==========
+        ax1 = plt.subplot(1, 3, 1)
+        im = ax1.imshow(distance_matrix, cmap='RdYlBu_r', aspect='auto', vmin=0)
+        
+        # 값 표시 - 폰트 크기 증가
+        for i in range(optimal_k):
+            for j in range(optimal_k):
+                if i != j:
+                    text_color = 'white' if distance_matrix[i, j] > np.median(distance_matrix) else 'black'
+                    ax1.text(j, i, f'{distance_matrix[i, j]:.2f}', 
+                            ha="center", va="center", color=text_color, 
+                            fontsize=max(8, 12-optimal_k//2), fontweight='bold')  # 동적 폰트 크기
+        
+        ax1.set_xlabel('Cluster ID', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('Cluster ID', fontsize=14, fontweight='bold')
+        ax1.set_title('Frobenius Distance Matrix', fontsize=16, fontweight='bold', pad=20)
+        
+        # 틱 설정
+        ax1.set_xticks(range(optimal_k))
+        ax1.set_yticks(range(optimal_k))
+        ax1.set_xticklabels([f'C{i}' for i in range(optimal_k)], fontsize=12)
+        ax1.set_yticklabels([f'C{i}' for i in range(optimal_k)], fontsize=12)
+        
+        # 컬러바 개선
+        cbar1 = plt.colorbar(im, ax=ax1, shrink=0.8, aspect=20)
+        cbar1.set_label('Distance', rotation=270, labelpad=20, fontsize=12, fontweight='bold')
+        cbar1.ax.tick_params(labelsize=10)
+        
+        # ========== 2. All Pairwise Distances (세번째 그림 스타일) ==========
+        # ========== 2. All Pairwise Distances (순서 변경) ==========
+        ax2 = plt.subplot(1, 3, 2)
+
+        max_pairs_to_show = min(20, len(sorted_distances))
+        display_pairs = sorted_pairs[:max_pairs_to_show]
+        display_distances = sorted_distances[:max_pairs_to_show]
+
+        # 색상 매핑
+        colors = plt.cm.RdYlBu_r(np.linspace(0.1, 0.9, len(display_distances)))
+
+        # 바 차트 - 순서 뒤집기 (가장 가까운 것이 위에)
+        y_positions = np.arange(len(display_distances))[::-1]  # 순서 뒤집기
+        bars = ax2.barh(y_positions, display_distances, color=colors, alpha=0.8, height=0.7)
+
+        # 값 표시
+        for i, (bar, distance) in enumerate(zip(bars, display_distances)):
+            ax2.text(bar.get_width() + max(display_distances) * 0.02, 
+                    bar.get_y() + bar.get_height()/2, 
+                    f'{distance:.3f}', ha='left', va='center', 
+                    fontweight='bold', fontsize=10, color='black')
+
+        # 축 설정
+        ax2.set_xlabel('Frobenius Distance', fontsize=14, fontweight='bold')
+        ax2.set_title(f'Top {max_pairs_to_show} Pairwise Distances\n(Sorted: Close → Far)', 
+                    fontsize=16, fontweight='bold', pad=20)
+
+        # Y축 라벨 - 순서 맞추기
+        ax2.set_yticks(y_positions)
+        ax2.set_yticklabels(display_pairs, fontsize=10, fontweight='bold')
+
+        # 표시하지 않은 쌍이 있다면 알림
+        if len(sorted_distances) > max_pairs_to_show:
+            ax2.text(0.02, 0.02, f'Showing top {max_pairs_to_show} of {len(sorted_distances)} pairs', 
+                    transform=ax2.transAxes, fontsize=9, style='italic',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
+
+        ax2.grid(True, alpha=0.2, axis='x', linestyle='-', linewidth=0.5)
+        ax2.set_xlim(0, max(display_distances) * 1.2)
+        
+        # ========== 3. Distance Network (세번째 그림 스타일) ==========
+        # ========== 3. Top 20 Closest Pairs (텍스트 리스트) ==========
+        ax3 = plt.subplot(1, 3, 3)
+
+        # 가장 먼 20개 쌍 선택 (끝에서부터)
+        farthest_pairs_to_show = min(20, len(sorted_distances))
+        farthest_pairs = sorted_pairs[-farthest_pairs_to_show:]  # 끝에서 20개
+        farthest_distances = sorted_distances[-farthest_pairs_to_show:]  # 끝에서 20개
+
+        # 색상 매핑 (먼 거리용 - 빨간색 계열)
+        colors = plt.cm.RdYlBu_r(np.linspace(0.1, 0.9, len(farthest_distances)))
+
+        # 막대 차트 (거리 순으로 정렬 - 가장 먼 것부터)
+        y_positions = np.arange(len(farthest_distances))
+        bars = ax3.barh(y_positions, farthest_distances, color=colors, alpha=0.8, height=0.7)
+
+        # 값 표시
+        for i, (bar, distance) in enumerate(zip(bars, farthest_distances)):
+            ax3.text(bar.get_width() + max(farthest_distances) * 0.02, 
+                    bar.get_y() + bar.get_height()/2, 
+                    f'{distance:.3f}', ha='left', va='center', 
+                    fontweight='bold', fontsize=10, color='black')
+
+        # 축 설정
+        ax3.set_xlabel('Frobenius Distance', fontsize=14, fontweight='bold')
+        ax3.set_title(f'Top {farthest_pairs_to_show} Farthest Pairs\n(Most Different Clusters)', 
+                    fontsize=16, fontweight='bold', pad=20)
+
+        # Y축 라벨
+        ax3.set_yticks(y_positions)
+        ax3.set_yticklabels(farthest_pairs, fontsize=10, fontweight='bold')
+
+        # 그리드
+        ax3.grid(True, alpha=0.2, axis='x', linestyle='-', linewidth=0.5)
+        ax3.set_xlim(0, max(farthest_distances) * 1.2)
+
+        # 통계 정보
+        stats_text = f"Total pairs: {len(sorted_distances)} | Range: {min(sorted_distances):.3f}-{max(sorted_distances):.3f}"
+        ax3.text(0.02, 0.02, stats_text, transform=ax3.transAxes, fontsize=8, style='italic',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
+        
+        fig.suptitle(f'Layer {layer_idx}: Cluster Distance Analysis (k={optimal_k})', 
+                    fontsize=18, fontweight='bold', y=0.95)
+        # 레이아웃 조정
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+        
+        # ✅ 이 부분이 누락되어 있었음!
+        plt.savefig(output_dir / f'layer_{layer_idx}_improved_distance_analysis.png', 
+                dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
     
+        logger.info(f"✅ Improved distance analysis saved for layer {layer_idx}")
+
     def perform_clustering(self, attention_data, layer_idx=2, n_clusters=5, output_dir=None):
         """
         특정 레이어의 attention maps에 대해 K-means 클러스터링 수행
-        
-        Args:
-            attention_data (dict): attention maps 데이터
-            layer_idx (int): 클러스터링할 레이어 인덱스
-            n_clusters (int): 클러스터 수
-            output_dir (str, optional): 시각화 결과 저장 디렉토리
+        (거리 분석 포함)
         """
         if output_dir:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 특정 레이어의 attention maps 추출
+        # 기존 클러스터링 코드...
         attention_maps = np.stack(attention_data[f'layer_{layer_idx}'])
         labels = np.array(attention_data['labels'])
         sample_ids = np.array(attention_data['sample_ids'])
@@ -633,16 +779,18 @@ class AttentionInference:
             
             logger.info(f"Cluster {cluster_id}: {cluster_samples} samples, distribution: {label_dist}")
         
-        # 🔥 CENTROID NPY 저장 추가
+        # 🔥 개선된 거리 분석 추가
+        if output_dir:
+            self._plot_improved_pairwise_distances(flattened_maps, n_clusters, layer_idx, output_dir)
+        
+        # 나머지 기존 시각화들...
         if output_dir:
             self._save_centroids_npy(kmeans.cluster_centers_, feature_names, layer_idx, output_dir, n_clusters)
         
-        # 클러스터링 시각화 (t-SNE)
         if len(flattened_maps) >= 2 and output_dir:
             self._visualize_clustering_distribution(flattened_maps, cluster_assignments, labels, 
-                                                  layer_idx, output_dir)
+                                                layer_idx, output_dir)
         
-        # 클러스터 센트로이드 시각화 (1x5 플롯)
         if output_dir:
             self._visualize_cluster_centroids(kmeans.cluster_centers_, feature_names, 
                                             layer_idx, output_dir, n_clusters)
@@ -1094,8 +1242,8 @@ class AttentionInference:
         plt.close()
     
     def _visualize_clustering_distribution(self, flattened_maps, cluster_assignments, labels, 
-                                 layer_idx, output_dir):
-        """클러스터링 분포 시각화 (t-SNE) - 두 번째 코드 스타일 적용"""
+                             layer_idx, output_dir):
+        """클러스터링 분포 시각화 (t-SNE) - 같은 클러스터는 같은 색상, 레전드 중복 제거"""
         perplexity = min(30, len(flattened_maps)-1, max(1, len(flattened_maps)//3))
         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         tsne_embeddings = tsne.fit_transform(flattened_maps)
@@ -1107,23 +1255,30 @@ class AttentionInference:
         unique_clusters = np.unique(cluster_assignments)
         unique_labels = np.unique(labels)
         
-        # 클러스터별 기본 색상 설정 (두 번째 코드 스타일)
+        # 🔥 클러스터별 기본 색상 설정 (기존과 동일)
         base_colors = plt.cm.tab10(np.linspace(0, 1, max(len(unique_clusters), 1)))
         
-        # 클러스터와 라벨 조합으로 시각화 (두 번째 코드 스타일)
+        # 🔥 레전드 중복 방지를 위한 추적 변수
+        legend_added = {
+            'clusters': set(),  # 이미 추가된 클러스터들
+            'labels': set(),    # 이미 추가된 라벨들  
+            'centroid': False   # 센트로이드 레전드 추가 여부
+        }
+        
+        # 클러스터와 라벨 조합으로 시각화
         for i, cluster_id in enumerate(unique_clusters):
             cluster_mask = cluster_assignments == cluster_id
             cluster_points = tsne_embeddings[cluster_mask]
             cluster_labels = labels[cluster_mask]
             
             if len(cluster_points) > 0:
-                # 라벨별로 모양 구분: Label 0=원형, Label 1=네모 (두 번째 코드와 동일)
+                # 라벨별로 모양 구분: Label 0=원형, Label 1=네모
                 for label in unique_labels:
                     label_mask = cluster_labels == label
                     if np.any(label_mask):
                         label_points = cluster_points[label_mask]
                         
-                        # 모양 구분: label 0은 원형, label 1은 네모
+                        # 모양 구분
                         if label == 0:
                             marker = 'o'  # 원형
                             marker_name = 'Label 0'
@@ -1131,12 +1286,37 @@ class AttentionInference:
                             marker = 's'  # 네모
                             marker_name = 'Label 1'
                         
+                        # 🔥 레전드 라벨 결정: 중복 방지 로직
+                        cluster_key = f'cluster_{cluster_id}'
+                        label_key = f'label_{label}'
+                        
+                        # 레전드 라벨 전략:
+                        # 1. 클러스터별로 첫 번째로 나오는 경우만 클러스터 이름 표시
+                        # 2. 라벨별로 첫 번째로 나오는 경우만 라벨 설명 표시
+                        legend_label = None
+                        
+                        if cluster_key not in legend_added['clusters']:
+                            # 이 클러스터가 처음 나오는 경우
+                            if label_key not in legend_added['labels']:
+                                # 이 라벨도 처음 나오는 경우
+                                legend_label = f'Cluster {cluster_id} ({marker_name})'
+                                legend_added['labels'].add(label_key)
+                            else:
+                                # 라벨은 이미 나왔지만 클러스터는 처음
+                                legend_label = f'Cluster {cluster_id}'
+                            legend_added['clusters'].add(cluster_key)
+                        elif label_key not in legend_added['labels']:
+                            # 클러스터는 이미 나왔지만 라벨이 처음
+                            legend_label = f'{marker_name}'
+                            legend_added['labels'].add(label_key)
+                        # 둘 다 이미 나온 경우는 레전드에 추가하지 않음 (None)
+                        
                         ax.scatter(label_points[:, 0], label_points[:, 1], 
                                 color=base_colors[i], 
-                                label=f'Cluster {cluster_id} ({marker_name})', 
+                                label=legend_label,  # None이면 레전드에 안 나타남
                                 alpha=0.7, s=50, marker=marker)
         
-        # 클러스터 센트로이드 추가 (별표로 표시) - 두 번째 코드 스타일
+        # 🔥 클러스터 센트로이드 추가 (각 클러스터 색상으로 표시)
         for i, cluster_id in enumerate(unique_clusters):
             cluster_mask = cluster_assignments == cluster_id
             if np.any(cluster_mask):
@@ -1144,22 +1324,44 @@ class AttentionInference:
                 centroid_x = np.mean(tsne_embeddings[cluster_mask, 0])
                 centroid_y = np.mean(tsne_embeddings[cluster_mask, 1])
                 
-                ax.scatter(centroid_x, centroid_y, marker='*', s=300, 
-                        c='black', edgecolors=base_colors[i], linewidth=3,
-                        label='Centroids' if i == 0 else "", zorder=5)
+                # 🔥 각 클러스터별로 센트로이드 레전드 추가
+                centroid_label = f'C{cluster_id} Centroid'
+                
+                ax.scatter(centroid_x, centroid_y, marker='*', s=100, 
+                        c=base_colors[i], edgecolors='black', linewidth=2,
+                        label=centroid_label, zorder=5)
         
-        # 제목과 축 라벨 (두 번째 코드 스타일)
+        # 제목과 축 라벨
         ax.set_title(f'Layer {layer_idx} - Clustering & True Labels\nK-means with t-SNE Visualization', 
                     fontsize=16, pad=20)
         ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
         ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
         
-        # 범례 (두 번째 코드 스타일)
-        if len(unique_clusters) > 0:
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+        # 🔥 개선된 범례: 중복 없이 깔끔하게
+        handles, labels_legend = ax.get_legend_handles_labels()
+        if handles:
+            # 범례 순서 조정: 클러스터들 먼저, 그 다음 라벨 설명, 마지막에 센트로이드
+            legend_items = list(zip(handles, labels_legend))
+            
+            cluster_items = [(h, l) for h, l in legend_items if l and 'Cluster' in l and 'Centroid' not in l]
+            label_items = [(h, l) for h, l in legend_items if l and 'Label' in l and 'Cluster' not in l]
+            centroid_items = [(h, l) for h, l in legend_items if l and 'Centroid' in l]
+            
+            # 클러스터 아이템을 번호순으로 정렬
+            cluster_items.sort(key=lambda x: int(x[1].split()[1]) if 'Cluster' in x[1] and x[1].split()[1].isdigit() else 999)
+            # 센트로이드 아이템을 번호순으로 정렬  
+            centroid_items.sort(key=lambda x: int(x[1].split('C')[1].split()[0]) if 'C' in x[1] else 999)
+            
+            # 최종 순서
+            final_items = cluster_items + label_items + centroid_items
+            final_handles, final_labels = zip(*final_items) if final_items else ([], [])
+            
+            ax.legend(final_handles, final_labels, 
+                    bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+        
         ax.grid(True, alpha=0.3)
         
-        # 클러스터 및 label 통계 정보 (두 번째 코드 스타일)
+        # 클러스터 및 label 통계 정보
         cluster_stats = []
         for cluster_id in unique_clusters:
             cluster_mask = cluster_assignments == cluster_id
@@ -1173,17 +1375,17 @@ class AttentionInference:
                 label_counts[int(label)] = count
             
             label_str = ", ".join([f"L{k}:{v}" for k, v in label_counts.items()])
-            cluster_stats.append(f"Cluster {cluster_id}: {total_count} maps ({total_percentage:.1f}%) [{label_str}]")
+            cluster_stats.append(f"C{cluster_id}: {total_count} ({total_percentage:.1f}%) [{label_str}]")
         
         if cluster_stats:
             stats_text = "\n".join(cluster_stats)
             ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
-                fontsize=10, verticalalignment='top',
+                fontsize=9, verticalalignment='top',
                 bbox=dict(boxstyle="round,pad=0.4", facecolor="lightgray", alpha=0.9))
         
-        # 마커 설명 추가 (두 번째 코드 스타일)
+        # 마커 설명 추가
         total_samples_processed = len(flattened_maps)
-        ax.text(0.02, 0.02, f"Total Maps: {total_samples_processed}\nCircle=Label 0, Square=Label 1", 
+        ax.text(0.02, 0.02, f"Total: {total_samples_processed} maps\n○=Label 0, ■=Label 1, ★=Centroid (colored by cluster)", 
             transform=ax.transAxes, fontsize=10, verticalalignment='bottom',
             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8))
         
@@ -1192,7 +1394,7 @@ class AttentionInference:
                 dpi=300, bbox_inches='tight')
         plt.close(fig)
         
-        logger.info(f"✅ Layer {layer_idx} distribution saved!")
+        logger.info(f"✅ Layer {layer_idx} distribution saved with clean legend!")
 
     def _visualize_cluster_centroids(self, cluster_centers, feature_names, layer_idx, output_dir, n_clusters):
         """클러스터 센트로이드 히트맵 시각화 (모든 클러스터 지원 + 폴더 정리)"""

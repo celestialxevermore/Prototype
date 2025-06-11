@@ -2,7 +2,16 @@
     # 현재: i→j와 j→i가 다른 edge attribute
     var_edge_attr[i,j] = [desc_i | desc_j]  # i→j
     var_edge_attr[j,i] = [desc_j | desc_i]  # j→i (순서만 다름)
-edge_update라는 문제가 있어서 잘못됨. 
+    edge_update라는 문제가 있어서 잘못됨. 
+    그래서 수정한 버전임. i - > j로 갈 때, j에 해당하는 description embedding만 사용하도록 만듬. 
+    target_desc[i,j] = desc_j  # i→j 연결에서 목적지 j의 description
+
+    target_desc = [
+    [[V1_desc, V2_desc, V3_desc],   # 첫 번째 행: 모든 열에 각각 V1,V2,V3 desc
+     [V1_desc, V2_desc, V3_desc],   # 두 번째 행: 모든 열에 각각 V1,V2,V3 desc  
+     [V1_desc, V2_desc, V3_desc]]   # 세 번째 행: 모든 열에 각각 V1,V2,V3 desc
+    ]
+    에서 대각선을 죽여버림. 
 """
 
 
@@ -25,6 +34,7 @@ logger = logging.getLogger(__name__)
 class AdaptiveGraphAttention(nn.Module):
     def __init__(
         self,
+        args,
         input_dim : int,
         hidden_dim : int,
         n_heads : int, 
@@ -33,17 +43,12 @@ class AdaptiveGraphAttention(nn.Module):
     ):
         super().__init__()
         assert input_dim % n_heads == 0 
+        self.args = args
         self.n_heads = n_heads 
         self.head_dim = input_dim // n_heads 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.frozen = False  # 그래프 구조 고정 여부
-        # self.edge_update = nn.Sequential(
-        #     nn.Linear(input_dim * 2, input_dim),
-        #     nn.LayerNorm(input_dim),
-        #     nn.ReLU(),
-        #     nn.Linear(input_dim, input_dim)
-        # )
         
         self.threshold = threshold
         self.topology_bias = nn.Parameter(torch.zeros(1))
@@ -77,43 +82,47 @@ class AdaptiveGraphAttention(nn.Module):
 
         self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
         self.adjacency = self._no_self_interaction(self.adjacency)
-        # 1. 변수 노드 간의 edge_attr
-        target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
-        # 2. CLS-변수 노드 간의 edge_attr
-        cls_edge_attr = desc_embeddings
-
-        # 3. Edge attribute 합치기
-        edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
-        edge_attr[:, 1:, 1:] = target_desc  # 변수 노드 간
-        edge_attr[:, 0, 1:] = cls_edge_attr  # CLS->변수
         
-
-        new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device= self.adjacency.device)
+        new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=self.adjacency.device)
         new_adjacency[:, 1:, 1:] = self.adjacency 
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
         new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
         
         self.new_adjacency = new_adjacency
+        
         '''
-            5. Attention
+            Attention
         '''
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         
-        edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
-        edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
-        edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+        if self.args.use_edge_attr:
+            # Description embedding을 edge attribute로 사용
+            target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+            cls_edge_attr = desc_embeddings
 
-        q_expanded = q.unsqueeze(3)
-        k_expanded = k.unsqueeze(2)
-        qke_expanded = torch.cat([
-            q_expanded.expand(-1,-1,-1, new_seq, -1),
-            k_expanded.expand(-1,-1, new_seq, -1, -1),
-            edge_attr
-        ], dim = -1)
-
-        attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+            edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+            edge_attr[:, 1:, 1:] = target_desc  # 변수 노드 간
+            edge_attr[:, 0, 1:] = cls_edge_attr  # CLS->변수
+            
+            edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+            edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+            edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+            
+            q_expanded = q.unsqueeze(3)
+            k_expanded = k.unsqueeze(2)
+            qke_expanded = torch.cat([
+                q_expanded.expand(-1,-1,-1, new_seq, -1),
+                k_expanded.expand(-1,-1, new_seq, -1, -1),
+                edge_attr
+            ], dim = -1)
+            
+            attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+        else:
+            # 기본 attention (adjacency만 사용)
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
@@ -165,6 +174,7 @@ class Model(nn.Module):
         '''
         self.layers = nn.ModuleList([
             AdaptiveGraphAttention(
+                args = args,
                 input_dim = self.input_dim, 
                 hidden_dim = self.hidden_dim,
                 n_heads = args.n_heads,

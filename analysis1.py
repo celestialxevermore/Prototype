@@ -677,11 +677,11 @@ class ClusterAnalyzer:
         self._plot_cluster_summary(cluster_data, layer_idx, output_dir)
     
     def _plot_label_distribution(self, cluster_data, stats_results, layer_idx, output_dir):
-        """라벨 분포 시각화 (개선된 버전)"""
+        """라벨 분포 시각화 (클러스터 ID 숫자 순서로 정렬)"""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        # 카운트 바 플롯
-        cluster_ids = list(cluster_data.keys())
+        # 🔥 클러스터 ID를 숫자순으로 정렬
+        cluster_ids = sorted(list(cluster_data.keys()))  # 숫자로 정렬
         labels_data = []
         
         for cluster_id in cluster_ids:
@@ -691,13 +691,22 @@ class ClusterAnalyzer:
                 labels_data.append({
                     'Cluster': f'Cluster {cluster_id}',
                     'Label': f'Label {int(label)}',
-                    'Count': count
+                    'Count': count,
+                    'cluster_id': cluster_id  # 🔥 정렬용 숫자 ID 추가
                 })
         
         df_labels = pd.DataFrame(labels_data)
         
+        # 🔥 pivot 전에 cluster_id 순으로 정렬
+        df_labels = df_labels.sort_values('cluster_id')
+        
         # 스택 바 차트 (숫자 표시 추가)
         pivot_df = df_labels.pivot(index='Cluster', columns='Label', values='Count').fillna(0)
+        
+        # 🔥 인덱스를 클러스터 ID 순으로 재정렬
+        cluster_order = [f'Cluster {cid}' for cid in cluster_ids]
+        pivot_df = pivot_df.reindex(cluster_order)
+        
         bars = pivot_df.plot(kind='bar', stacked=True, ax=ax1, color=['skyblue', 'lightcoral'])
         ax1.set_title(f'Layer {layer_idx} - Label Distribution by Cluster')
         ax1.set_xlabel('Cluster')
@@ -721,7 +730,7 @@ class ClusterAnalyzer:
         # 비율 표시
         for container in ax2.containers:
             ax2.bar_label(container, labels=[f'{v:.2f}' if v > 0.05 else '' for v in container.datavalues], 
-                         label_type='center', fontsize=9, color='white', weight='bold')
+                        label_type='center', fontsize=9, color='white', weight='bold')
         
         # Chi-square 결과 표시
         if stats_results['label_chi2']:
@@ -735,12 +744,14 @@ class ClusterAnalyzer:
         plt.close(fig)
         
         logger.info(f"Label distribution plot saved for layer {layer_idx}")
-    
+
+
     def _plot_prediction_distribution(self, cluster_data, stats_results, layer_idx, output_dir):
-        """예측값 분포 시각화 (개선된 버전)"""
+        """예측값 분포 시각화 (클러스터 ID 숫자 순서로 정렬)"""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        cluster_ids = list(cluster_data.keys())
+        # 🔥 클러스터 ID를 숫자순으로 정렬
+        cluster_ids = sorted(list(cluster_data.keys()))
         
         # 히스토그램
         for cluster_id in cluster_ids:
@@ -761,11 +772,17 @@ class ClusterAnalyzer:
             for pred in predictions:
                 prediction_data.append({
                     'Cluster': f'Cluster {cluster_id}',
-                    'Prediction': pred
+                    'Prediction': pred,
+                    'cluster_id': cluster_id  # 🔥 정렬용 숫자 ID 추가
                 })
         
         df_pred = pd.DataFrame(prediction_data)
-        sns.boxplot(data=df_pred, x='Cluster', y='Prediction', ax=ax2)
+        # 🔥 cluster_id 순으로 정렬
+        df_pred = df_pred.sort_values('cluster_id')
+        
+        # 🔥 order 파라미터로 클러스터 순서 명시적 지정
+        cluster_order = [f'Cluster {cid}' for cid in cluster_ids]
+        sns.boxplot(data=df_pred, x='Cluster', y='Prediction', ax=ax2, order=cluster_order)
         ax2.set_title(f'Layer {layer_idx} - Prediction Boxplot by Cluster')
         ax2.tick_params(axis='x', rotation=45)
         ax2.grid(True, alpha=0.3)
@@ -782,12 +799,14 @@ class ClusterAnalyzer:
         plt.close(fig)
         
         logger.info(f"Prediction distribution plot saved for layer {layer_idx}")
-    
+
+
     def _plot_cluster_summary(self, cluster_data, layer_idx, output_dir):
-        """클러스터별 요약 통계 시각화 (개선된 버전)"""
+        """클러스터별 요약 통계 시각화 (클러스터 ID 숫자 순서로 정렬)"""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        cluster_ids = list(cluster_data.keys())
+        # 🔥 클러스터 ID를 숫자순으로 정렬
+        cluster_ids = sorted(list(cluster_data.keys()))
         
         # 1. 클러스터별 샘플 수 (숫자 표시)
         sample_counts = [cluster_data[cid]['n_samples'] for cid in cluster_ids]
@@ -811,7 +830,7 @@ class ClusterAnalyzer:
             std_predictions.append(np.std(preds) if len(preds) > 0 else 0)
         
         bars2 = ax2.bar([f'Cluster {cid}' for cid in cluster_ids], mean_predictions, 
-                       yerr=std_predictions, capsize=5, color='lightgreen')
+                    yerr=std_predictions, capsize=5, color='lightgreen')
         ax2.set_title('Mean Prediction by Cluster')
         ax2.set_ylabel('Mean Prediction')
         ax2.tick_params(axis='x', rotation=45)
