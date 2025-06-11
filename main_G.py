@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
     parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
-    parser.add_argument('--use_edge_attr', action='store_true', default = False)
+    parser.add_argument('--use_edge_attr', action='store_true', default = True)
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -145,9 +145,9 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
-        if args.viz_graph or args.viz_heatmap:
-            if epoch % 10 == 0 or epoch == epochs - 1:
-                visualize_model_structure(model, train_loader, device, args, mode, experiment_id, epoch, max_samples=5)
+        # if args.viz_graph or args.viz_heatmap:
+        #     if epoch % 10 == 0 or epoch == epochs - 1:
+        #         visualize_model_structure(model, train_loader, device, args, mode, experiment_id, epoch, max_samples=5)
                 
         if is_binary:
             # Binary Classification
@@ -204,7 +204,6 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
                     f"Train AUC: {train_auc:.4f}, Val AUC: {val_auc:.4f}, "
                     f"Train ACC: {train_acc:.4f}, Val ACC: {val_acc:.4f}")
 
-        # Early Stopping 로직
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             best_epoch = epoch
@@ -213,10 +212,11 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             if current_threshold is not None:
                 best_threshold = current_threshold
             
-            # 체크포인트 저장
+            # 🔥 개선: validation AUC가 갱신될 때만 저장
             checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_dataset_name}/{mode}/{experiment_id}"
             os.makedirs(checkpoint_dir, exist_ok=True)
-            checkpoint_path = os.path.join(checkpoint_dir, f"best_model_epoch_{epoch}.pt")
+            # 항상 같은 파일명으로 덮어쓰기
+            checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pt")
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -226,14 +226,16 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             }, checkpoint_path)
         else:
             no_improve += 1
+
         if no_improve >= patience:
             logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
             break
-    # 학습 종료 후, Best 모델로 복원
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    else:
-        logger.warning("No best_model_state saved; model not updated?")
+
+        # 학습 종료 후, Best 모델로 복원
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+        else:
+            logger.warning("No best_model_state saved; model not updated?")
 
     return (train_losses, val_losses,
             train_aucs, val_aucs,
