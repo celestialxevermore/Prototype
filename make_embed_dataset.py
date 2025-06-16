@@ -6,7 +6,7 @@ import os
 import sys
 import pickle, torch, random
 import argparse, pdb
-from table_to_embedding_new2 import Table2EmbeddingTransformer
+from table_to_embedding_ours import Table2EmbeddingTransformer
 
 class TabularToEmbeddingDataset:
     def __init__(self, args, base_path: str = "/storage/personal/eungyeop/dataset/table/"):
@@ -22,6 +22,22 @@ class TabularToEmbeddingDataset:
             "adult": ['target_binary', ['no','yes']],
             "diabetes": ['target_binary', ['no','yes']]
         }
+        self.transformer_class = self._get_transformer_class(args.embed_type)
+
+    def _get_transformer_class(self, embed_type: str):
+        if embed_type == 'carte':
+            from table_to_embedding_carte import Table2EmbeddingTransformer
+            print(f"Using CarTE transformer for embed_type : {embed_type}")
+        elif embed_type == 'carte_desc':
+            from table_to_embedding_carte_desc import Table2EmbeddingTransformer
+            print(f"Using CarTE_desc transformer for embed_type : {embed_type}")
+        elif embed_type == 'ours':
+            from table_to_embedding_ours import Table2EmbeddingTransformer
+            print(f"Using Ours transformer for embed_type : {embed_type}")
+        elif embed_type == 'ours2':
+            from table_to_embedding_ours2 import Table2EmbeddingTransformer
+            print(f"Using Ours2 transformer for embed_type : {embed_type}")
+        return Table2EmbeddingTransformer
 
     def preprocessing(self, DATASETS: pd.DataFrame, data_name: str) -> Tuple[pd.DataFrame, np.ndarray]:
         """데이터셋 전처리"""
@@ -60,7 +76,8 @@ class TabularToEmbeddingDataset:
         
         
         # 임베딩 변환
-        maker = Table2EmbeddingTransformer(
+
+        maker = self.transformer_class(
             args = self.args,
             source_dataset_name = data_name
         )
@@ -69,7 +86,7 @@ class TabularToEmbeddingDataset:
         
         # 저장 경로 설정
         base_save_path = "/storage/personal/eungyeop/dataset/embedding"
-        sub_dir = f"tabular_embeddings__{self.args.llm_model}"
+        sub_dir = f"tabular_embeddings_{self.args.embed_type}/{self.args.llm_model}"
         
         save_dir = os.path.join(base_save_path, sub_dir)
         os.makedirs(save_dir, exist_ok=True)
@@ -97,7 +114,7 @@ class TabularToEmbeddingDataset:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--random_seed', type=int, default=42)
-    parser.add_argument('--input_dim', type=int, default=384)
+    parser.add_argument('--input_dim', type=int, default=768)
     parser.add_argument('--label', action='store_true',
                        help='If True, uses label_table. If False, uses origin_table.')
     parser.add_argument('--cpu', type = int, default = 30)
@@ -108,7 +125,7 @@ if __name__ == "__main__":
                        help='Type of scaler to use for numerical features.')
     parser.add_argument('--llm_model', type = str, default='gpt2_mean', choices=['gpt2_mean','gpt2_auto','sentence-bert', 'bio-bert', 'bio-clinical-bert', 'LLAMA_mean', 'LLAMA_auto'],
                         help='Name of the language model to use')
-    #parser.add_argument('--source_dataset_name', type = str, default='heart')
+    parser.add_argument('--embed_type', default = 'ours', choices = ['carte', 'carte_desc','ours','ours2'])
     args = parser.parse_args()
     
     # 재현성을 위한 설정
@@ -129,7 +146,7 @@ if __name__ == "__main__":
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
         #"heart",
-        "diabetes",
+        #"diabetes",
         "adult"
     ]
     

@@ -11,7 +11,8 @@ Usage:
 import os
 # CUDA deterministic 설정을 가장 먼저 설정
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-
+from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d
 import torch
 import argparse
 import numpy as np
@@ -106,15 +107,28 @@ class ComprehensiveClusteringAnalyzer:
         fix_seed(self.args.random_seed)
         
         # 전체 데이터셋 로더 준비
-        results = prepare_embedding_dataloaders(self.args, self.args.source_dataset_name)
+        results = prepare_embedding_dataloaders(self.args, self.args.source_data)
         self.train_loader, self.val_loader, self.test_loader = results['loaders']
         self.num_classes = results['num_classes']
+        from torch.utils.data import ConcatDataset, DataLoader
         
+        combined_dataset = ConcatDataset([
+            self.train_loader.dataset,
+            self.val_loader.dataset, 
+            self.test_loader.dataset
+        ])
+        
+        self.combined_loader = DataLoader(
+            combined_dataset,
+            batch_size=self.train_loader.batch_size,
+            shuffle=False,
+            num_workers=getattr(self.train_loader, 'num_workers', 0)
+        )
         # Few-shot 로더 준비 (필요한 경우)
         if hasattr(self.args, 'few_shot') and self.args.few_shot > 0:
             self.train_loader_few = get_few_shot_embedding_samples(self.train_loader, self.args)
         
-        logger.info(f"Dataloaders prepared for dataset: {self.args.source_dataset_name}")
+        logger.info(f"Dataloaders prepared for dataset: {self.args.source_data}")
     
     def extract_attention_maps(self, data_loader):
         """
@@ -724,7 +738,962 @@ class ComprehensiveClusteringAnalyzer:
         plt.savefig(output_dir / f'layer_{layer_idx}_variance_analysis.png', 
                    dpi=300, bbox_inches='tight')
         plt.close()
+    # 기존 ComprehensiveClusteringAnalyzer 클래스에 추가할 메서드들
 
+    import numpy as np
+    from scipy.signal import find_peaks
+    from scipy.ndimage import gaussian_filter1d
+
+    def calculate_elbow_point(self, k_values, wcss_scores, method='knee'):
+        """
+        WCSS 값에서 elbow point를 자동으로 찾는 함수
+        
+        Args:
+            k_values: 클러스터 개수 리스트
+            wcss_scores: 각 k에 대한 WCSS 값
+            method: 'knee', 'derivative', 'variance' 중 선택
+        
+        Returns:
+            dict: elbow point 정보
+        """
+        k_values = np.array(k_values)
+        wcss_scores = np.array(wcss_scores)
+        
+        if method == 'knee':
+            # Knee detection using the "knee/elbow" method
+            # 첫 번째 점과 마지막 점을 잇는 직선으로부터의 거리가 최대인 점 찾기
+            
+            # Normalize data to [0,1] for better knee detection
+            k_norm = (k_values - k_values.min()) / (k_values.max() - k_values.min())
+            wcss_norm = (wcss_scores - wcss_scores.min()) / (wcss_scores.max() - wcss_scores.min())
+            
+            # 첫 점과 마지점을 잇는 직선
+            line_start = np.array([k_norm[0], wcss_norm[0]])
+            line_end = np.array([k_norm[-1], wcss_norm[-1]])
+            
+            # 각 점에서 직선까지의 거리 계산
+            distances = []
+            for i in range(len(k_norm)):
+                point = np.array([k_norm[i], wcss_norm[i]])
+                # 점에서 직선까지의 거리 공식
+                distance = np.abs(np.cross(line_end - line_start, line_start - point)) / np.linalg.norm(line_end - line_start)
+                distances.append(distance)
+            
+            elbow_idx = np.argmax(distances)
+            elbow_k = k_values[elbow_idx]
+            elbow_score = wcss_scores[elbow_idx]
+            max_distance = distances[elbow_idx]
+            
+            return {
+                'method': 'knee',
+                'elbow_k': int(elbow_k),
+                'elbow_wcss': float(elbow_score),
+                'confidence': float(max_distance),
+                'all_distances': distances
+            }
+        
+        elif method == 'derivative':
+            # Second derivative method
+            if len(wcss_scores) < 3:
+                return {'method': 'derivative', 'elbow_k': k_values[0], 'elbow_wcss': wcss_scores[0], 'confidence': 0.0}
+            
+            # 1차 미분 (기울기)
+            first_derivative = np.diff(wcss_scores)
+            # 2차 미분 (기울기의 변화)
+            second_derivative = np.diff(first_derivative)
+            
+            # 2차 미분이 최대인 지점 (가장 급격하게 기울기가 변하는 지점)
+            elbow_idx = np.argmax(second_derivative) + 1  # +1 because of diff operations
+            elbow_k = k_values[elbow_idx]
+            elbow_score = wcss_scores[elbow_idx]
+            
+            return {
+                'method': 'derivative',
+                'elbow_k': int(elbow_k),
+                'elbow_wcss': float(elbow_score),
+                'confidence': float(second_derivative[elbow_idx-1]),
+                'first_derivative': first_derivative.tolist(),
+                'second_derivative': second_derivative.tolist()
+            }
+        
+        elif method == 'variance':
+            # Variance-based method: 기울기의 분산이 줄어드는 지점
+            if len(wcss_scores) < 4:
+                return {'method': 'variance', 'elbow_k': k_values[0], 'elbow_wcss': wcss_scores[0], 'confidence': 0.0}
+            
+            # 슬라이딩 윈도우로 기울기의 분산 계산
+            window_size = min(3, len(wcss_scores) // 2)
+            variances = []
+            
+            for i in range(window_size, len(wcss_scores) - window_size):
+                window_slopes = []
+                for j in range(i - window_size, i + window_size):
+                    if j < len(wcss_scores) - 1:
+                        slope = (wcss_scores[j+1] - wcss_scores[j]) / (k_values[j+1] - k_values[j])
+                        window_slopes.append(slope)
+                variances.append(np.var(window_slopes))
+            
+            # 분산이 최소인 지점 (기울기가 안정화되는 지점)
+            elbow_idx = np.argmin(variances) + window_size
+            elbow_k = k_values[elbow_idx]
+            elbow_score = wcss_scores[elbow_idx]
+            
+            return {
+                'method': 'variance',
+                'elbow_k': int(elbow_k),
+                'elbow_wcss': float(elbow_score),
+                'confidence': float(1.0 / (variances[elbow_idx - window_size] + 1e-10)),
+                'variances': variances
+            }
+
+    def perform_comprehensive_analysis_with_elbow(self, attention_data, layer_idx, k_range=(2, 15), output_dir=None):
+        """
+        Elbow method가 포함된 종합적인 클러스터링 메트릭 분석 수행
+        """
+        if output_dir:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 특정 레이어의 attention maps 추출
+        attention_maps = np.stack(attention_data[f'layer_{layer_idx}'])
+        labels = np.array(attention_data['labels'])
+        feature_names = attention_data['feature_names']
+        
+        logger.info(f"Performing comprehensive analysis (with Elbow) on layer {layer_idx} with {len(attention_maps)} samples")
+        logger.info(f"Testing cluster range: {k_range[0]} to {k_range[1]}")
+        
+        # 평탄화 (벡터화)
+        flattened_maps = attention_maps.reshape(len(attention_maps), -1)
+        
+        min_k, max_k = k_range
+        k_values = list(range(min_k, max_k + 1))
+        
+        # 각 k값에 대해 모든 메트릭 계산
+        comprehensive_results = {
+            'layer_idx': layer_idx,
+            'k_values': k_values,
+            'feature_names': feature_names,
+            'results_by_k': {}
+        }
+        
+        wcss_scores = []
+        
+        for k in k_values:
+            logger.info(f"Testing k={k}...")
+            
+            # Deterministic K-means
+            np.random.seed(42)
+            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10, algorithm='lloyd')
+            cluster_labels = kmeans.fit_predict(flattened_maps)
+            
+            # 모든 메트릭 계산
+            all_metrics = self.calculate_comprehensive_metrics(flattened_maps, cluster_labels)
+            
+            # WCSS 저장
+            wcss_scores.append(all_metrics['variance_analysis']['wcss'])
+            
+            # 결과 저장
+            comprehensive_results['results_by_k'][k] = {
+                'cluster_assignments': cluster_labels.tolist(),
+                'metrics': all_metrics,
+                'kmeans_centers': kmeans.cluster_centers_.tolist()
+            }
+            
+            # 주요 메트릭 로그 출력
+            silhouette = all_metrics['silhouette']['average_score']
+            ch_score = all_metrics['calinski_harabasz']['score']
+            db_score = all_metrics['davies_bouldin']['score']
+            wcss = all_metrics['variance_analysis']['wcss']
+            bcss = all_metrics['variance_analysis']['bcss']
+            
+            logger.info(f"k={k}: Silhouette={silhouette:.4f}, CH={ch_score:.2f}, DB={db_score:.4f}, WCSS={wcss:.2f}, BCSS={bcss:.2f}")
+        
+        # Elbow method 적용
+        elbow_knee = self.calculate_elbow_point(k_values, wcss_scores, method='knee')
+        elbow_derivative = self.calculate_elbow_point(k_values, wcss_scores, method='derivative')
+        elbow_variance = self.calculate_elbow_point(k_values, wcss_scores, method='variance')
+        
+        comprehensive_results['elbow_analysis'] = {
+            'knee_method': elbow_knee,
+            'derivative_method': elbow_derivative,
+            'variance_method': elbow_variance,
+            'wcss_scores': wcss_scores
+        }
+        
+        # 기존 메트릭 기준 최적 k
+        silhouette_scores = [comprehensive_results['results_by_k'][k]['metrics']['silhouette']['average_score'] for k in k_values]
+        ch_scores = [comprehensive_results['results_by_k'][k]['metrics']['calinski_harabasz']['score'] for k in k_values]
+        db_scores = [comprehensive_results['results_by_k'][k]['metrics']['davies_bouldin']['score'] for k in k_values]
+        
+        comprehensive_results['best_k_silhouette'] = k_values[np.argmax(silhouette_scores)]
+        comprehensive_results['best_silhouette_score'] = max(silhouette_scores)
+        comprehensive_results['best_k_calinski_harabasz'] = k_values[np.argmax(ch_scores)]
+        comprehensive_results['best_k_davies_bouldin'] = k_values[np.argmin(db_scores)]
+        
+        # Elbow method 기준 최적 k (가장 신뢰도 높은 방법 선택)
+        elbow_methods = [elbow_knee, elbow_derivative, elbow_variance]
+        best_elbow = max(elbow_methods, key=lambda x: x['confidence'])
+        comprehensive_results['best_k_elbow'] = best_elbow['elbow_k']
+        comprehensive_results['best_elbow_method'] = best_elbow['method']
+        
+        logger.info(f"🎯 Best k for layer {layer_idx}:")
+        logger.info(f"   Silhouette: k={comprehensive_results['best_k_silhouette']} (score: {max(silhouette_scores):.4f})")
+        logger.info(f"   Calinski-Harabasz: k={comprehensive_results['best_k_calinski_harabasz']} (score: {max(ch_scores):.2f})")
+        logger.info(f"   Davies-Bouldin: k={comprehensive_results['best_k_davies_bouldin']} (score: {min(db_scores):.4f})")
+        logger.info(f"   🔥 Elbow Method: k={comprehensive_results['best_k_elbow']} (method: {comprehensive_results['best_elbow_method']})")
+        
+        # 시각화 생성
+        if output_dir:
+            self._create_comprehensive_visualizations_with_elbow(comprehensive_results, flattened_maps, labels, output_dir)
+            
+            # 결과 JSON 저장
+            results_json = comprehensive_results.copy()
+            results_json['feature_names'] = list(feature_names)
+            
+            with open(output_dir / f'layer_{layer_idx}_comprehensive_results_with_elbow.json', 'w') as f:
+                json.dump(results_json, f, indent=2)
+            
+            logger.info(f"✅ Comprehensive analysis (with Elbow) results saved to {output_dir}")
+        
+        return comprehensive_results
+
+    def _create_comprehensive_visualizations_with_elbow(self, results, flattened_maps, labels, output_dir):
+        """Elbow method가 포함된 종합적인 시각화 생성"""
+        layer_idx = results['layer_idx']
+        
+        # 1. 모든 메트릭 + Elbow 비교 플롯
+        self._plot_all_metrics_with_elbow_comparison(results, output_dir)
+        
+        # 2. Elbow method 상세 분석
+        self._plot_detailed_elbow_analysis(results, output_dir)
+        
+        # 3. Within/Between Variance 상세 분석 (기존)
+        self._plot_variance_analysis(results, output_dir)
+        
+        # 4. 모든 최적 k 비교 클러스터링 시각화
+        self._plot_all_optimal_clustering_comparison(results, flattened_maps, labels, output_dir)
+
+    def _plot_all_metrics_with_elbow_comparison(self, results, output_dir):
+        """모든 메트릭과 Elbow method 비교 플롯"""
+        k_values = results['k_values']
+        layer_idx = results['layer_idx']
+        
+        # 메트릭 데이터 추출
+        silhouette_scores = [results['results_by_k'][k]['metrics']['silhouette']['average_score'] for k in k_values]
+        ch_scores = [results['results_by_k'][k]['metrics']['calinski_harabasz']['score'] for k in k_values]
+        db_scores = [results['results_by_k'][k]['metrics']['davies_bouldin']['score'] for k in k_values]
+        wcss_scores = results['elbow_analysis']['wcss_scores']
+        
+        # Elbow 결과
+        elbow_knee = results['elbow_analysis']['knee_method']
+        elbow_derivative = results['elbow_analysis']['derivative_method']
+        elbow_variance = results['elbow_analysis']['variance_method']
+        
+        # 2x3 서브플롯
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # 1. Silhouette Score
+        ax = axes[0, 0]
+        ax.plot(k_values, silhouette_scores, 'bo-', linewidth=2, markersize=8)
+        best_k_sil = results['best_k_silhouette']
+        best_idx = k_values.index(best_k_sil)
+        ax.plot(best_k_sil, silhouette_scores[best_idx], 'ro', markersize=12, markerfacecolor='red')
+        ax.set_title('Silhouette Score')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('Silhouette Score')
+        ax.grid(True, alpha=0.3)
+        ax.axvline(x=best_k_sil, color='red', linestyle='--', alpha=0.7, label=f'Best k={best_k_sil}')
+        ax.legend()
+        
+        # 2. Calinski-Harabasz Index
+        ax = axes[0, 1]
+        ax.plot(k_values, ch_scores, 'go-', linewidth=2, markersize=8)
+        best_k_ch = results['best_k_calinski_harabasz']
+        best_idx_ch = k_values.index(best_k_ch)
+        ax.plot(best_k_ch, ch_scores[best_idx_ch], 'ro', markersize=12, markerfacecolor='red')
+        ax.set_title('Calinski-Harabasz Index')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('CH Score')
+        ax.grid(True, alpha=0.3)
+        ax.axvline(x=best_k_ch, color='red', linestyle='--', alpha=0.7, label=f'Best k={best_k_ch}')
+        ax.legend()
+        
+        # 3. Davies-Bouldin Index
+        ax = axes[0, 2]
+        ax.plot(k_values, db_scores, 'mo-', linewidth=2, markersize=8)
+        best_k_db = results['best_k_davies_bouldin']
+        best_idx_db = k_values.index(best_k_db)
+        ax.plot(best_k_db, db_scores[best_idx_db], 'ro', markersize=12, markerfacecolor='red')
+        ax.set_title('Davies-Bouldin Index (Lower is Better)')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('DB Score')
+        ax.grid(True, alpha=0.3)
+        ax.axvline(x=best_k_db, color='red', linestyle='--', alpha=0.7, label=f'Best k={best_k_db}')
+        ax.legend()
+        
+        # 4. WCSS with Elbow Points
+        ax = axes[1, 0]
+        ax.plot(k_values, wcss_scores, 'co-', linewidth=2, markersize=8, label='WCSS')
+        
+        # Elbow points 표시
+        ax.axvline(x=elbow_knee['elbow_k'], color='red', linestyle='-', alpha=0.8, linewidth=2, label=f'Knee: k={elbow_knee["elbow_k"]}')
+        ax.axvline(x=elbow_derivative['elbow_k'], color='orange', linestyle='--', alpha=0.8, linewidth=2, label=f'Derivative: k={elbow_derivative["elbow_k"]}')
+        ax.axvline(x=elbow_variance['elbow_k'], color='purple', linestyle=':', alpha=0.8, linewidth=2, label=f'Variance: k={elbow_variance["elbow_k"]}')
+        
+        # Best elbow 강조
+        best_elbow_k = results['best_k_elbow']
+        best_elbow_idx = k_values.index(best_elbow_k)
+        ax.plot(best_elbow_k, wcss_scores[best_elbow_idx], 'rs', markersize=15, markerfacecolor='red', markeredgecolor='darkred', markeredgewidth=2)
+        
+        ax.set_title('WCSS with Elbow Points')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('WCSS')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 5. 모든 최적 k 비교
+        ax = axes[1, 1]
+        optimal_ks = {
+            'Silhouette': results['best_k_silhouette'],
+            'Calinski-H': results['best_k_calinski_harabasz'],
+            'Davies-B': results['best_k_davies_bouldin'],
+            'Elbow': results['best_k_elbow']
+        }
+        
+        methods = list(optimal_ks.keys())
+        k_vals = list(optimal_ks.values())
+        colors = ['blue', 'green', 'magenta', 'red']
+        
+        bars = ax.bar(methods, k_vals, color=colors, alpha=0.7)
+        for i, (method, k_val) in enumerate(zip(methods, k_vals)):
+            ax.text(bars[i].get_x() + bars[i].get_width()/2, bars[i].get_height() + 0.1,
+                f'k={k_val}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        
+        ax.set_title('Optimal k by Different Methods')
+        ax.set_xlabel('Method')
+        ax.set_ylabel('Optimal k')
+        ax.grid(True, alpha=0.3)
+        
+        # 6. Elbow Confidence Scores
+        ax = axes[1, 2]
+        elbow_methods = ['Knee', 'Derivative', 'Variance']
+        elbow_confidences = [elbow_knee['confidence'], elbow_derivative['confidence'], elbow_variance['confidence']]
+        elbow_k_vals = [elbow_knee['elbow_k'], elbow_derivative['elbow_k'], elbow_variance['elbow_k']]
+        
+        bars = ax.bar(elbow_methods, elbow_confidences, color=['red', 'orange', 'purple'], alpha=0.7)
+        for i, (method, conf, k_val) in enumerate(zip(elbow_methods, elbow_confidences, elbow_k_vals)):
+            ax.text(bars[i].get_x() + bars[i].get_width()/2, bars[i].get_height() + max(elbow_confidences)*0.02,
+                f'k={k_val}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        
+        ax.set_title('Elbow Method Confidence Scores')
+        ax.set_xlabel('Elbow Method')
+        ax.set_ylabel('Confidence Score')
+        ax.grid(True, alpha=0.3)
+        
+        # 최고 신뢰도 방법 강조
+        best_method_idx = np.argmax(elbow_confidences)
+        bars[best_method_idx].set_edgecolor('black')
+        bars[best_method_idx].set_linewidth(3)
+        
+        plt.suptitle(f'Layer {layer_idx}: Comprehensive Metrics + Elbow Method Comparison', 
+                    fontsize=16, y=0.98)
+        plt.tight_layout()
+        plt.savefig(output_dir / f'layer_{layer_idx}_all_metrics_with_elbow.png', 
+                dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def _plot_detailed_elbow_analysis(self, results, output_dir):
+        """Elbow method 상세 분석 플롯"""
+        k_values = results['k_values']
+        layer_idx = results['layer_idx']
+        wcss_scores = results['elbow_analysis']['wcss_scores']
+        
+        elbow_knee = results['elbow_analysis']['knee_method']
+        elbow_derivative = results['elbow_analysis']['derivative_method']
+        elbow_variance = results['elbow_analysis']['variance_method']
+        
+        # 2x2 서브플롯
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # 1. Knee Method Visualization
+        ax = axes[0, 0]
+        ax.plot(k_values, wcss_scores, 'bo-', linewidth=2, markersize=8, label='WCSS')
+        
+        # Knee point 강조
+        knee_k = elbow_knee['elbow_k']
+        knee_idx = k_values.index(knee_k)
+        ax.plot(knee_k, wcss_scores[knee_idx], 'rs', markersize=15, markerfacecolor='red', 
+                markeredgecolor='darkred', markeredgewidth=2, label=f'Knee Point (k={knee_k})')
+        
+        # 직선 그리기 (첫 점과 마지막 점)
+        ax.plot([k_values[0], k_values[-1]], [wcss_scores[0], wcss_scores[-1]], 
+                'r--', alpha=0.5, linewidth=2, label='Reference Line')
+        
+        # 거리 시각화 (knee point에서)
+        if 'all_distances' in elbow_knee:
+            distances = elbow_knee['all_distances']
+            ax2 = ax.twinx()
+            ax2.plot(k_values, distances, 'g^-', alpha=0.6, markersize=6, label='Distance to Line')
+            ax2.set_ylabel('Distance to Reference Line', color='green')
+            ax2.tick_params(axis='y', labelcolor='green')
+        
+        ax.set_title('Knee Method Analysis')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('WCSS')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # 2. Derivative Method Visualization
+        ax = axes[0, 1]
+        ax.plot(k_values, wcss_scores, 'bo-', linewidth=2, markersize=8, label='WCSS')
+        
+        # Derivative elbow point
+        deriv_k = elbow_derivative['elbow_k']
+        deriv_idx = k_values.index(deriv_k)
+        ax.plot(deriv_k, wcss_scores[deriv_idx], 'rs', markersize=15, markerfacecolor='orange', 
+                markeredgecolor='darkorange', markeredgewidth=2, label=f'Derivative Elbow (k={deriv_k})')
+        
+        # 1차, 2차 미분 시각화
+        if 'first_derivative' in elbow_derivative and 'second_derivative' in elbow_derivative:
+            first_deriv = elbow_derivative['first_derivative']
+            second_deriv = elbow_derivative['second_derivative']
+            
+            ax2 = ax.twinx()
+            k_first = k_values[1:]  # 1차 미분은 하나 적음
+            k_second = k_values[2:]  # 2차 미분은 둘 적음
+            
+            ax2.plot(k_first, first_deriv, 'g^-', alpha=0.6, markersize=4, label='1st Derivative')
+            ax2.plot(k_second, second_deriv, 'mv-', alpha=0.6, markersize=4, label='2nd Derivative')
+            ax2.set_ylabel('Derivative Values', color='green')
+            ax2.tick_params(axis='y', labelcolor='green')
+            ax2.legend(loc='lower right')
+        
+        ax.set_title('Derivative Method Analysis')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('WCSS')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # 3. Variance Method Visualization
+        ax = axes[1, 0]
+        ax.plot(k_values, wcss_scores, 'bo-', linewidth=2, markersize=8, label='WCSS')
+        
+        # Variance elbow point
+        var_k = elbow_variance['elbow_k']
+        var_idx = k_values.index(var_k)
+        ax.plot(var_k, wcss_scores[var_idx], 'rs', markersize=15, markerfacecolor='purple', 
+                markeredgecolor='indigo', markeredgewidth=2, label=f'Variance Elbow (k={var_k})')
+        
+        # 분산 시각화
+        if 'variances' in elbow_variance:
+            variances = elbow_variance['variances']
+            window_size = 3  # 기본값 (실제 계산에서 사용된 값과 맞춰야 함)
+            k_variance = k_values[window_size:-window_size]
+            
+            ax2 = ax.twinx()
+            ax2.plot(k_variance, variances, 'g^-', alpha=0.6, markersize=6, label='Slope Variance')
+            ax2.set_ylabel('Slope Variance', color='green')
+            ax2.tick_params(axis='y', labelcolor='green')
+            ax2.legend(loc='lower right')
+        
+        ax.set_title('Variance Method Analysis')
+        ax.set_xlabel('Number of Clusters (k)')
+        ax.set_ylabel('WCSS')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # 4. Method Comparison Summary
+        ax = axes[1, 1]
+        ax.axis('off')
+        
+        # 요약 텍스트
+        summary_text = f"Elbow Method Analysis Summary\n\n"
+        summary_text += f"Knee Method:\n"
+        summary_text += f"  Optimal k: {elbow_knee['elbow_k']}\n"
+        summary_text += f"  Confidence: {elbow_knee['confidence']:.4f}\n"
+        summary_text += f"  WCSS: {elbow_knee['elbow_wcss']:.2f}\n\n"
+        
+        summary_text += f"Derivative Method:\n"
+        summary_text += f"  Optimal k: {elbow_derivative['elbow_k']}\n"
+        summary_text += f"  Confidence: {elbow_derivative['confidence']:.4f}\n"
+        summary_text += f"  WCSS: {elbow_derivative['elbow_wcss']:.2f}\n\n"
+        
+        summary_text += f"Variance Method:\n"
+        summary_text += f"  Optimal k: {elbow_variance['elbow_k']}\n"
+        summary_text += f"  Confidence: {elbow_variance['confidence']:.4f}\n"
+        summary_text += f"  WCSS: {elbow_variance['elbow_wcss']:.2f}\n\n"
+        
+        # 최고 방법
+        best_method = results['best_elbow_method']
+        best_k = results['best_k_elbow']
+        summary_text += f"🏆 BEST METHOD: {best_method.upper()}\n"
+        summary_text += f"🎯 RECOMMENDED k: {best_k}\n\n"
+        
+        summary_text += f"Method Interpretations:\n"
+        summary_text += f"• Knee: Maximum distance from reference line\n"
+        summary_text += f"• Derivative: Maximum curvature change\n"
+        summary_text += f"• Variance: Slope stabilization point\n"
+        summary_text += f"• Higher confidence = more reliable"
+        
+        ax.text(0.1, 0.9, summary_text, transform=ax.transAxes, fontsize=11,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8))
+        
+        plt.suptitle(f'Layer {layer_idx}: Detailed Elbow Method Analysis', 
+                    fontsize=16, y=0.98)
+        plt.tight_layout()
+        plt.savefig(output_dir / f'layer_{layer_idx}_detailed_elbow_analysis.png', 
+                dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def _plot_all_optimal_clustering_comparison(self, results, flattened_maps, labels, output_dir):
+        """모든 최적 k (Silhouette, CH, DB, Elbow)에 대한 클러스터 분포 시각화"""
+        layer_idx = results['layer_idx']
+        best_k_sil = results['best_k_silhouette']
+        best_k_ch = results['best_k_calinski_harabasz']
+        best_k_db = results['best_k_davies_bouldin']
+        best_k_elbow = results['best_k_elbow']
+        
+        # t-SNE 차원 축소
+        perplexity = min(30, len(flattened_maps)-1, max(1, len(flattened_maps)//3))
+        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+        tsne_embeddings = tsne.fit_transform(flattened_maps)
+        
+        # 2x3 서브플롯 (Elbow 추가)
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # 1. Silhouette 최적 k
+        self._plot_single_clustering_result(
+            tsne_embeddings, flattened_maps, labels, best_k_sil, 
+            f'Silhouette Optimal (k={best_k_sil})', axes[0, 0]
+        )
+        
+        # 2. Calinski-Harabasz 최적 k
+        self._plot_single_clustering_result(
+            tsne_embeddings, flattened_maps, labels, best_k_ch,
+            f'Calinski-Harabasz Optimal (k={best_k_ch})', axes[0, 1]
+        )
+        
+        # 3. Davies-Bouldin 최적 k
+        self._plot_single_clustering_result(
+            tsne_embeddings, flattened_maps, labels, best_k_db,
+            f'Davies-Bouldin Optimal (k={best_k_db})', axes[0, 2]
+        )
+        
+        # 4. Elbow Method 최적 k (NEW!)
+        self._plot_single_clustering_result(
+            tsne_embeddings, flattened_maps, labels, best_k_elbow,
+            f'Elbow Method Optimal (k={best_k_elbow})', axes[1, 0]
+        )
+        
+        # 5. 실제 라벨
+        ax = axes[1, 1]
+        unique_labels = np.unique(labels)
+        label_colors = plt.cm.Set1(np.linspace(0, 1, len(unique_labels)))
+        
+        for i, label in enumerate(unique_labels):
+            mask = labels == label
+            marker = 'o' if label == 0 else 's'
+            ax.scatter(tsne_embeddings[mask, 0], tsne_embeddings[mask, 1], 
+                    c=[label_colors[i]], label=f'True Label {int(label)}', 
+                    alpha=0.7, s=50, marker=marker)
+        
+        ax.set_title('True Labels')
+        ax.set_xlabel('t-SNE Dimension 1')
+        ax.set_ylabel('t-SNE Dimension 2')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 6. 메트릭 비교 요약
+        ax = axes[1, 2]
+        ax.axis('off')
+        
+        # 모든 최적 k 비교
+        methods_k = {
+            'Silhouette': best_k_sil,
+            'Calinski-H': best_k_ch,
+            'Davies-B': best_k_db,
+            'Elbow': best_k_elbow
+        }
+        
+        # 각 k값에 대한 모든 메트릭 스코어 계산
+        comparison_text = f"Optimal k Comparison\n\n"
+        
+        for method, k_val in methods_k.items():
+            k_metrics = results['results_by_k'][k_val]['metrics']
+            sil_score = k_metrics['silhouette']['average_score']
+            ch_score = k_metrics['calinski_harabasz']['score']
+            db_score = k_metrics['davies_bouldin']['score']
+            wcss = k_metrics['variance_analysis']['wcss']
+            
+            comparison_text += f"{method} (k={k_val}):\n"
+            comparison_text += f"  Silhouette: {sil_score:.3f}\n"
+            comparison_text += f"  Calinski-H: {ch_score:.1f}\n"
+            comparison_text += f"  Davies-B: {db_score:.3f}\n"
+            comparison_text += f"  WCSS: {wcss:.1f}\n\n"
+        
+        # 메트릭 일치도
+        unique_ks = len(set(methods_k.values()))
+        comparison_text += f"Method Agreement:\n"
+        comparison_text += f"  Unique k values: {unique_ks}/4\n"
+        
+        if unique_ks == 1:
+            comparison_text += f"  🎯 Perfect agreement!\n"
+        elif unique_ks == 2:
+            comparison_text += f"  ✅ Good agreement\n"
+        elif unique_ks == 3:
+            comparison_text += f"  ⚠️ Mixed results\n"
+        else:
+            comparison_text += f"  ❌ No agreement\n"
+        
+        # 추천사항
+        comparison_text += f"\nRecommendation:\n"
+        most_common_k = max(set(methods_k.values()), key=list(methods_k.values()).count)
+        comparison_text += f"Most common k: {most_common_k}\n"
+        comparison_text += f"Elbow suggests: k={best_k_elbow}\n"
+        
+        # Elbow vs 다른 메트릭 비교
+        if best_k_elbow == best_k_sil:
+            comparison_text += f"✅ Elbow agrees with Silhouette"
+        else:
+            comparison_text += f"⚠️ Elbow differs from Silhouette"
+        
+        ax.text(0.1, 0.9, comparison_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgreen", alpha=0.8))
+        
+        plt.suptitle(f'Layer {layer_idx}: All Optimal Clustering Methods Comparison', 
+                    fontsize=16, y=0.98)
+        plt.tight_layout()
+        plt.savefig(output_dir / f'layer_{layer_idx}_all_optimal_clustering_comparison.png', 
+                dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def _create_cross_layer_comparison_with_elbow(self, metrics_comparison, all_results, output_dir):
+        """Elbow method가 포함된 레이어간 메트릭 비교 시각화"""
+        layers = metrics_comparison['layers']
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # 1. 메트릭별 최적 k 비교 (Elbow 추가)
+        ax = axes[0, 0]
+        sil_ks = [metrics_comparison['silhouette'][layer]['best_k'] for layer in layers]
+        ch_ks = [metrics_comparison['calinski_harabasz'][layer]['best_k'] for layer in layers]
+        db_ks = [metrics_comparison['davies_bouldin'][layer]['best_k'] for layer in layers]
+        elbow_ks = [metrics_comparison['elbow'][layer]['best_k'] for layer in layers]
+        
+        x = np.arange(len(layers))
+        width = 0.2
+        
+        ax.bar(x - 1.5*width, sil_ks, width, label='Silhouette', alpha=0.8)
+        ax.bar(x - 0.5*width, ch_ks, width, label='Calinski-Harabasz', alpha=0.8)
+        ax.bar(x + 0.5*width, db_ks, width, label='Davies-Bouldin', alpha=0.8)
+        ax.bar(x + 1.5*width, elbow_ks, width, label='Elbow', alpha=0.8, color='red')
+        
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('Optimal k')
+        ax.set_title('Optimal k by Different Metrics (Including Elbow)')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'Layer {layer}' for layer in layers])
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 2. Silhouette vs Elbow 상관관계
+        ax = axes[0, 1]
+        ax.scatter(sil_ks, elbow_ks, s=100, alpha=0.7, c=layers, cmap='viridis')
+        for i, layer in enumerate(layers):
+            ax.annotate(f'L{layer}', (sil_ks[i], elbow_ks[i]), xytext=(5, 5), 
+                    textcoords='offset points', fontsize=10)
+        
+        ax.set_xlabel('Silhouette Optimal k')
+        ax.set_ylabel('Elbow Optimal k')
+        ax.set_title('Optimal k Correlation: Silhouette vs Elbow')
+        ax.grid(True, alpha=0.3)
+        
+        # 대각선 참조선
+        min_k = min(min(sil_ks), min(elbow_ks))
+        max_k = max(max(sil_ks), max(elbow_ks))
+        ax.plot([min_k, max_k], [min_k, max_k], 'r--', alpha=0.5, label='Perfect Agreement')
+        ax.legend()
+        
+        # 3. Elbow Method Performance by Layer
+        ax = axes[0, 2]
+        elbow_confidences = [metrics_comparison['elbow'][layer]['confidence'] for layer in layers]
+        elbow_methods = [metrics_comparison['elbow'][layer]['method'] for layer in layers]
+        
+        bars = ax.bar(layers, elbow_confidences, alpha=0.7, color='red')
+        for i, (layer, conf, method, k_val) in enumerate(zip(layers, elbow_confidences, elbow_methods, elbow_ks)):
+            ax.text(bars[i].get_x() + bars[i].get_width()/2, bars[i].get_height() + max(elbow_confidences)*0.02,
+                f'{method}\nk={k_val}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('Elbow Confidence Score')
+        ax.set_title('Elbow Method Confidence by Layer')
+        ax.grid(True, alpha=0.3)
+        
+        # 4. Method Agreement Analysis
+        ax = axes[1, 0]
+        
+        # 각 레이어별 메트릭 일치도 계산
+        agreement_scores = []
+        for layer in layers:
+            layer_ks = [sil_ks[layers.index(layer)], ch_ks[layers.index(layer)], 
+                    db_ks[layers.index(layer)], elbow_ks[layers.index(layer)]]
+            unique_ks = len(set(layer_ks))
+            agreement_score = (4 - unique_ks + 1) / 4  # 1.0 = perfect agreement, 0.25 = no agreement
+            agreement_scores.append(agreement_score)
+        
+        bars = ax.bar(layers, agreement_scores, alpha=0.7, color='green')
+        for i, (layer, score) in enumerate(zip(layers, agreement_scores)):
+            ax.text(bars[i].get_x() + bars[i].get_width()/2, bars[i].get_height() + 0.02,
+                f'{score:.2f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('Method Agreement Score')
+        ax.set_title('Cross-Method Agreement by Layer')
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        
+        # 5. Silhouette Score vs Elbow Method
+        ax = axes[1, 1]
+        sil_scores = [metrics_comparison['silhouette'][layer]['best_score'] for layer in layers]
+        
+        # 색상은 elbow confidence로
+        scatter = ax.scatter(sil_scores, elbow_ks, s=100, c=elbow_confidences, 
+                            cmap='Reds', alpha=0.7, edgecolors='black')
+        
+        for i, layer in enumerate(layers):
+            ax.annotate(f'L{layer}', (sil_scores[i], elbow_ks[i]), xytext=(5, 5), 
+                    textcoords='offset points', fontsize=10)
+        
+        ax.set_xlabel('Best Silhouette Score')
+        ax.set_ylabel('Elbow Optimal k')
+        ax.set_title('Silhouette Quality vs Elbow Recommendation')
+        ax.grid(True, alpha=0.3)
+        
+        # 컬러바
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label('Elbow Confidence')
+        
+        # 6. 종합 요약 (Elbow 포함)
+        ax = axes[1, 2]
+        ax.axis('off')
+        
+        summary_text = "Comprehensive Analysis Summary\n(Including Elbow Method)\n\n"
+        summary_text += f"Layers analyzed: {len(layers)}\n"
+        summary_text += f"Metrics compared: 4 (Sil, CH, DB, Elbow)\n\n"
+        
+        # 전체 메트릭 일치도 분석
+        all_ks = sil_ks + ch_ks + db_ks + elbow_ks
+        complete_agreement = sum(1 for i in range(len(layers)) 
+                            if len(set([sil_ks[i], ch_ks[i], db_ks[i], elbow_ks[i]])) == 1)
+        
+        summary_text += f"Complete agreement: {complete_agreement}/{len(layers)} layers\n"
+        summary_text += f"Avg agreement score: {np.mean(agreement_scores):.2f}\n\n"
+        
+        # Elbow vs Silhouette 일치도
+        elbow_sil_agreement = sum(1 for i in range(len(layers)) if sil_ks[i] == elbow_ks[i])
+        summary_text += f"Elbow-Silhouette agreement: {elbow_sil_agreement}/{len(layers)}\n\n"
+        
+        # 최고 성능 레이어들
+        best_sil_layer = layers[np.argmax(sil_scores)]
+        best_elbow_conf_layer = layers[np.argmax(elbow_confidences)]
+        best_agreement_layer = layers[np.argmax(agreement_scores)]
+        
+        summary_text += f"Best Silhouette: Layer {best_sil_layer}\n"
+        summary_text += f"Most confident Elbow: Layer {best_elbow_conf_layer}\n"
+        summary_text += f"Best agreement: Layer {best_agreement_layer}\n\n"
+        
+        # 최종 추천
+        most_common_k = max(set(all_ks), key=all_ks.count)
+        summary_text += f"🎯 FINAL RECOMMENDATIONS:\n"
+        summary_text += f"Most frequent k: {most_common_k}\n"
+        
+        if elbow_sil_agreement >= len(layers) // 2:
+            summary_text += f"✅ Elbow & Silhouette agree\n"
+            summary_text += f"Recommended: Use Elbow method"
+        else:
+            summary_text += f"⚠️ Mixed results across methods\n"
+            summary_text += f"Recommended: Layer {best_agreement_layer}"
+        
+        ax.text(0.1, 0.9, summary_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightcyan", alpha=0.8))
+        
+        plt.suptitle('Cross-Layer Comprehensive Analysis (with Elbow Method)', 
+                    fontsize=16, y=0.98)
+        plt.tight_layout()
+        plt.savefig(output_dir / 'comprehensive_cross_layer_analysis_with_elbow.png', 
+                dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # 기존 _generate_comprehensive_summary 메서드를 수정
+    def _generate_comprehensive_summary_with_elbow(self, all_results, output_dir):
+        """Elbow method가 포함된 전체 레이어 종합 요약"""
+        layers = sorted([int(k.split('_')[1]) for k in all_results.keys()])
+        
+        # 메트릭별 최적 k 수집 (Elbow 추가)
+        metrics_comparison = {
+            'silhouette': {},
+            'calinski_harabasz': {},
+            'davies_bouldin': {},
+            'elbow': {},  # NEW!
+            'layers': layers
+        }
+        
+        for layer in layers:
+            layer_key = f'layer_{layer}'
+            result = all_results[layer_key]
+            
+            metrics_comparison['silhouette'][layer] = {
+                'best_k': result['best_k_silhouette'],
+                'best_score': result['best_silhouette_score']
+            }
+            metrics_comparison['calinski_harabasz'][layer] = {
+                'best_k': result['best_k_calinski_harabasz'],
+                'best_score': max([result['results_by_k'][k]['metrics']['calinski_harabasz']['score'] 
+                                for k in result['k_values']])
+            }
+            metrics_comparison['davies_bouldin'][layer] = {
+                'best_k': result['best_k_davies_bouldin'],
+                'best_score': min([result['results_by_k'][k]['metrics']['davies_bouldin']['score'] 
+                                for k in result['k_values']])
+            }
+            metrics_comparison['elbow'][layer] = {
+                'best_k': result['best_k_elbow'],
+                'method': result['best_elbow_method'],
+                'confidence': max([result['elbow_analysis']['knee_method']['confidence'],
+                                result['elbow_analysis']['derivative_method']['confidence'],
+                                result['elbow_analysis']['variance_method']['confidence']])
+            }
+        
+        # 종합 비교 시각화 (Elbow 포함)
+        self._create_cross_layer_comparison_with_elbow(metrics_comparison, all_results, output_dir)
+        
+        # 종합 요약 JSON 저장
+        with open(output_dir / 'comprehensive_summary_with_elbow.json', 'w') as f:
+            json.dump(metrics_comparison, f, indent=2)
+        
+        # Elbow 포함 추천사항 로그 출력
+        self._log_recommendations_with_elbow(metrics_comparison)
+
+    def _log_recommendations_with_elbow(self, metrics_comparison):
+        """Elbow method가 포함된 추천사항 로그 출력"""
+        layers = metrics_comparison['layers']
+        
+        logger.info("\n" + "="*80)
+        logger.info("🎯 COMPREHENSIVE ANALYSIS RECOMMENDATIONS (WITH ELBOW METHOD)")
+        logger.info("="*80)
+        
+        # 실루엣 기준 최고 성능 레이어
+        sil_scores = [metrics_comparison['silhouette'][layer]['best_score'] for layer in layers]
+        best_sil_layer = layers[np.argmax(sil_scores)]
+        best_sil_score = max(sil_scores)
+        
+        # Elbow 신뢰도 기준 최고 레이어
+        elbow_confidences = [metrics_comparison['elbow'][layer]['confidence'] for layer in layers]
+        best_elbow_layer = layers[np.argmax(elbow_confidences)]
+        best_elbow_confidence = max(elbow_confidences)
+        
+        logger.info(f"📊 Best performing layer (Silhouette): Layer {best_sil_layer} (score: {best_sil_score:.4f})")
+        logger.info(f"🔥 Most confident Elbow layer: Layer {best_elbow_layer} (confidence: {best_elbow_confidence:.4f})")
+        
+        # 메트릭별 최적 k 일치도 분석
+        sil_ks = [metrics_comparison['silhouette'][layer]['best_k'] for layer in layers]
+        ch_ks = [metrics_comparison['calinski_harabasz'][layer]['best_k'] for layer in layers]
+        db_ks = [metrics_comparison['davies_bouldin'][layer]['best_k'] for layer in layers]
+        elbow_ks = [metrics_comparison['elbow'][layer]['best_k'] for layer in layers]
+        
+        # 완전 일치 (모든 메트릭이 같은 k)
+        complete_agreement = sum(1 for i in range(len(layers)) 
+                            if len(set([sil_ks[i], ch_ks[i], db_ks[i], elbow_ks[i]])) == 1)
+        
+        # Elbow-Silhouette 일치
+        elbow_sil_agreement = sum(1 for i in range(len(layers)) if sil_ks[i] == elbow_ks[i])
+        
+        logger.info(f"🔍 Complete metric agreement: {complete_agreement}/{len(layers)} layers")
+        logger.info(f"🤝 Elbow-Silhouette agreement: {elbow_sil_agreement}/{len(layers)} layers")
+        
+        # 가장 일반적인 최적 k
+        all_ks = sil_ks + ch_ks + db_ks + elbow_ks
+        most_common_k = max(set(all_ks), key=all_ks.count)
+        logger.info(f"🔢 Most frequent optimal k across all metrics: {most_common_k}")
+        
+        # 메트릭별 최적 k 요약
+        logger.info(f"\n📈 Optimal k by metric:")
+        for layer in layers:
+            sil_k = metrics_comparison['silhouette'][layer]['best_k']
+            ch_k = metrics_comparison['calinski_harabasz'][layer]['best_k']
+            db_k = metrics_comparison['davies_bouldin'][layer]['best_k']
+            elbow_k = metrics_comparison['elbow'][layer]['best_k']
+            elbow_method = metrics_comparison['elbow'][layer]['method']
+            logger.info(f"   Layer {layer}: Silhouette={sil_k}, CH={ch_k}, DB={db_k}, Elbow={elbow_k}({elbow_method})")
+        
+        # Elbow method 상세 분석
+        logger.info(f"\n🔥 ELBOW METHOD ANALYSIS:")
+        for layer in layers:
+            elbow_k = metrics_comparison['elbow'][layer]['best_k']
+            elbow_method = metrics_comparison['elbow'][layer]['method']
+            elbow_confidence = metrics_comparison['elbow'][layer]['confidence']
+            logger.info(f"   Layer {layer}: k={elbow_k}, method={elbow_method}, confidence={elbow_confidence:.4f}")
+        
+        # 최종 추천사항
+        logger.info(f"\n🎯 FINAL RECOMMENDATIONS:")
+        
+        if complete_agreement > 0:
+            perfect_layers = [i for i in range(len(layers)) 
+                            if len(set([sil_ks[i], ch_ks[i], db_ks[i], elbow_ks[i]])) == 1]
+            logger.info(f"✅ Layers with perfect agreement: {[layers[i] for i in perfect_layers]}")
+            logger.info(f"✅ Use k={sil_ks[perfect_layers[0]]} for these layers")
+        
+        if elbow_sil_agreement >= len(layers) // 2:
+            logger.info(f"✅ Elbow method mostly agrees with Silhouette - RELIABLE RESULTS")
+            logger.info(f"🎯 PRIMARY RECOMMENDATION: Use Elbow method results")
+        else:
+            logger.info(f"⚠️ Mixed results between Elbow and Silhouette methods")
+            logger.info(f"🎯 RECOMMENDATION: Focus on Layer {best_sil_layer} (best Silhouette)")
+        
+        # 특별한 케이스들
+        if best_sil_layer == best_elbow_layer:
+            logger.info(f"🌟 Layer {best_sil_layer} shows both best Silhouette AND most confident Elbow!")
+        
+        logger.info(f"🔢 Conservative choice: k={most_common_k} (most frequent across all methods)")
+        logger.info("="*80)
+
+    # 메인 분석 함수도 수정 필요
+    def analyze_all_layers_with_elbow(self, data_loader, k_range=(2, 15), output_dir=None):
+        """
+        모든 레이어에 대해 Elbow method가 포함된 종합적인 메트릭 분석을 수행합니다.
+        """
+        if output_dir:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Attention maps 추출
+        logger.info("Extracting attention maps...")
+        attention_data = self.extract_attention_maps(data_loader)
+        
+        # 모든 레이어 분석 (Elbow 포함)
+        all_results = {}
+        for layer_idx in range(len(self.model.layers)):
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Analyzing Layer {layer_idx} (WITH ELBOW METHOD)")
+            logger.info(f"{'='*60}")
+            
+            layer_output_dir = output_dir / f'layer_{layer_idx}' if output_dir else None
+            results = self.perform_comprehensive_analysis_with_elbow(  # 새로운 함수 사용
+                attention_data, 
+                layer_idx, 
+                k_range=k_range,
+                output_dir=layer_output_dir
+            )
+            all_results[f'layer_{layer_idx}'] = results
+        
+        # 전체 요약 생성 (Elbow 포함)
+        if output_dir:
+            self._generate_comprehensive_summary_with_elbow(all_results, output_dir)
+        
+        return all_results
     def _plot_detailed_silhouette_analysis(self, results, flattened_maps, output_dir):
         """상세 실루엣 분석 (기존 스타일과 동일)"""
         layer_idx = results['layer_idx']
@@ -956,7 +1925,7 @@ class ComprehensiveClusteringAnalyzer:
             }
         
         # 종합 비교 시각화
-        self._create_cross_layer_comparison(metrics_comparison, all_results, output_dir)
+        self._create_cross_layer_comparison_with_elbow(metrics_comparison, all_results, output_dir)
         
         # 종합 요약 JSON 저장
         with open(output_dir / 'comprehensive_summary.json', 'w') as f:
@@ -1159,7 +2128,7 @@ def main():
                        help='Which model to use (Full or Few)')
     parser.add_argument('--min_k', type=int, default=2,
                        help='Minimum number of clusters to test (default: 2)')
-    parser.add_argument('--max_k', type=int, default=15,
+    parser.add_argument('--max_k', type=int, default=50,
                        help='Maximum number of clusters to test (default: 15)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory for results')
@@ -1190,7 +2159,8 @@ def main():
     
     # 데이터로더 선택
     if args.mode == 'Full':
-        data_loader = analyzer.train_loader
+        #data_loader = analyzer.train_loader
+        data_loader = analyzer.combined_loader
         logger.info("Using Full dataset loader")
     else:
         data_loader = analyzer.train_loader_few if hasattr(analyzer, 'train_loader_few') else analyzer.test_loader
@@ -1221,8 +2191,8 @@ def main():
         
     else:
         # 모든 레이어 분석
-        logger.info("Analyzing all layers with comprehensive metrics")
-        all_results = analyzer.analyze_all_layers(
+        logger.info("Analyzing all layers with comprehensive metrics + ELBOW METHOD")
+        all_results = analyzer.analyze_all_layers_with_elbow(
             data_loader, 
             k_range=k_range,
             output_dir=args.output_dir

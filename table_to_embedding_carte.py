@@ -1,5 +1,15 @@
-from transformers import LlamaConfig, LlamaModel, LlamaTokenizer, GPT2Config, GPT2Model, GPT2Tokenizer, BertConfig, BertModel, BertTokenizer
+'''
+    << Code Explanation >> 
+    args.carte
+    기본 형태는 CarTE 형식을 따른다.
+    node embedding :  feature value (M), 
+    edge_attribute : feature name (Gender)
+    Main에서의 혼선을 줄이기 위해, 부득이 cat_desc_embeddings에 cat_name_embeddings를 넣도록 한다.
+    따라서, 기본 형태에서는 반드시 --use_desc_attr를 써야 한다. 
+'''
 
+
+from transformers import LlamaConfig, LlamaModel, LlamaTokenizer, GPT2Config, GPT2Model, GPT2Tokenizer, BertConfig, BertModel, BertTokenizer
 import numpy as np 
 import pandas as pd 
 import pdb
@@ -24,6 +34,7 @@ from torch_geometric.data import Data
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import PowerTransformer
 from sklearn.pipeline import make_pipeline
+
 
 class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
     def __init__(
@@ -232,7 +243,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     label_embedding = outputs.last_hidden_state.mean(dim=1)
 
         return label_embedding
-        
+
     def _get_feature_description(self, feature_name: str) -> str:
         if self.source_dataset_name is None:
             ValueError("source_dataset_name is not set")
@@ -244,7 +255,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 # target_binary를 제외한 feature descriptions만 저장
                 self.feature_descriptions = {k: v for k, v in metadata.items() if k != 'target_binary'}
         return self.feature_descriptions.get(feature_name, feature_name)
-
+    
     def transform(self, X, y=None):
         """Apply Table2GraphTransformer to each row of the data
 
@@ -278,7 +289,6 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         X_categorical.columns = self.cat_col_names
         X_numerical = X_.select_dtypes(exclude="object").copy()
         X_numerical.columns = self.num_col_names
-        X_numerical_raw = X_numerical.copy()
         # Features for names
         cat_col_names = X.select_dtypes(include="object").columns 
         cat_col_names = cat_col_names.str.replace("\n", " ", regex=True)
@@ -296,16 +306,15 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         self.is_fitted_ = True
 
         if len(self.num_col_names) != 0:
-            X_numerical = self._transform_num(X_numerical)
+            X_numerical = self._get_num(X_numerical)
         if not self.is_fitted_:
             self.is_fitted = True 
-        
+        #pdb.set_trace()
 
         embedding_data = [
             self._get_embeddings(
                 X_categorical,
                 X_numerical,
-                X_numerical_raw,
                 self.cat_name_to_description,
                 self.num_name_to_description,
                 y_[i] if y_ is not None else None,
@@ -315,193 +324,142 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         ]
 
         return embedding_data
-
-    def _transform_cat(self, X_categorical, X_categorical_total, cat_name_to_description):
-        
-        cat_name_value_embeddings = [] 
-        desc_embeddings = []
-        cat_name_texts = []
-
-        for feature_name in X_categorical.columns:
-            
-            # Description embedding
-            desc = cat_name_to_description[feature_name]
-            cat_name_texts.append(feature_name)
-            #desc_texts.append(desc)
-            if self.llm_model_name == 'sentence-bert':
-                with torch.no_grad():
-                    desc_emb = self.llm_model.encode(desc, convert_to_tensor=True)
-                    
-                    current_value = X_categorical[feature_name].values[0]
-                    unique_values = X_categorical_total[feature_name].unique() 
-                    name_value_text = (
-                        f"{feature_name} can have these values: {','.join(unique_values)} "
-                        f"Current value is {current_value}."
-                    )
-                    name_value_emb = self.llm_model.encode(name_value_text, convert_to_tensor=True)
-                    cat_name_value_embeddings.append(name_value_emb)
-                    desc_embeddings.append(desc_emb)
-            else:
-                desc_input = self.tokenizer(desc, return_tensors="pt", padding=True, truncation=True)
-                with torch.no_grad():
-                    outputs = self.llm_model(**desc_input)
-                    if self.llm_model_name in ["bio-bert", 'bio-clinical-bert']:
-                        desc_emb = outputs.last_hidden_state[:,0,:].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_auto","LLAMA_auto"]:
-                        last_token_idx = (desc_input.attention_mask[0] == 1).sum() - 1 
-                        desc_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-                    else:
-                        desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-                desc_embeddings.append(desc_emb)
-            # Value embeddings
-            current_value = X_categorical[feature_name].values[0]
-            unique_values = X_categorical_total[feature_name].unique() 
-            name_value_text = (
-                f"{feature_name} can have these values: {','.join(unique_values)}. "
-                f"Current value is {current_value}. "
-            )
-            if self.llm_model_name == 'sentence-bert':
-                with torch.no_grad():
-                    name_value_emb = self.llm_model.encode(name_value_text, convert_to_tensor=True)
-            else:
-                name_value_input = self.tokenizer(name_value_text, return_tensors="pt", padding=True, truncation=True)
-                with torch.no_grad():
-                    outputs = self.llm_model(**name_value_input)
-                    if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
-                        name_value_emb = outputs.last_hidden_state[:,0,:].squeeze(0)
-                    elif self.llm_model_name in ["gpt2_auto","LLAMA_auto"]:
-                        last_token_idx = (name_value_input.attention_mask[0] == 1).sum() - 1
-                        name_value_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0) 
-                    elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        name_value_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-                    else:
-                        name_value_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-                cat_name_value_embeddings.append(name_value_emb)
-
-        cat_name_value_embeddings = torch.stack(cat_name_value_embeddings, dim=0)
-        desc_embeddings = torch.stack(desc_embeddings, dim=0)
-        return cat_name_value_embeddings, desc_embeddings, cat_name_texts
     
-
-
-    def _transform_num(self, X):
-        X_num = X.copy()
+    def _get_num(self, X_numerical):
+        X_num = X_numerical.copy() 
         if not self.is_fitted_:
             X_num = self.num_transformer.fit_transform(X_num)
         else:
             X_num = self.num_transformer.transform(X_num)
-        return X_num 
-    
-    def _transform_num_raw(self, x_num_raw, X_numerical_raw_total, num_name_to_desriptions):
-        """
-            수치형 데이터의 임베딩을 생성 (단일 샘플)
-            Args:
-                x_num: torch.Tensor - PowerTransformer 통과한 값들 (n_num_features,)
-                x_num_raw: torch.Tensor - 원본 numerical 값들 (n_num_features,)
-                descriptions: dict - {feature_name: feature_description}
-            Returns:
-                name_embeddings: (n_num_features, embed_dim)
-                desc_embeddings: (n_num_features, embed_dim)
-                prompt_embeddings: (n_num_features, embed_dim)
-        """
-        desc_embeddings = []
-        prompt_embeddings = [] 
-        num_name_texts = []  
-        for i, col_name in enumerate(self.num_col_names):
-            # Name embedding
+        return X_num   
+    def _transform_cat(self, X_categorical, cat_name_to_description): 
+        cat_name_embeddings = []
+        cat_desc_embeddings = [] 
+        cat_value_embeddings = []
+        cat_desc_texts = [] 
+        for feature_name in X_categorical.columns:
             
-            desc = num_name_to_desriptions.get(col_name, col_name)
-            num_name_texts.append(col_name)
-
+            descriptions_ = cat_name_to_description[feature_name]
+            feature_values_ = X_categorical[feature_name].values[0]
+            cat_desc_texts.append(feature_name)
+            descriptions_ = f"{feature_name} : {descriptions_}"
             if self.llm_model_name == 'sentence-bert':
                 with torch.no_grad():
-                    desc_emb = self.llm_model.encode(desc, convert_to_tensor = True)
+                    # Name embedding
+                    feature_name_emb = self.llm_model.encode(feature_name, convert_to_tensor=True)
+                    # Description embedding
+                    feature_desc_emb = self.llm_model.encode(descriptions_, convert_to_tensor=True)
+                    # value embedding 
+                    feature_value_emb = self.llm_model.encode(feature_values_, convert_to_tensor=True)
+                    cat_name_embeddings.append(feature_name_emb)
+                    cat_desc_embeddings.append(feature_desc_emb)
+                    cat_value_embeddings.append(feature_value_emb)
             else:
-                desc_input = self.tokenizer(desc, return_tensors="pt", padding=True, truncation=True)
-
+                #pdb.set_trace()
+                # Name embedding
+                feature_name_input = self.tokenizer(feature_name, return_tensors="pt", padding=True, truncation=True)
+                # Description embedding
+                feature_desc_input = self.tokenizer(descriptions_, return_tensors="pt", padding=True, truncation=True)
+                # Value embedding 
+                feature_value_input = self.tokenizer(feature_values_, return_tensors="pt", padding=True, truncation=True)    
                 with torch.no_grad():
-                    outputs = self.llm_model(**desc_input)
+                    feature_name_output = self.llm_model(**feature_name_input)
+                    feature_desc_output = self.llm_model(**feature_desc_input)
+                    feature_value_output = self.llm_model(**feature_value_input)
                     if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
-                        desc_emb = outputs.last_hidden_state[:,0,:].squeeze(0)
+                        feature_name_emb = feature_name_output.last_hidden_state[:, 0, :].squeeze(0)
+                        feature_desc_emb = feature_desc_output.last_hidden_state[:, 0, :].squeeze(0)
+                        feature_value_emb = feature_value_output.last_hidden_state[:, 0, :].squeeze(0)
                     elif self.llm_model_name in ["gpt2_auto", "LLAMA_auto"]:
-                        last_token_idx = (desc_input.attention_mask[0] == 1).sum() - 1 
-                        desc_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0)
+                        name_last_token_idx = (feature_name_input.attention_mask[0] == 1).sum() -1
+                        desc_last_token_idx = (feature_desc_input.attention_mask[0] == 1).sum() - 1
+                        value_last_token_idx = (feature_value_input.attention_mask[0] ==1).sum() - 1
+                        feature_name_emb = feature_name_output.last_hidden_state[0, name_last_token_idx, :].squeeze(0)
+                        feature_desc_emb = feature_desc_output.last_hidden_state[0, desc_last_token_idx, :].squeeze(0)
+                        feature_value_emb = feature_value_output.last_hidden_state[0, value_last_token_idx, :].squeeze(0)
                     elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
+                        feature_name_emb = feature_name_output.last_hidden_state.mean(dim=1).squeeze(0)
+                        feature_desc_emb = feature_desc_output.last_hidden_state.mean(dim=1).squeeze(0)
+                        feature_value_emb = feature_value_output.last_hidden_state.mean(dim=1).squeeze(0)
                     else:
-                        desc_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
-            desc_embeddings.append(desc_emb)
+                        feature_name_emb = feature_name_output.last_hidden_state.mean(dim=1).squeeze(0)
+                        feature_desc_emb = feature_desc_output.last_hidden_state.mean(dim=1).squeeze(0)
+                        feature_value_emb = feature_value_output.last_hidden_state.mean(dim=1).squeeze(0)
+                cat_name_embeddings.append(feature_name_emb)
+                cat_desc_embeddings.append(feature_desc_emb)
+                cat_value_embeddings.append(feature_value_emb)
+            #pdb.set_trace()
+        cat_name_embeddings = torch.stack(cat_name_embeddings, dim= 0)
+        cat_desc_embeddings = torch.stack(cat_desc_embeddings, dim= 0)
+        cat_value_embeddings = torch.stack(cat_value_embeddings, dim = 0)
+        return cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings, cat_desc_texts 
 
-            col_values = x_num_raw[col_name].values
-            value = col_values[0]
 
-            min_val = X_numerical_raw_total[col_name].min()
-            max_val = X_numerical_raw_total[col_name].max()
-            mean_val = X_numerical_raw_total[col_name].mean() 
-            std_val = X_numerical_raw_total[col_name].std() 
-
-            relative_position = ""
-            if abs(value - mean_val) < 0.1:
-                relative_position = "equal to"
-            elif value > mean_val:
-                std_diff = (value - mean_val) / std_val
-                relative_position = f"{std_diff:.2f} standard deviations above"
-            else:
-                std_diff = (mean_val - value) / std_val
-                relative_position = f"{std_diff:.2f} standard deviations below"
-            
-            bin_category = ""
-            z_score = (value - mean_val) / std_val if std_val > 0 else 0 
-            
-            if abs(z_score) <= 0.5:
-                bin_category = "Within normal range (close to mean)"
-            elif z_score >0.5 and z_score < 1.5:
-                bin_category = "Moderately above mean"
-            elif z_score >=1.5:
-                bin_category = "Significantly above mean"
-            elif z_score <=-0.5 and z_score > -1.5:
-                bin_category = "Moderately below mean"
-            else:
-                bin_category = "Significantly below mean"
-            
-            prompt = (
-                f"The distribution of the column {col_name} is as follows: "
-                f"Column Name: {col_name}."
-                f"Min = {min_val:.2f}, Max = {max_val:.2f}, "
-                f"Mean = {mean_val:.2f}, Std = {std_val:.2f}. "
-                f"Current value: {col_name} = {value:.2f}, which is {relative_position}."
-                f"Relative position: This value {value:.2f} falls in the '{bin_category}' of the distribution."
-            )
-            
-            # 모델별 처리 방식 분기 - 프롬프트 임베딩
+    def _transform_num(self, data_num, num_name_to_description):
+        """
+        Numerical features의 name embedding과 description embedding을 생성
+        
+        Args:
+            data_num: pandas Series - 해당 행의 numerical 데이터
+            num_name_to_description: dict - {feature_name: description}
+        
+        Returns:
+            num_name_embeddings: torch.Tensor
+            num_desc_embeddings: torch.Tensor  
+            num_desc_texts: list
+        """
+        num_name_embeddings = []
+        num_desc_embeddings = []
+        num_desc_texts = []
+        
+        for feature_name, value in data_num.items():
+            description = num_name_to_description[feature_name]
+            num_desc_texts.append(feature_name)
+            #pdb.set_trace()
             if self.llm_model_name == 'sentence-bert':
                 with torch.no_grad():
-                    prompt_emb = self.llm_model.encode(prompt, convert_to_tensor=True)
+                    # Feature name embedding
+                    name_emb = self.llm_model.encode(feature_name, convert_to_tensor=True)
+                    # Feature description embedding
+                    desc_emb = self.llm_model.encode(description, convert_to_tensor=True)
+                    
+                    num_name_embeddings.append(name_emb)
+                    num_desc_embeddings.append(desc_emb)
             else:
-                prompt_input = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+                # Feature name embedding
+                name_input = self.tokenizer(feature_name, return_tensors="pt", padding=True, truncation=True)
+                # Feature description embedding
+                desc_input = self.tokenizer(description, return_tensors="pt", padding=True, truncation=True)
+                
                 with torch.no_grad():
-                    outputs = self.llm_model(**prompt_input)
+                    name_output = self.llm_model(**name_input)
+                    desc_output = self.llm_model(**desc_input)
                     
                     if self.llm_model_name in ["bio-bert", "bio-clinical-bert"]:
-                        prompt_emb = outputs.last_hidden_state[:,0,:].squeeze(0)  # [CLS] 토큰
+                        name_emb = name_output.last_hidden_state[:, 0, :].squeeze(0)
+                        desc_emb = desc_output.last_hidden_state[:, 0, :].squeeze(0)
                     elif self.llm_model_name in ["gpt2_auto", "LLAMA_auto"]:
-                        last_token_idx = (prompt_input.attention_mask[0] == 1).sum() - 1 
-                        prompt_emb = outputs.last_hidden_state[0, last_token_idx, :].squeeze(0)
+                        name_last_idx = (name_input.attention_mask[0] == 1).sum() - 1
+                        desc_last_idx = (desc_input.attention_mask[0] == 1).sum() - 1
+                        name_emb = name_output.last_hidden_state[0, name_last_idx, :].squeeze(0)
+                        desc_emb = desc_output.last_hidden_state[0, desc_last_idx, :].squeeze(0)
                     elif self.llm_model_name in ["gpt2_mean", "LLAMA_mean"]:
-                        prompt_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)
+                        name_emb = name_output.last_hidden_state.mean(dim=1).squeeze(0)
+                        desc_emb = desc_output.last_hidden_state.mean(dim=1).squeeze(0)
                     else:
-                        prompt_emb = outputs.last_hidden_state.mean(dim=1).squeeze(0)  # mean pooling
+                        name_emb = name_output.last_hidden_state.mean(dim=1).squeeze(0)
+                        desc_emb = desc_output.last_hidden_state.mean(dim=1).squeeze(0)
+                
+                num_name_embeddings.append(name_emb)
+                num_desc_embeddings.append(desc_emb)
+        
+        num_name_embeddings = torch.stack(num_name_embeddings, dim=0)
+        num_desc_embeddings = torch.stack(num_desc_embeddings, dim=0)
 
-            prompt_embeddings.append(prompt_emb)
-        desc_embeddings = torch.stack(desc_embeddings, dim=0)
-        prompt_embeddings = torch.stack(prompt_embeddings, dim=0)
-        #pdb.set_trace()
-        return prompt_embeddings, desc_embeddings, num_name_texts
-    
+        return num_name_embeddings, num_desc_embeddings, num_desc_texts
 
-    def _get_embeddings(self, X_categorical, X_numerical, X_numerical_raw, cat_name_to_description, num_name_to_description, y, idx):
+
+    def _get_embeddings(self, X_categorical, X_numerical, cat_name_to_description, num_name_to_description, y, idx):
         """Transform to graph objects.
 
         Parameters
@@ -520,71 +478,69 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         Embedding
         """
         if y is not None:
-            y_ = y.clone()
+            y_ = y.clone() 
         else:
             y_ = torch.tensor([])
         s_idx = idx 
-
         data = {
-            'label_description_embeddings': self.label_embedding,
-            'y': y_,
-            's_idx': s_idx
+            'label_description_embeddings' : self.label_embedding,
+            'y':y_,
+            's_idx' : s_idx
         }
 
-        # Categorical features exist
+        # Categorical features 
         if len(X_categorical.columns) > 0:
             data_cat = X_categorical.iloc[idx]
-            data_cat = data_cat.dropna()
-            
+            data_cat = data_cat.dropna() 
+
             num_cat = len(data_cat)
             if num_cat != 0:
-                data_cat = data_cat.str.replace("\n", " ", regex=True)
-
-                cat_name_value_embeddings, cat_desc_embeddings, cat_desc_texts = self._transform_cat(
+                data_cat = data_cat.str.replace("\n", " ", regex = True)
+                #cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings, cat_name_texts
+                cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings, cat_desc_texts = self._transform_cat(
                     pd.DataFrame(data_cat).T,
-                    X_categorical,
-                    cat_name_to_description)
+                    cat_name_to_description
+                )
+                '''
+                    args.carte
+                    기본 형태는 CarTE 형식을 따른다.
+                    node embedding :  feature value (M), 
+                    edge_attribute : feature name (Gender)
+                    Main에서의 혼선을 줄이기 위해, 부득이 cat_desc_embeddings에 cat_name_embeddings를 넣도록 한다.
+                    따라서, 기본 형태에서는 반드시 --use_desc_attr를 써야 한다. 
+                '''
+                data.update({
+                    'cat_name_value_embeddings' : cat_value_embeddings,
+                    'cat_desc_embeddings' : cat_name_embeddings,
+                    'cat_desc_texts' : cat_desc_texts 
+                })
+        if len(X_numerical.columns) > 0: 
+            data_num = X_numerical.iloc[idx]
+            data_num = data_num.dropna() 
+            num_num = len(data_num)
+
+            if num_num > 0:
+                # 1. Name과 Description embedding 생성
+                num_name_embeddings, num_desc_embeddings, num_desc_texts = self._transform_num(
+                    data_num, num_name_to_description
+                )
+                # 2. PowerTransformed된 수치값들
+                x_num_ = torch.tensor(np.array(data_num).astype("float32"))
+                
+                # 3. 수치값 × name embedding (CarTE 방식)
+                # x_num_를 (n_features, 1)로 reshape하고 name_embeddings와 곱함
+                num_prompt_embeddings = x_num_.view(-1, 1) * num_name_embeddings
                 
                 data.update({
-                    'cat_name_value_embeddings': cat_name_value_embeddings,
-                    'cat_desc_embeddings': cat_desc_embeddings,
-                    'cat_desc_texts': cat_desc_texts
+                    'num_prompt_embeddings': num_prompt_embeddings,  # 수치값 × name embedding
+                    'num_desc_embeddings': num_name_embeddings,     # description embedding (edge attribute용)
+                    'num_desc_texts': num_desc_texts
                 })
-
-        # Numerical features exist
-        if len(X_numerical.columns) > 0:
-            data_num = X_numerical.iloc[idx]
-            data_num = data_num.dropna()
-            num_num = len(data_num)
-            
-            data_num_raw = X_numerical_raw.iloc[idx]
-            data_num_raw = data_num_raw.dropna()
-            num_prompt_embeddings , num_desc_embeddings, num_desc_texts = self._transform_num_raw(
-                pd.DataFrame(data_num_raw).T,
-                X_numerical_raw,
-                num_name_to_description
-            )
-            x_num_ = torch.tensor(np.array(data_num).astype("float32"))
-            num_prompt_embeddings = x_num_.view(-1, 1) * num_prompt_embeddings
-
-            num_prompt_embeddings = num_prompt_embeddings.clone().detach()
-            if num_prompt_embeddings.size(0) == 0:
-                num_prompt_embeddings = num_prompt_embeddings.reshape(0, self.n_components)
-            
-            data.update({
-                'num_prompt_embeddings': num_prompt_embeddings,
-                'num_desc_embeddings': num_desc_embeddings,
-                'num_desc_texts': num_desc_texts
-            })
-        # print(f"label_description_embeddings: {self.label_embedding.shape}")
-        # print(f"y: {y_.shape}") 
-        # print(f"s_idx: {s_idx}")
-        # print(f"cat_name_value_embeddings: {data['cat_name_value_embeddings'].shape}")
-        # print(f"cat_desc_embeddings: {data['cat_desc_embeddings'].shape}")
-        # print(f"cat_desc_texts: {data['cat_desc_texts']}")
-        # print(f"num_prompt_embeddings: {data['num_prompt_embeddings'].shape}")
-        # print(f"num_desc_embeddings: {data['num_desc_embeddings'].shape}")
-        # print(f"num_desc_texts: {data['num_desc_texts']}")
-        # pdb.set_trace()
-        
         return data
+
+
+
+
+
+
+                    

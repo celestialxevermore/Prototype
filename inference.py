@@ -84,15 +84,28 @@ class AttentionInference:
         fix_seed(self.args.random_seed)
         
         # 전체 데이터셋 로더 준비
-        results = prepare_embedding_dataloaders(self.args, self.args.source_dataset_name)
+        results = prepare_embedding_dataloaders(self.args, self.args.source_data)
         self.train_loader, self.val_loader, self.test_loader = results['loaders']
         self.num_classes = results['num_classes']
+        from torch.utils.data import ConcatDataset, DataLoader
         
+        combined_dataset = ConcatDataset([
+            self.train_loader.dataset,
+            self.val_loader.dataset, 
+            self.test_loader.dataset
+        ])
+        
+        self.combined_loader = DataLoader(
+            combined_dataset,
+            batch_size=self.train_loader.batch_size,
+            shuffle=False,
+            num_workers=getattr(self.train_loader, 'num_workers', 0)
+        )
         # Few-shot 로더 준비 (필요한 경우)
         if hasattr(self.args, 'few_shot') and self.args.few_shot > 0:
             self.train_loader_few = get_few_shot_embedding_samples(self.train_loader, self.args)
         
-        logger.info(f"Dataloaders prepared for dataset: {self.args.source_dataset_name}")
+        logger.info(f"Dataloaders prepared for dataset: {self.args.source_data}")
     
     def extract_attention_maps(self, data_loader):
         """
@@ -1592,7 +1605,7 @@ def main():
                        help='Which model to use (Full or Few)')
     parser.add_argument('--layer_idx', type=int, default=2,
                        help='Layer index for clustering (default: 2)')
-    parser.add_argument('--n_clusters', type=int, default=4,
+    parser.add_argument('--n_clusters', type=int, default=8,
                        help='Number of clusters for K-means')
     parser.add_argument('--max_samples', type=int, default=5,
                        help='Maximum number of samples for graph visualization ONLY')
@@ -1629,7 +1642,8 @@ def main():
     
     # 데이터로더 선택
     if args.mode == 'Full':
-        data_loader = inference.train_loader
+        #data_loader = inference.train_loader
+        data_loader = inference.combined_loader
         logger.info("Using Full dataset loader")
     else:
         data_loader = inference.train_loader_few if hasattr(inference, 'train_loader_few') else inference.test_loader

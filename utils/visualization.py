@@ -91,7 +91,7 @@ def visualize_model_structure(model, data_loader, device, args, mode, experiment
     """
 
     
-    base_viz_dir = os.path.join(f"/storage/personal/eungyeop/experiments/visualization/{args.llm_model}/{args.source_dataset_name}/{mode}/{experiment_id}")
+    base_viz_dir = os.path.join(f"/storage/personal/eungyeop/experiments/visualization/{args.llm_model}/{args.source_data}/{mode}/{experiment_id}")
     os.makedirs(base_viz_dir, exist_ok=True)
 
     # 샘플별 디렉토리 미리 생성
@@ -984,7 +984,7 @@ def visualize_results(args, results, exp_dir):
         ax4.legend()
         ax4.grid(True)
 
-    plt.suptitle(f'Training Progress - {args.source_dataset_name} (K={args.few_shot})', y=1.02, fontsize=16)
+    plt.suptitle(f'Training Progress - {args.source_data} (K={args.few_shot})', y=1.02, fontsize=16)
     plt.tight_layout()
     metrics_plot_path = os.path.join(exp_dir, f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.n_heads}_{timestamp}.png")
     plt.savefig(metrics_plot_path)

@@ -51,9 +51,9 @@ def get_args():
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
     parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
-    parser.add_argument('--source_dataset_name', type=str, default='heart', 
+    parser.add_argument('--source_data', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland'])
-    parser.add_argument('--target_dataset_name', type = str, default = 'hungarian')
+    parser.add_argument('--target_data', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
@@ -71,7 +71,9 @@ def get_args():
     parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
     parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
-    parser.add_argument('--use_edge_attr', action='store_true', default = True)
+    parser.add_argument('--use_edge_attr', action='store_true')
+    parser.add_argument('--embed_type', default = 'ours', choices = ['carte', 'carte_desc','ours','ours2', '_'])
+    parser.add_argument('--attn', default='gat', choices= ['gat','att'])
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -213,10 +215,10 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
                 best_threshold = current_threshold
             
             # 🔥 개선: validation AUC가 갱신될 때만 저장
-            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_dataset_name}/{mode}/{experiment_id}"
+            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}/{experiment_id}"
             os.makedirs(checkpoint_dir, exist_ok=True)
             # 항상 같은 파일명으로 덮어쓰기
-            checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pt")
+            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.use_edge_attr}_A:{args.attn}.pt")
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -286,15 +288,18 @@ def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretr
 def main():
     start_time = time.time()
     args  = get_args()
+    
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
     
-    logger.info(f"Starting experiment with dataset: {args.source_dataset_name}")
+    logger.info(f"Starting experiment with dataset: {args.source_data}")
     logger.info(f"Device: {device}")
 
     logger.info("Preparing Tabular datasets...")
+    # if args.embed_type in ['carte', 'carte_desc']:
+    #     args.use_edge_attr = True
 
-    results = prepare_embedding_dataloaders(args, args.source_dataset_name)
+    results = prepare_embedding_dataloaders(args, args.source_data)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
     
@@ -303,7 +308,7 @@ def main():
         train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
         val_loader_few_s = val_loader_full_s
         test_loader_few_s = test_loader_full_s
-    logger.info(f"Datasets prepared, source dataset names : {args.source_dataset_name}")
+    logger.info(f"Datasets prepared, source dataset names : {args.source_data}")
 
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()

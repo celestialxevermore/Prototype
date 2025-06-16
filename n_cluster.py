@@ -85,7 +85,21 @@ class SilhouetteAnalyzer:
         results = prepare_embedding_dataloaders(self.args, self.args.source_dataset_name)
         self.train_loader, self.val_loader, self.test_loader = results['loaders']
         self.num_classes = results['num_classes']
+        # Combined 데이터로더 생성
+        from torch.utils.data import ConcatDataset, DataLoader
         
+        combined_dataset = ConcatDataset([
+            self.train_loader.dataset,
+            self.val_loader.dataset, 
+            self.test_loader.dataset
+        ])
+        
+        self.combined_loader = DataLoader(
+            combined_dataset,
+            batch_size=self.train_loader.batch_size,
+            shuffle=False,
+            num_workers=getattr(self.train_loader, 'num_workers', 0)
+        )
         # Few-shot 로더 준비 (필요한 경우)
         if hasattr(self.args, 'few_shot') and self.args.few_shot > 0:
             self.train_loader_few = get_few_shot_embedding_samples(self.train_loader, self.args)
@@ -693,7 +707,7 @@ def main():
                        help='Which model to use (Full or Few)')
     parser.add_argument('--min_k', type=int, default=2,
                        help='Minimum number of clusters to test (default: 2)')
-    parser.add_argument('--max_k', type=int, default=15,
+    parser.add_argument('--max_k', type=int, default=100,
                        help='Maximum number of clusters to test (default: 15)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory for results')
@@ -724,7 +738,9 @@ def main():
     
     # 데이터로더 선택
     if args.mode == 'Full':
-        data_loader = analyzer.train_loader
+        #data_loader = analyzer.train_loader
+        #data_loader = [analyzer.train_loader, analyzer.val_loader, analyzer.test_loader]
+        data_loader = analyzer.combined_loader
         logger.info("Using Full dataset loader")
     else:
         data_loader = analyzer.train_loader_few if hasattr(analyzer, 'train_loader_few') else analyzer.test_loader

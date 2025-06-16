@@ -373,14 +373,15 @@ def prepare_results_ss(full_ours_results, few_ours_results):
 def save_results_(args, results):
     exp_dir = os.path.join(
         f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
-        args.source_dataset_name,f"args_seed:{args.random_seed}",
-        args.model_type, f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
+        args.source_data,f"args_seed:{args.random_seed}",
+        #args.model_type, f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
+        args.model_type, f"embed:{args.embed_type}_use_edge_attr:{args.use_edge_attr}"
     )
     os.makedirs(exp_dir, exist_ok=True)
     # 데이터셋 파일 경로 구성
     dataset_file_path = os.path.join(
         args.table_path,  # 이미 완전한 경로가 구성되어 있음
-        f"{args.source_dataset_name}.pkl"
+        f"{args.source_data}.pkl"
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -389,7 +390,7 @@ def save_results_(args, results):
 
     data = {
         "Experimental Memo": args.des,
-        "dataset": args.source_dataset_name,
+        "dataset": args.source_data,
         "dataset_file_path": dataset_file_path,
         "timestamp": timestamp,
         "hyperparameters": {
@@ -407,10 +408,12 @@ def save_results_(args, results):
             "threshold": args.threshold,
         },
         "model_type": args.model_type,
-        "aggr_type": args.aggr_type,
+        #"aggr_type": args.aggr_type,
         "label": args.label,
-        "enc_type": args.enc_type,
-        "meta_type": args.meta_type,
+        #"enc_type": args.enc_type,
+        #"meta_type": args.meta_type,
+        "embed_type": args.embed_type,
+        "use_edge_attr": args.use_edge_attr,
         "results": results['Best_results']
     }
     
@@ -424,15 +427,16 @@ def save_results_(args, results):
 def save_results_st(args, results_s, results_t):
     exp_dir = os.path.join(
         'experiments/source_to_target_NEW',
-        f"{args.source_dataset_name}_to_{args.target_dataset_name}",f"args_seed:{args.random_seed}",
+        f"{args.source_data}_to_{args.target_dataset_name}",f"args_seed:{args.random_seed}",
         args.model_type,
         f"{args.graph_type}_{args.FD}_{args.center_type}"
     )
+
     os.makedirs(exp_dir, exist_ok=True)
 
     source_dataset_path = os.path.join(
         args.graph_path,
-        f"{args.source_dataset_name}.pkl"
+        f"{args.source_data}.pkl"
     )
     target_dataset_path = os.path.join(
         args.graph_path,
@@ -445,7 +449,7 @@ def save_results_st(args, results_s, results_t):
 
     data = {
         "Experimental Memo": args.des,
-        "source_dataset": args.source_dataset_name,
+        "source_dataset": args.source_data,
         "target_dataset": args.target_dataset_name,
         "source_dataset_path": source_dataset_path,
         "target_dataset_path": target_dataset_path,
@@ -530,7 +534,7 @@ def save_ml_results(args, results):
     
     exp_dir = os.path.join(
         f'experiments/ml_baselines_{args.base_dir}',
-        args.source_dataset_name,
+        args.source_data,
         f"args_seed:{args.random_seed}",
         baseline_name  # 모델 이름으로 서브디렉토리 생성
     )
@@ -538,7 +542,7 @@ def save_ml_results(args, results):
 
     dataset_file_path = os.path.join(
         args.table_path,
-        f"{args.source_dataset_name}.csv"
+        f"{args.source_data}.csv"
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -547,7 +551,7 @@ def save_ml_results(args, results):
 
     data = {
         "Experimental Memo": args.des,
-        "dataset": args.source_dataset_name,
+        "dataset": args.source_data,
         "dataset_file_path": dataset_file_path,
         "timestamp": timestamp,
         "hyperparameters": {

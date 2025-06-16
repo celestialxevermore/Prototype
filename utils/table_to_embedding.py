@@ -253,6 +253,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         name_embeddings = torch.stack(name_embeddings, dim=0)
         desc_embeddings = torch.stack(desc_embeddings, dim=0)
         value_embeddings = torch.stack(value_embeddings, dim=0)
+        pdb.set_trace()
         return name_embeddings, desc_embeddings, value_embeddings
     
 
@@ -263,6 +264,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             X_num = self.num_transformer.fit_transform(X_num)
         else:
             X_num = self.num_transformer.transform(X_num)
+        pdb.set_trace()
         return X_num 
     
     def _transform_num_raw(self, x_num_raw, num_name_to_desriptions):
@@ -317,7 +319,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         name_embeddings = torch.stack(name_embeddings, dim=0)
         desc_embeddings = torch.stack(desc_embeddings, dim=0)
         prompt_embeddings = torch.stack(prompt_embeddings, dim=0)
-
+        pdb.set_trace()
         return name_embeddings, desc_embeddings, prompt_embeddings
     
 
@@ -393,5 +395,5 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 'num_desc_embeddings': num_desc_embeddings,
                 'num_prompt_embeddings': num_prompt_embeddings,
             })
-        
+        pdb.set_trace()
         return data

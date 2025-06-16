@@ -120,6 +120,7 @@ class AdaptiveGraphAttention(nn.Module):
             
             attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
         else:
+            
             # 기본 attention (adjacency만 사용)
             attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
@@ -146,7 +147,7 @@ class Model(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.source_dataset_name = args.source_dataset_name
+        self.source_data = args.source_data
         num_layers = args.num_layers
         dropout_rate = args.dropout_rate
         llm_model = args.llm_model
@@ -217,7 +218,7 @@ class Model(nn.Module):
             experiment_id (str): 실험 ID (예: "20250604_224705")
             mode (str): "Full" 또는 "Few"
         """
-        base_viz_dir = f"/storage/personal/eungyeop/experiments/visualization/{self.args.llm_model}/{self.args.source_dataset_name}/{mode}/{experiment_id}"
+        base_viz_dir = f"/storage/personal/eungyeop/experiments/visualization/{self.args.llm_model}/{self.args.source_data}/{mode}/{experiment_id}"
         self.attention_save_dir = os.path.join(base_viz_dir, 'attention_maps')
         os.makedirs(self.attention_save_dir, exist_ok=True)
         logger.info(f"Attention maps will be saved to: {self.attention_save_dir}")

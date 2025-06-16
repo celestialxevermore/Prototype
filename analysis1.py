@@ -1,9 +1,9 @@
 """
-간소화된 클러스터 분석 스크립트
+간소화된 클러스터 분석 스크립트 (개선된 CLSI 적용)
 
 inference.py에서 생성된 클러스터링 결과를 분석하여
 저장된 NPZ 파일만을 참조하여 클러스터별 라벨 분포와 비율을 시각화합니다.
-예측값이나 성능 메트릭 분석은 포함하지 않습니다.
+개선된 CLSI (Cluster Label Specialization Index)를 사용합니다.
 
 Usage:
    python analysis1.py --clustering_dir /path/to/clustering/results
@@ -24,8 +24,8 @@ warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SimplifiedClusterAnalyzer:
-   def __init__(self, clustering_dir):
+class ClusterAnalyzer:
+    def __init__(self, clustering_dir):
        """
        Args:
            clustering_dir (str): clustering results 디렉토리 경로
@@ -36,9 +36,9 @@ class SimplifiedClusterAnalyzer:
        # 클러스터링 결과 로드
        self._load_clustering_results()
        
-       logger.info(f"SimplifiedClusterAnalyzer initialized for {len(self.layer_results)} layers")
+       logger.info(f"ClusterAnalyzer initialized for {len(self.layer_results)} layers")
    
-   def _load_clustering_results(self):
+    def _load_clustering_results(self):
        """클러스터링 결과 디렉토리에서 NPZ 데이터만 로드"""
        
        # clustering_results 폴더 확인
@@ -106,7 +106,7 @@ class SimplifiedClusterAnalyzer:
            
            logger.info(f"Layer {layer_idx}: {total_samples} samples in {len(cluster_data)} clusters")
 
-   def analyze_layer_label_distribution(self, layer_idx, output_dir):
+    def analyze_layer_label_distribution(self, layer_idx, output_dir):
        """특정 레이어의 라벨 분포 분석 및 시각화 (라벨 분포만 분석)"""
        if layer_idx not in self.layer_results:
            logger.error(f"Layer {layer_idx} not found in clustering results")
@@ -142,7 +142,7 @@ class SimplifiedClusterAnalyzer:
        
        return cluster_label_data, stats_results
    
-   def _perform_chi_square_test(self, cluster_label_data, all_labels, layer_idx):
+    def _perform_chi_square_test(self, cluster_label_data, all_labels, layer_idx):
        """Chi-square 검정 수행 (라벨 분포 차이만 검정)"""
        stats_results = {
            'layer_idx': layer_idx,
@@ -179,7 +179,7 @@ class SimplifiedClusterAnalyzer:
        
        return stats_results
    
-   def _plot_label_distribution_simple(self, cluster_label_data, all_labels, stats_results, layer_idx, output_dir):
+    def _plot_label_distribution_simple(self, cluster_label_data, all_labels, stats_results, layer_idx, output_dir):
        """라벨 분포 시각화 (NPZ 데이터만 사용)"""
        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
        
@@ -256,7 +256,7 @@ class SimplifiedClusterAnalyzer:
        
        logger.info(f"Label distribution plot saved for layer {layer_idx}")
    
-   def _convert_numpy_types(self, obj):
+    def _convert_numpy_types(self, obj):
        """numpy 타입을 JSON 직렬화 가능한 Python 타입으로 변환"""
        if isinstance(obj, np.integer):
            return int(obj)
@@ -273,7 +273,7 @@ class SimplifiedClusterAnalyzer:
        else:
            return obj
    
-   def _save_layer_analysis_results(self, cluster_label_data, all_labels, stats_results, layer_idx, output_dir):
+    def _save_layer_analysis_results(self, cluster_label_data, all_labels, stats_results, layer_idx, output_dir):
        """레이어 분석 결과를 JSON으로 저장"""
        results = {
            'layer_idx': layer_idx,
@@ -307,25 +307,118 @@ class SimplifiedClusterAnalyzer:
        
        logger.info(f"Label distribution results saved to {results_file}")
 
-   def cluster_label_specialization_index(self, cluster_label_data):
+    def cluster_entropy_metric(self, cluster_label_data):
        """
-       Cluster Label Specialization Index (CLSI) 계산
+       클러스터별 엔트로피 기반 메트릭 계산
        
-       클러스터들이 라벨에 대해 얼마나 특화되어 있는지 측정
-       0.0 = 모든 클러스터가 50:50 분포 (특화 안됨)
-       1.0 = 클러스터들이 뚜렷하게 서로 다른 라벨로 특화됨
+       엔트로피는 클러스터 내 라벨 분포의 불확실성을 측정
+       - 낮은 엔트로피: 특정 라벨에 집중 (좋은 클러스터)
+       - 높은 엔트로피: 라벨이 고르게 분포 (나쁜 클러스터)
        
        Args:
            cluster_label_data: {cluster_id: [labels]} 형태의 딕셔너리
            
        Returns:
-           float: CLSI 점수 (0.0 ~ 1.0)
+           dict: 엔트로피 메트릭과 상세 정보
        """
-       if len(cluster_label_data) <= 1:
-           return 0.0
+       if len(cluster_label_data) == 0:
+           return {
+               'mean_entropy': 0.0,
+               'weighted_mean_entropy': 0.0,
+               'entropy_score': 1.0,
+               'cluster_entropies': []
+           }
+       
+       cluster_entropies = []
+       cluster_sizes = []
+       total_samples = 0
+       
+       for cluster_id, labels in cluster_label_data.items():
+           if len(labels) == 0:
+               continue
+               
+           # 라벨 비율 계산
+           label_0_count = labels.count(0)
+           label_1_count = labels.count(1)
+           total = len(labels)
+           total_samples += total
+           
+           label_0_ratio = label_0_count / total
+           label_1_ratio = label_1_count / total
+           
+           # 엔트로피 계산 (비트 단위)
+           entropy = 0.0
+           if label_0_ratio > 0:
+               entropy -= label_0_ratio * np.log2(label_0_ratio)
+           if label_1_ratio > 0:
+               entropy -= label_1_ratio * np.log2(label_1_ratio)
+           
+           cluster_entropies.append({
+               'cluster_id': cluster_id,
+               'entropy': entropy,
+               'size': total,
+               'label_0_ratio': label_0_ratio,
+               'label_1_ratio': label_1_ratio,
+               'purity': max(label_0_ratio, label_1_ratio)
+           })
+           cluster_sizes.append(total)
+       
+       if len(cluster_entropies) == 0:
+           return {
+               'mean_entropy': 0.0,
+               'weighted_mean_entropy': 0.0,
+               'entropy_score': 1.0,
+               'cluster_entropies': []
+           }
+       
+       # 평균 엔트로피 (단순 평균)
+       entropies = [c['entropy'] for c in cluster_entropies]
+       mean_entropy = np.mean(entropies)
+       
+       # 가중 평균 엔트로피 (클러스터 크기로 가중)
+       weighted_entropy = sum(c['entropy'] * c['size'] for c in cluster_entropies) / total_samples
+       
+       # 엔트로피 점수 (0=최악, 1=최고)
+       # 최대 엔트로피는 1.0 (50:50 분포), 최소 엔트로피는 0.0 (100:0 분포)
+       entropy_score = 1.0 - weighted_entropy  # 낮은 엔트로피가 높은 점수
+       
+       return {
+           'mean_entropy': mean_entropy,
+           'weighted_mean_entropy': weighted_entropy,
+           'entropy_score': entropy_score,
+           'n_clusters': len(cluster_entropies),
+           'cluster_entropies': cluster_entropies
+       }
+
+    def cluster_label_specialization_index(self, cluster_label_data):
+       """
+       Cluster Label Specialization Index (CLSI) 계산
+       
+       개선된 CLSI: bias × (1 + diversity/2)
+       - 편향도(bias)를 주요 지표로 사용
+       - 다양성(diversity)은 보너스 요소로 활용
+       
+       클러스터들이 라벨에 대해 얼마나 특화되어 있는지 측정
+       0.0 = 모든 클러스터가 50:50 분포 (특화 안됨)
+       1.5 = 클러스터들이 완벽하게 양방향으로 특화됨 (최고 점수)
+       
+       Args:
+           cluster_label_data: {cluster_id: [labels]} 형태의 딕셔너리
+           
+       Returns:
+           dict: CLSI 점수와 상세 정보
+       """
+       if len(cluster_label_data) == 0:
+           return {
+               'clsi': 0.0,
+               'mean_bias': 0.0,
+               'diversity': 0.0,
+               'cluster_details': []
+           }
        
        cluster_biases = []
        label_0_ratios = []
+       cluster_details = []
        
        for cluster_id, labels in cluster_label_data.items():
            if len(labels) == 0:
@@ -339,13 +432,28 @@ class SimplifiedClusterAnalyzer:
            label_0_ratio = label_0_count / total
            label_1_ratio = label_1_count / total
            
-           # 편향도: 0.5에서 얼마나 멀리 떨어져 있는지
+           # 편향도: 0.5에서 얼마나 멀리 떨어져 있는지 (0~1 범위)
            bias = abs(label_0_ratio - 0.5) * 2
            cluster_biases.append(bias)
            label_0_ratios.append(label_0_ratio)
+           
+           cluster_details.append({
+               'cluster_id': cluster_id,
+               'size': total,
+               'label_0_ratio': label_0_ratio,
+               'label_1_ratio': label_1_ratio,
+               'bias': bias,
+               'dominant_label': 0 if label_0_ratio > 0.5 else 1,
+               'confidence': max(label_0_ratio, label_1_ratio)
+           })
        
        if len(cluster_biases) == 0:
-           return 0.0
+           return {
+               'clsi': 0.0,
+               'mean_bias': 0.0,
+               'diversity': 0.0,
+               'cluster_details': []
+           }
        
        # 평균 편향도 (개별 클러스터들이 얼마나 특화되었는지)
        mean_bias = np.mean(cluster_biases)
@@ -358,23 +466,27 @@ class SimplifiedClusterAnalyzer:
            diversity = np.var(label_0_ratios) * 4
            diversity = min(diversity, 1.0)  # 1.0 초과 방지
        
-       # 종합 점수 (편향도와 다양성의 조화 평균)
-       if mean_bias + diversity == 0:
-           clsi = 0.0
-       else:
-           clsi = 2 * (mean_bias * diversity) / (mean_bias + diversity)
+       # CLSI 계산 (개선된 버전)
+       clsi = mean_bias * (1 + diversity / 2)
        
-       return clsi
+       return {
+           'clsi': clsi,
+           'mean_bias': mean_bias,
+           'diversity': diversity,
+           'n_clusters': len(cluster_biases),
+           'cluster_details': cluster_details
+       }
 
-   def analyze_layer_specialization(self, output_base_dir):
-       """모든 레이어의 CLSI 계산 및 시각화"""
+    def analyze_layer_specialization(self, output_base_dir):
+       """모든 레이어의 CLSI 및 엔트로피 계산 및 시각화"""
        output_base_dir = Path(output_base_dir)
        output_base_dir.mkdir(parents=True, exist_ok=True)
        
        clsi_results = {}
+       entropy_results = {}
        detailed_results = {}
        
-       logger.info("Starting CLSI (Cluster Label Specialization Index) analysis...")
+       logger.info("Starting CLSI and Entropy analysis...")
        
        for layer_idx in sorted(self.layer_results.keys()):
            layer_data = self.layer_results[layer_idx]
@@ -387,152 +499,160 @@ class SimplifiedClusterAnalyzer:
                cluster_label_data[cluster_id] = labels
            
            # CLSI 계산
-           clsi_score = self.cluster_label_specialization_index(cluster_label_data)
-           clsi_results[layer_idx] = clsi_score
+           clsi_result = self.cluster_label_specialization_index(cluster_label_data)
+           clsi_results[layer_idx] = clsi_result['clsi']
            
-           # 상세 정보 수집
-           cluster_details = []
-           for cluster_id, labels in cluster_label_data.items():
-               if len(labels) > 0:
-                   label_0_count = labels.count(0)
-                   label_1_count = labels.count(1)
-                   total = len(labels)
-                   label_0_ratio = label_0_count / total
-                   bias = abs(label_0_ratio - 0.5) * 2
-                   
-                   cluster_details.append({
-                       'cluster_id': cluster_id,
-                       'size': total,
-                       'label_0_ratio': label_0_ratio,
-                       'label_1_ratio': 1 - label_0_ratio,
-                       'bias': bias
-                   })
+           # 엔트로피 계산
+           entropy_result = self.cluster_entropy_metric(cluster_label_data)
+           entropy_results[layer_idx] = entropy_result
            
+           # 결합 결과 저장
            detailed_results[layer_idx] = {
-               'clsi_score': clsi_score,
-               'n_clusters': len(cluster_label_data),
-               'cluster_details': cluster_details
+               'clsi': clsi_result,
+               'entropy': entropy_result
            }
            
-           logger.info(f"Layer {layer_idx}: CLSI = {clsi_score:.4f}")
+           logger.info(f"Layer {layer_idx}: CLSI = {clsi_result['clsi']:.4f}, "
+                      f"Entropy Score = {entropy_result['entropy_score']:.4f}")
        
        # 시각화
-       self._plot_clsi_progression(clsi_results, detailed_results, output_base_dir)
+       self._plot_clsi_entropy_progression(clsi_results, entropy_results, detailed_results, output_base_dir)
        
        # 상세 리포트 저장
-       self._save_clsi_detailed_report(detailed_results, output_base_dir)
+       self._save_clsi_entropy_detailed_report(detailed_results, output_base_dir)
        
-       return clsi_results, detailed_results
+       return clsi_results, entropy_results, detailed_results
 
-   def _plot_clsi_progression(self, clsi_results, detailed_results, output_dir):
-       """레이어별 CLSI 진행 상황 시각화"""
-       
-       fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-       
-       layers = sorted(clsi_results.keys())
-       scores = [clsi_results[layer] for layer in layers]
-       
-       # 1. 레이어별 CLSI 점수
-       ax = axes[0, 0]
-       colors = ['red', 'orange', 'green'] if len(layers) == 3 else plt.cm.viridis(np.linspace(0, 1, len(layers)))
-       bars = ax.bar(layers, scores, color=colors, alpha=0.7)
-       ax.set_title('Cluster Label Specialization Index by Layer', fontsize=14, fontweight='bold')
-       ax.set_xlabel('Layer')
-       ax.set_ylabel('CLSI Score')
-       ax.set_ylim(0, 1)
-       ax.grid(True, alpha=0.3)
-       
-       # 점수 표시
-       for bar, score in zip(bars, scores):
-           ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                  f'{score:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=11)
-       
-       # 2. 레이어 간 개선도
-       ax = axes[0, 1]
-       if len(layers) > 1:
-           improvements = [scores[i+1] - scores[i] for i in range(len(scores)-1)]
-           transition_labels = [f'L{layers[i]}→L{layers[i+1]}' for i in range(len(layers)-1)]
-           
-           colors = ['green' if imp > 0 else 'red' for imp in improvements]
-           bars2 = ax.bar(range(len(improvements)), improvements, color=colors, alpha=0.7)
-           ax.set_title('CLSI Improvement Between Layers', fontsize=14, fontweight='bold')
-           ax.set_xlabel('Layer Transition')
-           ax.set_ylabel('CLSI Improvement')
-           ax.set_xticks(range(len(improvements)))
-           ax.set_xticklabels(transition_labels)
-           ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-           ax.grid(True, alpha=0.3)
-           
-           # 개선도 값 표시
-           for bar, imp in zip(bars2, improvements):
-               ax.text(bar.get_x() + bar.get_width()/2, 
-                      bar.get_height() + (0.01 if imp > 0 else -0.02),
-                      f'{imp:+.3f}', ha='center', 
-                      va='bottom' if imp > 0 else 'top', fontweight='bold')
-       else:
-           ax.text(0.5, 0.5, 'Need at least 2 layers\nfor improvement analysis', 
-                  ha='center', va='center', transform=ax.transAxes, fontsize=12)
-           ax.set_title('CLSI Improvement Between Layers')
-       
-       # 3. 클러스터 편향도 분포
-       ax = axes[1, 0]
-       for i, layer_idx in enumerate(layers):
-           layer_details = detailed_results[layer_idx]
-           biases = [cluster['bias'] for cluster in layer_details['cluster_details']]
-           
-           if biases:
-               ax.hist(biases, alpha=0.6, label=f'Layer {layer_idx}', bins=10, density=True)
-       
-       ax.set_xlabel('Cluster Bias (0=균등, 1=완전편향)')
-       ax.set_ylabel('Density')
-       ax.set_title('Cluster Bias Distribution by Layer', fontsize=14, fontweight='bold')
-       ax.legend()
-       ax.grid(True, alpha=0.3)
-       
-       # 4. 요약 정보
-       ax = axes[1, 1]
-       ax.axis('off')
-       
-       summary_text = "CLSI Analysis Summary\n\n"
-       summary_text += f"Layers analyzed: {len(layers)}\n"
-       summary_text += f"CLSI Range: {min(scores):.3f} - {max(scores):.3f}\n\n"
-       
-       summary_text += "Layer-wise CLSI:\n"
-       for layer_idx in layers:
-           score = clsi_results[layer_idx]
-           n_clusters = detailed_results[layer_idx]['n_clusters']
-           summary_text += f"Layer {layer_idx}: {score:.3f} ({n_clusters} clusters)\n"
-       
-       if len(layers) > 1:
-           overall_improvement = scores[-1] - scores[0]
-           summary_text += f"\nOverall improvement: {overall_improvement:+.3f}\n"
-           
-           if overall_improvement > 0.1:
-               summary_text += "✅ Strong specialization progression"
-           elif overall_improvement > 0.05:
-               summary_text += "🔄 Moderate specialization progression"
-           else:
-               summary_text += "⚠️ Limited specialization progression"
-       
-       # 해석 가이드
-       summary_text += "\n\nCLSI Interpretation:\n"
-       summary_text += "0.0-0.3: Low specialization\n"
-       summary_text += "0.3-0.6: Moderate specialization\n"
-       summary_text += "0.6-1.0: High specialization"
-       
-       ax.text(0.1, 0.9, summary_text, transform=ax.transAxes, fontsize=11,
-               verticalalignment='top', fontfamily='monospace',
-               bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
-       
-       plt.suptitle('Cluster Label Specialization Analysis\n(GAT Layer Evolution)', 
-                   fontsize=16, fontweight='bold', y=0.98)
-       plt.tight_layout()
-       plt.savefig(output_dir / 'clsi_analysis.png', dpi=300, bbox_inches='tight')
-       plt.close(fig)
-       
-       logger.info("CLSI analysis plot saved")
-
-   def _save_clsi_detailed_report(self, detailed_results, output_dir):
+    def _plot_clsi_entropy_progression(self, clsi_results, entropy_results, detailed_results, output_dir):
+        """레이어별 CLSI와 엔트로피 진행 상황 시각화"""
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        layers = sorted(clsi_results.keys())
+        clsi_scores = [clsi_results[layer] for layer in layers]
+        entropy_scores = [entropy_results[layer]['entropy_score'] for layer in layers]
+        mean_entropies = [entropy_results[layer]['mean_entropy'] for layer in layers]
+        
+        # 1. 레이어별 CLSI 점수
+        ax = axes[0, 0]
+        colors = ['red', 'orange', 'green'] if len(layers) == 3 else plt.cm.viridis(np.linspace(0, 1, len(layers)))
+        bars = ax.bar(layers, clsi_scores, color=colors, alpha=0.7)
+        ax.set_title('CLSI Score by Layer', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('CLSI Score')
+        ax.set_ylim(0, max(1.5, max(clsi_scores) * 1.1))
+        ax.grid(True, alpha=0.3)
+        
+        # 점수 표시
+        for bar, score in zip(bars, clsi_scores):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{score:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+        
+        # 2. 레이어별 엔트로피 점수
+        ax = axes[0, 1]
+        bars2 = ax.bar(layers, entropy_scores, color='purple', alpha=0.7)
+        ax.set_title('Entropy Score by Layer', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('Entropy Score (1-entropy)')
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        
+        # 점수 표시
+        for bar, score in zip(bars2, entropy_scores):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{score:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+        
+        # 3. 클러스터 순도(Purity) 분포
+        ax = axes[0, 2]
+        for i, layer_idx in enumerate(layers):
+            entropy_data = detailed_results[layer_idx]['entropy']
+            purities = [c['purity'] for c in entropy_data['cluster_entropies']]
+            if purities:
+                ax.hist(purities, alpha=0.6, label=f"Layer {layer_idx}", bins=10, density=True)
+        
+        ax.set_xlabel('Cluster Purity (max label ratio)')
+        ax.set_ylabel('Density')
+        ax.set_title('Cluster Purity Distribution by Layer', fontsize=14, fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0.5, 1.0)
+        
+        # 4. 평균 엔트로피 값 (실제 엔트로피)
+        ax = axes[1, 0]
+        bars5 = ax.bar(layers, mean_entropies, color='orange', alpha=0.7)
+        ax.set_title('Mean Entropy by Layer', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('Entropy (bits)')
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        
+        # 엔트로피 값 표시
+        for bar, entropy in zip(bars5, mean_entropies):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{entropy:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+        
+        # 5. 클러스터별 엔트로피 분포
+        ax = axes[1, 1]
+        for i, layer_idx in enumerate(layers):
+            entropy_data = detailed_results[layer_idx]['entropy']
+            entropies = [c['entropy'] for c in entropy_data['cluster_entropies']]
+            
+            if entropies:
+                ax.hist(entropies, alpha=0.6, label=f'Layer {layer_idx}', bins=10, density=True)
+        
+        ax.set_xlabel('Cluster Entropy (bits)')
+        ax.set_ylabel('Density')
+        ax.set_title('Cluster Entropy Distribution by Layer', fontsize=14, fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 6. 요약 정보
+        ax = axes[1, 2]
+        ax.axis('off')
+        
+        summary_text = "Analysis Summary\n\n"
+        summary_text += f"Layers analyzed: {len(layers)}\n\n"
+        
+        summary_text += "CLSI Results:\n"
+        summary_text += f"Range: {min(clsi_scores):.3f} - {max(clsi_scores):.3f}\n"
+        for layer_idx in layers:
+            summary_text += f"Layer {layer_idx}: {clsi_results[layer_idx]:.3f}\n"
+        
+        summary_text += "\nEntropy Results:\n"
+        summary_text += f"Score Range: {min(entropy_scores):.3f} - {max(entropy_scores):.3f}\n"
+        for layer_idx in layers:
+            entropy_score = entropy_results[layer_idx]['entropy_score']
+            mean_entropy = entropy_results[layer_idx]['mean_entropy']
+            summary_text += f"Layer {layer_idx}: {entropy_score:.3f} (H={mean_entropy:.3f})\n"
+        
+        if len(layers) > 1:
+            clsi_improvement = clsi_scores[-1] - clsi_scores[0]
+            entropy_improvement = entropy_scores[-1] - entropy_scores[0]
+            summary_text += f"\nOverall Improvements:\n"
+            summary_text += f"CLSI: {clsi_improvement:+.3f}\n"
+            summary_text += f"Entropy: {entropy_improvement:+.3f}\n"
+        
+        # 해석 가이드
+        summary_text += "\nInterpretation:\n"
+        summary_text += "CLSI: Higher = Better specialization\n"
+        summary_text += "Entropy Score: Higher = Lower uncertainty\n"
+        summary_text += "Mean Entropy: Lower = More specialized\n"
+        summary_text += "Purity: Higher = More label-specific\n\n"
+        summary_text += "Perfect cluster: CLSI=1.5, Entropy=0.0, Purity=1.0"
+        
+        ax.text(0.1, 0.9, summary_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
+        
+        plt.suptitle('CLSI and Entropy Analysis\n(GAT Layer Evolution)', 
+                    fontsize=16, fontweight='bold', y=0.98)
+        plt.tight_layout()
+        plt.savefig(output_dir / 'clsi_entropy_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info("CLSI and Entropy analysis plot saved")
+    
+    def _save_clsi_detailed_report(self, detailed_results, output_dir):
        """CLSI 상세 리포트를 JSON으로 저장"""
        
        # numpy 타입 변환
@@ -540,7 +660,7 @@ class SimplifiedClusterAnalyzer:
        
        # CLSI 요약 추가
        layers = sorted(detailed_results.keys())
-       scores = [detailed_results[layer]['clsi_score'] for layer in layers]
+       scores = [detailed_results[layer]['clsi'] for layer in layers]
        
        summary = {
            'clsi_summary': {
@@ -560,8 +680,42 @@ class SimplifiedClusterAnalyzer:
            json.dump(summary, f, indent=2)
        
        logger.info(f"CLSI detailed report saved to {results_file}")
-   
-   def analyze_all_layers(self, output_base_dir):
+    def _save_clsi_entropy_detailed_report(self, detailed_results, output_dir):
+       """CLSI와 엔트로피 상세 리포트를 JSON으로 저장"""
+       
+       # numpy 타입 변환
+       detailed_results_json = self._convert_numpy_types(detailed_results)
+       
+       # 요약 추가
+       layers = sorted(detailed_results.keys())
+       clsi_scores = [detailed_results[layer]['clsi']['clsi'] for layer in layers]
+       entropy_scores = [detailed_results[layer]['entropy']['entropy_score'] for layer in layers]
+       mean_entropies = [detailed_results[layer]['entropy']['mean_entropy'] for layer in layers]
+       
+       summary = {
+           'analysis_summary': {
+               'layers_analyzed': layers,
+               'clsi_scores': dict(zip(layers, clsi_scores)),
+               'entropy_scores': dict(zip(layers, entropy_scores)),
+               'mean_entropies': dict(zip(layers, mean_entropies)),
+               'clsi_range': [min(clsi_scores), max(clsi_scores)],
+               'entropy_score_range': [min(entropy_scores), max(entropy_scores)],
+               'overall_clsi_improvement': clsi_scores[-1] - clsi_scores[0] if len(clsi_scores) > 1 else 0.0,
+               'overall_entropy_improvement': entropy_scores[-1] - entropy_scores[0] if len(entropy_scores) > 1 else 0.0
+           },
+           'detailed_results': detailed_results_json
+       }
+       
+       # JSON 저장
+       results_file = output_dir / 'clsi_entropy_detailed_report.json'
+       with open(results_file, 'w') as f:
+           json.dump(summary, f, indent=2)
+       
+       logger.info(f"CLSI and Entropy detailed report saved to {results_file}")
+    
+
+
+    def analyze_all_layers(self, output_base_dir):
        """모든 레이어에 대해 라벨 분포 분석 수행"""
        output_base_dir = Path(output_base_dir)
        output_base_dir.mkdir(parents=True, exist_ok=True)
@@ -572,7 +726,7 @@ class SimplifiedClusterAnalyzer:
            logger.info(f"Starting label distribution analysis for layer {layer_idx}...")
            
            # 레이어별 출력 디렉토리
-           layer_output_dir = output_base_dir / f'layer_{layer_idx}_simple'
+           layer_output_dir = output_base_dir / f'layer_{layer_idx}_analysis'
            
            # 분석 수행
            cluster_data, stats_results = self.analyze_layer_label_distribution(layer_idx, layer_output_dir)
@@ -582,37 +736,43 @@ class SimplifiedClusterAnalyzer:
            }
        
        # 전체 레이어 비교 시각화
-       self._create_cross_layer_comparison_simple(all_results, output_base_dir)
+       self._create_cross_layer_comparison(all_results, output_base_dir)
        
        logger.info("All layer label distribution analysis completed!")
        return all_results
    
-   def _create_cross_layer_comparison_simple(self, all_results, output_dir):
+    def _create_cross_layer_comparison(self, all_results, output_dir):
        """레이어 간 라벨 분포 비교 시각화"""
        
-       # 레이어별 Chi-square p-value 비교
-       fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+       fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
        
        layers = sorted(all_results.keys())
        chi2_pvalues = []
        n_clusters_list = []
+       clsi_scores = []
        
        for layer_idx in layers:
            stats = all_results[layer_idx]['stats_results']
+           cluster_data = all_results[layer_idx]['cluster_data']
            
+           # Chi-square p-value
            if stats['label_chi2']:
                p_val = max(stats['label_chi2']['p_value'], 1e-50)
                chi2_pvalues.append(p_val)
            else:
                chi2_pvalues.append(1.0)
            
-           # 클러스터 수 추가
-           n_clusters_list.append(len(all_results[layer_idx]['cluster_data']))
+           # 클러스터 수
+           n_clusters_list.append(len(cluster_data))
+           
+           # CLSI 계산
+           clsi_result = self.cluster_label_specialization_index(cluster_data)
+           clsi_scores.append(clsi_result['clsi'])
        
-       # Chi-square p-value 시각화
+       # 1. Chi-square p-value 시각화
        bars1 = ax1.bar([f'Layer {l}' for l in layers], chi2_pvalues, 
                    color=['red' if p < 0.05 else 'lightcoral' for p in chi2_pvalues])
-       ax1.axhline(y=0.05, color='black', linestyle='--', alpha=0.7, label='α=0.05')
+       ax1.axhline(y=0.05, color='black', linestyle='--', alpha=0.7, label='alpha=0.05')
        ax1.set_title('Chi-square Test p-values\n(Label Distribution Differences)')
        ax1.set_ylabel('p-value')
        ax1.set_yscale('log')
@@ -625,7 +785,7 @@ class SimplifiedClusterAnalyzer:
            if p < 0.05:
                ax1.text(i, max(p, 1e-45), '*', ha='center', va='bottom', fontsize=16, color='white')
        
-       ## 레이어별 클러스터 수
+       # 2. 레이어별 클러스터 수
        bars2 = ax2.bar([f'Layer {l}' for l in layers], n_clusters_list, color='lightblue')
        ax2.set_title('Number of Clusters by Layer')
        ax2.set_ylabel('Number of Clusters')
@@ -636,15 +796,42 @@ class SimplifiedClusterAnalyzer:
            ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.1,
                    f'{count}', ha='center', va='bottom', fontsize=12, weight='bold')
        
-       plt.suptitle('Cross-Layer Label Distribution Analysis', fontsize=16)
+       # 3. CLSI 점수 비교
+       bars3 = ax3.bar([f'Layer {l}' for l in layers], clsi_scores, color='darkgreen', alpha=0.8)
+       ax3.set_title('CLSI Score by Layer')
+       ax3.set_xlabel('Layer')
+       ax3.set_ylabel('CLSI Score')
+       ax3.grid(True, alpha=0.3)
+       
+       # CLSI 점수 표시
+       for bar, score in zip(bars3, clsi_scores):
+           ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                   f'{score:.3f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+       
+       # 4. 클러스터 편향도 분포 (모든 레이어)
+       for layer_idx in layers:
+           cluster_data = all_results[layer_idx]['cluster_data']
+           clsi_result = self.cluster_label_specialization_index(cluster_data)
+           biases = [cluster['bias'] for cluster in clsi_result['cluster_details']]
+           
+           if biases:
+               ax4.hist(biases, alpha=0.6, label=f'Layer {layer_idx}', bins=10, density=True)
+       
+       ax4.set_xlabel('Cluster Bias (0=balanced, 1=completely biased)')
+       ax4.set_ylabel('Density')
+       ax4.set_title('Cluster Bias Distribution by Layer')
+       ax4.legend()
+       ax4.grid(True, alpha=0.3)
+       
+       plt.suptitle('Cross-Layer Label Distribution Analysis', fontsize=16, fontweight='bold')
        plt.tight_layout()
-       fig.savefig(output_dir / 'cross_layer_label_distribution_analysis.png', dpi=300, bbox_inches='tight')
+       fig.savefig(output_dir / 'cross_layer_analysis.png', dpi=300, bbox_inches='tight')
        plt.close(fig)
        
-       logger.info("Cross-layer label distribution analysis plot saved")
+       logger.info("Cross-layer analysis plot saved")
    
-   def print_cluster_summary(self, layer_idx=None):
-       """클러스터 요약 정보를 콘솔에 출력"""
+    def print_cluster_summary(self, layer_idx=None, include_clsi=True):
+       """클러스터 요약 정보를 콘솔에 출력 (CLSI 포함)"""
        if layer_idx is not None:
            layers_to_print = [layer_idx] if layer_idx in self.layer_results else []
        else:
@@ -654,12 +841,25 @@ class SimplifiedClusterAnalyzer:
            layer_data = self.layer_results[layer_idx]
            clusters = layer_data['clusters']
            
-           print(f"\n{'='*50}")
+           print(f"\n{'='*60}")
            print(f"LAYER {layer_idx} SUMMARY")
-           print(f"{'='*50}")
+           print(f"{'='*60}")
            print(f"Total samples: {layer_data['total_samples']}")
            print(f"Number of clusters: {layer_data['n_clusters']}")
            
+           # CLSI 계산 및 출력
+           if include_clsi:
+               cluster_label_data = {}
+               for cluster_id, samples in clusters.items():
+                   labels = [sample['label'] for sample in samples]
+                   cluster_label_data[cluster_id] = labels
+               
+               clsi_result = self.cluster_label_specialization_index(cluster_label_data)
+               print(f"\nCLSI: {clsi_result['clsi']:.4f}")
+               print(f"Mean Bias: {clsi_result['mean_bias']:.4f}")
+               print(f"Diversity: {clsi_result['diversity']:.4f}")
+           
+           print(f"\nCluster Details:")
            for cluster_id, samples in clusters.items():
                labels = [sample['label'] for sample in samples]
                unique_labels, counts = np.unique(labels, return_counts=True)
@@ -667,10 +867,18 @@ class SimplifiedClusterAnalyzer:
                print(f"\nCluster {cluster_id}: {len(samples)} samples")
                for label, count in zip(unique_labels, counts):
                    percentage = (count / len(samples)) * 100
-                   print(f"  Label {label}: {count} samples ({percentage:.1f}%)")
+                   print(f"  Label {label}: {count:3d} samples ({percentage:5.1f}%)")
+               
+               # 클러스터 편향도 표시
+               if len(samples) > 0:
+                   label_0_ratio = labels.count(0) / len(labels)
+                   bias = abs(label_0_ratio - 0.5) * 2
+                   dominant_label = 0 if label_0_ratio > 0.5 else 1
+                   confidence = max(label_0_ratio, 1 - label_0_ratio)
+                   print(f"  Bias: {bias:.3f}, Dominant: Label {dominant_label} ({confidence:.1%})")
 
 def main():
-   parser = argparse.ArgumentParser(description='Simplified Cluster Analysis')
+   parser = argparse.ArgumentParser(description='Cluster Analysis with Improved CLSI')
    parser.add_argument('--clustering_dir', type=str, required=True,
                       help='Directory containing clustering results (e.g., clustering_7 folder)')
    parser.add_argument('--output_dir', type=str, default=None,
@@ -680,7 +888,7 @@ def main():
    parser.add_argument('--print_summary', action='store_true',
                       help='Print cluster summary to console')
    parser.add_argument('--clsi_analysis', action='store_true',
-                      help='Perform CLSI (Cluster Label Specialization Index) analysis')
+                      help='Perform CLSI analysis')
    
    args = parser.parse_args()
    
@@ -690,44 +898,55 @@ def main():
        args.output_dir = clustering_dir / 'label_analysis'
    
    # 분석기 초기화
-   analyzer = SimplifiedClusterAnalyzer(args.clustering_dir)
+   analyzer = ClusterAnalyzer(args.clustering_dir)
    
    # 요약 정보 출력 (옵션)
    if args.print_summary:
-       analyzer.print_cluster_summary(args.layer_idx)
+       analyzer.print_cluster_summary(args.layer_idx, include_clsi=True)
    
    if args.layer_idx is not None:
        # 특정 레이어만 분석
        logger.info(f"Analyzing layer {args.layer_idx}...")
-       output_dir = Path(args.output_dir) / f'layer_{args.layer_idx}_simple'
+       output_dir = Path(args.output_dir) / f'layer_{args.layer_idx}_analysis'
        analyzer.analyze_layer_label_distribution(args.layer_idx, output_dir)
    else:
        # 모든 레이어 분석
        logger.info("Analyzing all layers...")
        analyzer.analyze_all_layers(args.output_dir)
 
-   # CLSI 분석 (옵션)
-   if args.clsi_analysis:
+   # CLSI 분석 (기본적으로 수행, 옵션으로 제어 가능)
+   if args.clsi_analysis or args.layer_idx is None:
        logger.info("Starting CLSI analysis...")
-       clsi_results, detailed_results = analyzer.analyze_layer_specialization(args.output_dir)
+       clsi_results, entropy_results, detailed_results = analyzer.analyze_layer_specialization(args.output_dir)
        
-       print("\n" + "="*60)
+       print("\n" + "="*70)
        print("CLSI (Cluster Label Specialization Index) Results")
-       print("="*60)
-       for layer, score in clsi_results.items():
-           print(f"Layer {layer}: {score:.4f}")
+       print("="*70)
+       print("Formula: CLSI = bias × (1 + diversity/2)")
+       print("Range: 0.0 (no specialization) ~ 1.5 (perfect specialization)")
+       print("-" * 70)
        
-       if len(clsi_results) > 1:
-           layers = sorted(clsi_results.keys())
-           improvement = clsi_results[layers[-1]] - clsi_results[layers[0]]
-           print(f"\nOverall improvement: {improvement:+.4f}")
+       layers = sorted(clsi_results.keys())
+       for layer in layers:
+           result = detailed_results[layer]
+           clsi_score = result['clsi']
+           bias = detailed_results[layer]['clsi']['mean_bias']
+           diversity = detailed_results[layer]['clsi']['diversity']
            
-           if improvement > 0.1:
-               print("✅ Strong specialization progression detected!")
-           elif improvement > 0.05:
-               print("🔄 Moderate specialization progression detected.")
+           #print(f"Layer {layer:2d}: CLSI={clsi_score:.3f} | Bias={bias:.3f}, Diversity={diversity:.3f}")
+       if len(clsi_results) > 1:
+           overall_improvement = clsi_results[layers[-1]] - clsi_results[layers[0]]
+           print(f"\nOverall CLSI progression: {overall_improvement:+.4f}")
+           
+           if overall_improvement > 0.3:
+               print("Strong specialization progression detected!")
+               print("GAT layers are effectively learning label-specific patterns")
+           elif overall_improvement > 0.15:
+               print("Moderate specialization progression detected.")
+               print("Some improvement in label specialization across layers")
            else:
-               print("⚠️ Limited specialization progression.")
+               print("Limited specialization progression.")
+               print("Consider adjusting model architecture or training strategy")
 
    logger.info(f"Label distribution analysis completed! Results saved to {args.output_dir}")
 
