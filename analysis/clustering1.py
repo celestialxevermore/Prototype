@@ -1597,6 +1597,33 @@ class AttentionInference:
         
         logger.info(f"Cluster summary saved: layer_{layer_idx}_cluster_summary.png")
 
+def extract_checkpoint_config_for_folder(checkpoint_path):
+    """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환"""
+    filename = Path(checkpoint_path).stem
+    
+    # 날짜/시간 패턴 제거 (20250616_161300 형태)
+    import re
+    filename_clean = re.sub(r'_\d{8}_\d{6}$', '', filename)
+    
+    # "Embed:carte_desc_Edge:False_A:gat" 형태를 파싱
+    # 패턴: Embed:{type}_Edge:{bool}_A:{attn}
+    
+    pattern = r'Embed:([^_]+(?:_[^_]+)*?)_Edge:(True|False)_A:([^_]+)'
+    match = re.match(pattern, filename_clean)
+    
+    if match:
+        embed_type = match.group(1)  # carte, carte_desc, ours, ours2
+        edge_attr = match.group(2)   # True, False
+        attn_type = match.group(3)   # att, gat
+        
+        # 폴더명 생성: Embed-carte_desc_Edge-False_A-gat
+        folder_name = f"Embed-{embed_type}_Edge-{edge_attr}_A-{attn_type}"
+        return folder_name
+    else:
+        # 패턴 매칭 실패시 원본 사용
+        return filename_clean.replace(':', '-')
+
+
 def main():
     parser = argparse.ArgumentParser(description='Attention Maps Inference')
     parser.add_argument('--checkpoint_dir', type=str, required=True,
@@ -1618,25 +1645,24 @@ def main():
     
     args = parser.parse_args()
     
-    # 출력 디렉토리 설정 (visualization 폴더 구조에 맞게)
     if args.output_dir is None:
         checkpoint_dir = Path(args.checkpoint_dir)
-        # 체크포인트 경로에서 정보 추출
+        config_folder = extract_checkpoint_config_for_folder(args.checkpoint_dir)
         path_parts = checkpoint_dir.parts
         
-        # checkpoints/.../gpt2_mean/heart/Full/20250606_183958 에서
-        # visualization/.../gpt2_mean/heart/Full/20250606_183958 로 변경
+        # checkpoints를 visualization으로 바꾸고, 날짜 폴더를 설정 폴더로 교체
         for i, part in enumerate(path_parts):
             if part == 'checkpoints':
                 viz_parts = list(path_parts)
                 viz_parts[i] = 'visualization'
-                viz_path = Path(*viz_parts[:-1])  # best_model_epoch_XX.pt 제외
-                args.output_dir = viz_path / f'clustering_{args.n_clusters}'
+                # Full 폴더는 그대로 두고, 날짜 폴더만 설정 폴더로 교체
+                viz_path = Path(*viz_parts[:-2])  # 날짜 폴더와 파일명 제거
+                args.output_dir = viz_path / args.mode / config_folder / f'clustering_{args.n_clusters}'
                 break
-        
-        if args.output_dir is None:
-            args.output_dir = checkpoint_dir.parent / 'inference_results'
     
+    if args.output_dir is None:
+        args.output_dir = checkpoint_dir.parent.parent / args.mode / config_folder / f'clustering_{args.n_clusters}'
+
     # Inference 실행
     inference = AttentionInference(args.checkpoint_dir)
     

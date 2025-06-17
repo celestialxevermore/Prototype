@@ -73,7 +73,7 @@ def get_args():
     parser.add_argument('--frozen', type = bool, default = False)
     parser.add_argument('--use_edge_attr', action='store_true')
     parser.add_argument('--embed_type', default = 'ours', choices = ['carte', 'carte_desc','ours','ours2', '_'])
-    parser.add_argument('--attn', default='gat', choices= ['gat','att'])
+    parser.add_argument('--attn_type', default='gat', choices= ['gat','att'])
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -215,10 +215,10 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
                 best_threshold = current_threshold
             
             # 🔥 개선: validation AUC가 갱신될 때만 저장
-            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}/{experiment_id}"
+            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}"
             os.makedirs(checkpoint_dir, exist_ok=True)
             # 항상 같은 파일명으로 덮어쓰기
-            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.use_edge_attr}_A:{args.attn}.pt")
+            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.use_edge_attr}_A:{args.attn_type}.pt")
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,

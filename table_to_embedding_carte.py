@@ -34,8 +34,6 @@ from torch_geometric.data import Data
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import PowerTransformer
 from sklearn.pipeline import make_pipeline
-
-
 class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
     def __init__(
             self, args, source_dataset_name):

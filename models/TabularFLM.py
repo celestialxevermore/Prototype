@@ -48,27 +48,26 @@ class AdaptiveGraphAttention(nn.Module):
         self.head_dim = input_dim // n_heads 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.frozen = False  # 그래프 구조 고정 여부
         
         self.threshold = threshold
-        self.topology_bias = nn.Parameter(torch.zeros(1))
         self.attn_dropout = nn.Dropout(dropout)
-
-        self.alpha_param = nn.Parameter(torch.tensor(0.1))
 
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
         self.v_proj = nn.Linear(input_dim, input_dim)
-        self.attn_proj = nn.Linear(self.head_dim * 3, 1)   # [q | k | edge_attr] -> attention score
-        
+        if self.args.attn_type =='gat':
+            if self.args.use_edge_attr:
+                self.attn_proj = nn.Linear(self.head_dim * 3, 1)
+            else:
+                self.attn_proj = nn.Linear(self.head_dim * 2, 1)
         
         self.out_proj = nn.Linear(input_dim, input_dim)
         nn_init.xavier_uniform_(self.q_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.k_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
-        nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
         nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
-    
+        if hasattr(self, 'attn_proj'):
+            nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
     def _no_self_interaction(self, adjacency_matrix):
         batch_size, seq_len, _ = adjacency_matrix.shape
         diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
@@ -97,41 +96,60 @@ class AdaptiveGraphAttention(nn.Module):
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         
-        if self.args.use_edge_attr:
-            # Description embedding을 edge attribute로 사용
-            target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
-            cls_edge_attr = desc_embeddings
+        # Attention 계산 방식 선택
+        if self.args.attn_type == 'gat':
+            # GAT-style attention (concat + MLP)
+            if self.args.use_edge_attr:
+                # Case 1: GAT with edge attributes - MLP([q | k | edge_attr])
+                target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                cls_edge_attr = desc_embeddings
 
-            edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
-            edge_attr[:, 1:, 1:] = target_desc  # 변수 노드 간
-            edge_attr[:, 0, 1:] = cls_edge_attr  # CLS->변수
-            
-            edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
-            edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
-            edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
-            
-            q_expanded = q.unsqueeze(3)
-            k_expanded = k.unsqueeze(2)
-            qke_expanded = torch.cat([
-                q_expanded.expand(-1,-1,-1, new_seq, -1),
-                k_expanded.expand(-1,-1, new_seq, -1, -1),
-                edge_attr
-            ], dim = -1)
-            
-            attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = target_desc  # 변수 노드 간
+                edge_attr[:, 0, 1:] = cls_edge_attr  # CLS->변수
+                
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+            else:
+                # Case 2: GAT without edge attributes - MLP([q | k])
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qk_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1)
+                ], dim = -1)
+                
+                attn_weights = self.attn_proj(qk_expanded).squeeze(-1)
+                
+        elif self.args.attn_type == "att":
+            # Case 3: Standard dot-product attention (use_edge_attr는 무시)
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         else:
-            
-            # 기본 attention (adjacency만 사용)
+            # Default: standard dot-product attention
             attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
+        # Graph structure masking
         mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
         attn_weights = attn_weights + mask 
         attn_weights = F.softmax(attn_weights, dim = -1)
         self.attn_weights = self.attn_dropout(attn_weights)
 
-        context = torch.matmul(attn_weights, v)
+        # Context 계산
+        context = torch.matmul(self.attn_weights, v)
         context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
         output = self.out_proj(context)
+        
         return output, attn_weights
 
 class Model(nn.Module):
