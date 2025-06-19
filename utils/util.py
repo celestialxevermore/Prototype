@@ -375,7 +375,7 @@ def save_results_(args, results):
         f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
         args.source_data,f"args_seed:{args.random_seed}",
         #args.model_type, f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
-        args.model_type, f"Embed:{args.embed_type}_Edge:{args.use_edge_attr}_A:{args.attn_type}"
+        args.model_type, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}"
     )
     os.makedirs(exp_dir, exist_ok=True)
     # 데이터셋 파일 경로 구성
@@ -413,7 +413,7 @@ def save_results_(args, results):
         #"enc_type": args.enc_type,
         #"meta_type": args.meta_type,
         "embed_type": args.embed_type,
-        "use_edge_attr": args.use_edge_attr,
+        "edge_type": args.edge_type,
         "attn_type" : args.attn_type,
         "results": results['Best_results']
     }

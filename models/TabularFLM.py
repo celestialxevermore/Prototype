@@ -56,9 +56,17 @@ class AdaptiveGraphAttention(nn.Module):
         self.k_proj = nn.Linear(input_dim, input_dim)
         self.v_proj = nn.Linear(input_dim, input_dim)
         if self.args.attn_type =='gat':
-            if self.args.use_edge_attr:
+            if self.args.edge_type == 'normal':
                 self.attn_proj = nn.Linear(self.head_dim * 3, 1)
-            else:
+            elif self.args.edge_type == 'mlp':
+                self.attn_proj = nn.Linear(self.head_dim * 3, 1)
+                self.edge_update = nn.Sequential(
+                    nn.Linear(input_dim * 2, input_dim),
+                    nn.LayerNorm(input_dim),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim)
+                )
+            elif self.args.edge_type == 'no_use':
                 self.attn_proj = nn.Linear(self.head_dim * 2, 1)
         
         self.out_proj = nn.Linear(input_dim, input_dim)
@@ -68,6 +76,10 @@ class AdaptiveGraphAttention(nn.Module):
         nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
         if hasattr(self, 'attn_proj'):
             nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
+        if hasattr(self, 'edge_update'):
+            for module in self.edge_update:
+                if isinstance(module, nn.Linear):
+                    nn_init.xavier_uniform_(module.weight, gain=1 / math.sqrt(2))
     def _no_self_interaction(self, adjacency_matrix):
         batch_size, seq_len, _ = adjacency_matrix.shape
         diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
@@ -99,7 +111,7 @@ class AdaptiveGraphAttention(nn.Module):
         # Attention 계산 방식 선택
         if self.args.attn_type == 'gat':
             # GAT-style attention (concat + MLP)
-            if self.args.use_edge_attr:
+            if self.args.edge_type == "normal":
                 # Case 1: GAT with edge attributes - MLP([q | k | edge_attr])
                 target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
                 cls_edge_attr = desc_embeddings
@@ -121,7 +133,34 @@ class AdaptiveGraphAttention(nn.Module):
                 ], dim = -1)
                 
                 attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
-            else:
+            elif self.args.edge_type == "mlp":
+                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
+                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+                edge_dim = var_edge_attr.size(-1)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = var_edge_attr  # 변수 노드 간
+                edge_attr[:, 0, 1:] = cls_edge_attr   # CLS->변수
+                edge_attr[:, 1:, 0] = cls_edge_attr   # 변수->CLS
+                
+                # 4. 차원 맞추기 (edge_update 필요)
+                edge_attr = self.edge_update(edge_attr)  # [batch, new_seq, new_seq, n_heads * head_dim]
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                # 5. Attention 계산 (기존과 동일)
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+            elif self.args.edge_type == 'no_use':
                 # Case 2: GAT without edge attributes - MLP([q | k])
                 q_expanded = q.unsqueeze(3)
                 k_expanded = k.unsqueeze(2)

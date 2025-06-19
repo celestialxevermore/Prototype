@@ -1063,15 +1063,21 @@ def main():
     
     # 출력 디렉토리 설정
     if args.output_dir is None:
-        # attention_map 경로를 visualization 경로로 변환
-        config_str = extract_config_from_attention_path(attention_map_dir)
-        
-        # /experiments/attention_map/gpt2_mean/heart/Full/Embed-carte_desc_Edge-False_A-att
-        # → /experiments/visualization/gpt2_mean/heart/Full/Embed-carte_desc_Edge-False_A-att_analysis
-        output_dir = Path(str(attention_map_dir).replace('/attention_map/', '/visualization/') + '_analysis')
+    # attention_map 경로를 visualization 경로로 변환
+    # 예: /.../attention_map/.../Embed-XXX → /.../visualization/.../Embed-XXX/comprehensive_metrics_analysis2
+        attention_map_parts = list(attention_map_dir.parts)
+        try:
+            idx = attention_map_parts.index('attention_map')
+            attention_map_parts[idx] = 'visualization'
+        except ValueError:
+            raise ValueError("⚠️ 'attention_map' 디렉토리가 경로에 포함되어 있지 않습니다.")
+
+        # Embed-XXX 디렉토리 아래에 저장
+        output_dir = Path(*attention_map_parts) / 'comprehensive_metrics_analysis2'
     else:
         output_dir = Path(args.output_dir)
-    
+
+    # 디렉토리 생성
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 설정 정보 추출 및 로깅

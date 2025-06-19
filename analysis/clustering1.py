@@ -5,7 +5,7 @@ Attention Maps Inference 스크립트
 K-means 클러스터링을 수행합니다.
 
 Usage:
-    python inference.py --checkpoint_dir /path/to/checkpoint.pt --mode Full
+    python clustering1.py --checkpoint_dir /path/to/checkpoint.pt --mode Full
 """
 
 import os
@@ -23,11 +23,23 @@ from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
+# 현재 스크립트 파일 위치 (analysis/attentionmap.py)
+current_dir = Path(__file__).resolve().parent
+import sys
+# analysis/의 부모 디렉토리 (즉, ProtoLLM/)
+root_dir = current_dir.parent
+sys.path.append(str(root_dir))  # models, dataset, utils 등이 위치한 루트 디렉토리를 추가
 
-# 기존 모듈들 import
 from models.TabularFLM import Model
 from dataset.data_dataloaders import prepare_embedding_dataloaders, get_few_shot_embedding_samples
 from utils.util import setup_logger, fix_seed
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+# 기존 모듈들 import
+#from models.TabularFLM import Model
+# from dataset.data_dataloaders import prepare_embedding_dataloaders, get_few_shot_embedding_samples
+# from utils.util import setup_logger, fix_seed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -570,6 +582,8 @@ class AttentionInference:
                     sample_id=sample_id,
                     label=label,
                     cluster_id=cluster_id)
+        
+        logger.info(f"Saved attention maps by cluster for layer {layer_idx}")
 
     def save_attention_maps(self, attention_data, output_dir):
         """
@@ -662,7 +676,6 @@ class AttentionInference:
         cbar1.set_label('Distance', rotation=270, labelpad=20, fontsize=12, fontweight='bold')
         cbar1.ax.tick_params(labelsize=10)
         
-        # ========== 2. All Pairwise Distances (세번째 그림 스타일) ==========
         # ========== 2. All Pairwise Distances (순서 변경) ==========
         ax2 = plt.subplot(1, 3, 2)
 
@@ -702,7 +715,6 @@ class AttentionInference:
         ax2.grid(True, alpha=0.2, axis='x', linestyle='-', linewidth=0.5)
         ax2.set_xlim(0, max(display_distances) * 1.2)
         
-        # ========== 3. Distance Network (세번째 그림 스타일) ==========
         # ========== 3. Top 20 Closest Pairs (텍스트 리스트) ==========
         ax3 = plt.subplot(1, 3, 3)
 
@@ -1253,7 +1265,7 @@ class AttentionInference:
         plt.tight_layout()
         plt.savefig(summary_dir / 'comprehensive_summary.png', dpi=300, bbox_inches='tight')
         plt.close()
-    
+
     def _visualize_clustering_distribution(self, flattened_maps, cluster_assignments, labels, 
                              layer_idx, output_dir):
         """클러스터링 분포 시각화 (t-SNE) - 같은 클러스터는 같은 색상, 레전드 중복 제거"""
@@ -1524,103 +1536,31 @@ class AttentionInference:
         logger.info(f"All cluster centroids saved for layer {layer_idx}")
 
 
-    # 추가: 클러스터 통계 요약 함수 (옵션)
-    def _visualize_cluster_summary(self, cluster_centers, feature_names, layer_idx, output_dir, n_clusters):
-        """클러스터 통계 요약 시각화 (선택적 사용)"""
-        seq_len = len(feature_names)
-        centroids_reshaped = cluster_centers.reshape(-1, seq_len, seq_len)
-        
-        # 각 센트로이드의 주요 통계 계산
-        cluster_stats = []
-        for i, centroid in enumerate(centroids_reshaped):
-            stats = {
-                'cluster_id': i,
-                'max_attention': np.max(centroid),
-                'mean_attention': np.mean(centroid),
-                'std_attention': np.std(centroid),
-                'max_position': np.unravel_index(np.argmax(centroid), centroid.shape)
-            }
-            cluster_stats.append(stats)
-        
-        # 통계 시각화
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        
-        # 1. 최대 attention 값
-        cluster_ids = [s['cluster_id'] for s in cluster_stats]
-        max_attentions = [s['max_attention'] for s in cluster_stats]
-        axes[0, 0].bar(cluster_ids, max_attentions, color='skyblue')
-        axes[0, 0].set_title('Maximum Attention per Cluster')
-        axes[0, 0].set_xlabel('Cluster ID')
-        axes[0, 0].set_ylabel('Max Attention')
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # 2. 평균 attention 값
-        mean_attentions = [s['mean_attention'] for s in cluster_stats]
-        axes[0, 1].bar(cluster_ids, mean_attentions, color='lightgreen')
-        axes[0, 1].set_title('Mean Attention per Cluster')
-        axes[0, 1].set_xlabel('Cluster ID')
-        axes[0, 1].set_ylabel('Mean Attention')
-        axes[0, 1].grid(True, alpha=0.3)
-        
-        # 3. 표준편차
-        std_attentions = [s['std_attention'] for s in cluster_stats]
-        axes[1, 0].bar(cluster_ids, std_attentions, color='lightcoral')
-        axes[1, 0].set_title('Attention Std Dev per Cluster')
-        axes[1, 0].set_xlabel('Cluster ID')
-        axes[1, 0].set_ylabel('Std Dev')
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # 4. 요약 텍스트
-        axes[1, 1].axis('off')
-        summary_text = f"Layer {layer_idx} Cluster Summary\n\n"
-        summary_text += f"Total Clusters: {n_clusters}\n"
-        summary_text += f"Feature Matrix: {seq_len}x{seq_len}\n\n"
-        
-        # 상위 3개 클러스터 (최대 attention 기준)
-        top_clusters = sorted(cluster_stats, key=lambda x: x['max_attention'], reverse=True)[:min(3, n_clusters)]
-        summary_text += "Top Clusters (by max attention):\n"
-        for rank, cluster in enumerate(top_clusters, 1):
-            row, col = cluster['max_position']
-            summary_text += f"{rank}. Cluster {cluster['cluster_id']}: "
-            summary_text += f"Max={cluster['max_attention']:.3f}\n"
-            summary_text += f"   at {feature_names[row]}→{feature_names[col]}\n"
-        
-        axes[1, 1].text(0.1, 0.9, summary_text, transform=axes[1, 1].transAxes, 
-                    fontsize=12, verticalalignment='top',
-                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
-        
-        plt.suptitle(f'Layer {layer_idx} Cluster Analysis Summary', fontsize=16)
-        plt.tight_layout()
-        fig.savefig(output_dir / f'layer_{layer_idx}_cluster_summary.png', 
-                dpi=300, bbox_inches='tight')
-        plt.close(fig)
-        
-        logger.info(f"Cluster summary saved: layer_{layer_idx}_cluster_summary.png")
-
 def extract_checkpoint_config_for_folder(checkpoint_path):
     """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환"""
     filename = Path(checkpoint_path).stem
     
-    # 날짜/시간 패턴 제거 (20250616_161300 형태)
+    # 날짜/시간 패턴 제거 (20250617_173832 형태)
     import re
-    filename_clean = re.sub(r'_\d{8}_\d{6}$', '', filename)
     
-    # "Embed:carte_desc_Edge:False_A:gat" 형태를 파싱
-    # 패턴: Embed:{type}_Edge:{bool}_A:{attn}
+    # 수정: re.sub()에 교체할 문자열 '' 추가
+    filename_clean = re.sub(r'_\d{8}_\d{6}', '', filename)
     
-    pattern = r'Embed:([^_]+(?:_[^_]+)*?)_Edge:(True|False)_A:([^_]+)'
+    # "Embed:carte_desc_Edge:mlp_A:att" 형태를 파싱
+    pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+)'
     match = re.match(pattern, filename_clean)
     
     if match:
         embed_type = match.group(1)  # carte, carte_desc, ours, ours2
-        edge_attr = match.group(2)   # True, False
+        edge_attr = match.group(2)   # mlp, no_use, normal
         attn_type = match.group(3)   # att, gat
         
-        # 폴더명 생성: Embed-carte_desc_Edge-False_A-gat
+        # 폴더명 생성: Embed-carte_desc_Edge-mlp_A-att
         folder_name = f"Embed-{embed_type}_Edge-{edge_attr}_A-{attn_type}"
         return folder_name
     else:
-        # 패턴 매칭 실패시 원본 사용
+        # 패턴 매칭 실패시 원본 사용하되 콜론을 대시로 변경
+        logger.warning(f"Could not parse config from filename: {filename_clean}")
         return filename_clean.replace(':', '-')
 
 
@@ -1645,30 +1585,33 @@ def main():
     
     args = parser.parse_args()
     
+    # 🔥 출력 디렉토리 수정: checkpoints → visualization으로 경로 변경
     if args.output_dir is None:
-        checkpoint_dir = Path(args.checkpoint_dir)
+        checkpoint_file = Path(args.checkpoint_dir)
         config_folder = extract_checkpoint_config_for_folder(args.checkpoint_dir)
-        path_parts = checkpoint_dir.parts
         
-        # checkpoints를 visualization으로 바꾸고, 날짜 폴더를 설정 폴더로 교체
-        for i, part in enumerate(path_parts):
-            if part == 'checkpoints':
-                viz_parts = list(path_parts)
-                viz_parts[i] = 'visualization'
-                # Full 폴더는 그대로 두고, 날짜 폴더만 설정 폴더로 교체
-                viz_path = Path(*viz_parts[:-2])  # 날짜 폴더와 파일명 제거
-                args.output_dir = viz_path / args.mode / config_folder / f'clustering_{args.n_clusters}'
-                break
+        # 체크포인트 파일의 부모 디렉토리 경로를 가져와서 변환
+        # /storage/personal/eungyeop/experiments/checkpoints/gpt2_mean/heart/Full/파일명.pt
+        # → /storage/personal/eungyeop/experiments/visualization/gpt2_mean/heart/Full/config/
+        checkpoint_parent_str = str(checkpoint_file.parent)
+        
+        # checkpoints를 visualization으로 변경
+        if '/checkpoints/' in checkpoint_parent_str:
+            viz_parent_str = checkpoint_parent_str.replace('/checkpoints/', '/visualization/')
+        else:
+            # fallback: 직접 경로 구성
+            viz_parent_str = '/storage/personal/eungyeop/experiments/visualization/gpt2_mean/heart/Full'
+        
+        # 최종 출력 경로: .../visualization/.../config_folder/clustering_{n_clusters}/
+        args.output_dir = Path(viz_parent_str) / config_folder / f'clustering1_{args.n_clusters}'
     
-    if args.output_dir is None:
-        args.output_dir = checkpoint_dir.parent.parent / args.mode / config_folder / f'clustering_{args.n_clusters}'
+    logger.info(f"📁 Results will be saved to: {args.output_dir}")
 
     # Inference 실행
     inference = AttentionInference(args.checkpoint_dir)
     
     # 데이터로더 선택
     if args.mode == 'Full':
-        #data_loader = inference.train_loader
         data_loader = inference.combined_loader
         logger.info("Using Full dataset loader")
     else:
@@ -1707,9 +1650,9 @@ def main():
         )
         logger.info(f"Saving attention maps by cluster for layer {layer_idx}...")
         inference.save_attention_maps_by_cluster(
-            attention_data, 
+            attention_data,  # 🔥 attention_data 추가
             clustering_results, 
-            clustering_results_dir,  # 🔥 clustering_results 디렉토리 사용
+            clustering_results_dir,
             layer_idx
         )
     

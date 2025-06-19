@@ -25,7 +25,18 @@ from sklearn.metrics import silhouette_score, silhouette_samples, calinski_harab
 from sklearn.manifold import TSNE
 import seaborn as sns
 from scipy.spatial.distance import cdist
+import sys
+import os
+from pathlib import Path
 
+# sys.path에 루트 디렉토리 추가
+current_dir = Path(__file__).resolve().parent
+root_dir = current_dir.parent
+sys.path.append(str(root_dir))
+
+from scipy.signal import find_peaks
+...
+from models.TabularFLM import Model
 # 기존 모듈들 import
 from models.TabularFLM import Model
 from dataset.data_dataloaders import prepare_embedding_dataloaders, get_few_shot_embedding_samples
@@ -52,6 +63,20 @@ def ensure_deterministic():
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     
     logger.info("✅ Deterministic mode enabled")
+
+def find_checkpoint_by_pattern(checkpoint_dir: Path, pattern: str) -> Path:
+    """
+    주어진 패턴에 대해 날짜를 제외한 .pt 파일 경로를 탐색해서 반환합니다.
+    
+    예: pattern = "Embed:carte_desc_Edge:mlp_A:att" → 해당 패턴이 prefix인 .pt 파일을 반환
+    """
+    all_pt_files = list(checkpoint_dir.glob(f"{pattern}_*.pt"))
+    if not all_pt_files:
+        raise FileNotFoundError(f"No checkpoint found matching pattern: {pattern}_*.pt in {checkpoint_dir}")
+    
+    # 가장 최근 파일 기준으로 정렬
+    all_pt_files.sort()
+    return all_pt_files[-1]  # 가장 마지막 파일 반환
 
 class ComprehensiveClusteringAnalyzer:
     def __init__(self, checkpoint_dir, device='cuda'):
@@ -2181,11 +2206,12 @@ def main():
         
         if args.output_dir is None:
             # fallback
-            args.output_dir = checkpoint_dir.parent.parent / args.mode / config_folder / 'comprehensive_metrics_analysis'
+            args.output_dir = checkpoint_dir.parent.parent / args.mode / config_folder / 'comprehensive_metrics_analysis1'
     
     logger.info(f"📁 Results will be saved to: {args.output_dir}")
     
     # Comprehensive Analyzer 초기화
+    
     analyzer = ComprehensiveClusteringAnalyzer(args.checkpoint_dir)
     
     # 데이터로더 선택

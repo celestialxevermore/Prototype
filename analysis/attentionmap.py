@@ -5,8 +5,8 @@ Checkpoint별 Attention Maps 저장 스크립트
 저장 경로: /storage/personal/eungyeop/experiments/attention_map/{llm_model}/{source_data}/{mode}/{config}/
 
 Usage:
-    python save_attention_maps.py --checkpoint_path /path/to/checkpoint.pt
     python save_attention_maps.py --checkpoint_dir /path/to/checkpoint/dir  # 디렉토리 내 모든 .pt 파일
+    python save_attention_maps.py --checkpoint_dir /path/to/checkpoint/dir --pattern "*Edge-True*"  # 특정 패턴 파일만
 """
 
 import os
@@ -18,10 +18,14 @@ import logging
 from pathlib import Path
 import re
 from torch.utils.data import ConcatDataset, DataLoader
+import fnmatch
 
-# 현재 스크립트의 디렉토리를 Python path에 추가
-current_dir = Path(__file__).parent
-sys.path.append(str(current_dir))
+# 현재 스크립트 파일 위치 (analysis/attentionmap.py)
+current_dir = Path(__file__).resolve().parent
+
+# analysis/의 부모 디렉토리 (즉, ProtoLLM/)
+root_dir = current_dir.parent
+sys.path.append(str(root_dir))  # models, dataset, utils 등이 위치한 루트 디렉토리를 추가
 
 from models.TabularFLM import Model
 from dataset.data_dataloaders import prepare_embedding_dataloaders, get_few_shot_embedding_samples
@@ -52,30 +56,31 @@ def extract_config_from_checkpoint(checkpoint_path):
     """체크포인트 파일명에서 설정 정보를 추출"""
     filename = Path(checkpoint_path).stem
     
-    # 날짜/시간 패턴 제거 (20250616_161300 형태)
+    # 날짜/시간 패턴 제거 (20250617_173832 형태)
     filename_clean = re.sub(r'_\d{8}_\d{6}$', '', filename)
     
-    # "Embed:carte_desc_Edge:False_A:gat" 형태를 파싱
-    pattern = r'Embed:([^_]+(?:_[^_]+)*?)_Edge:(True|False)_A:([^_]+)'
+    # "Embed:carte_desc_Edge:mlp_A:att" 형태를 파싱
+    pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+)'
     match = re.match(pattern, filename_clean)
     
     if match:
         embed_type = match.group(1)  # carte, carte_desc, ours, ours2
-        edge_attr = match.group(2)   # True, False
+        edge_attr = match.group(2)   # mlp, True, False
         attn_type = match.group(3)   # att, gat
         
         return {
             'embed_type': embed_type,
-            'edge_attr': edge_attr == 'True',
+            'edge_attr': edge_attr,
             'attn_type': attn_type,
             'config_str': f"Embed-{embed_type}_Edge-{edge_attr}_A-{attn_type}"
         }
     else:
         # 패턴 매칭 실패시 기본값
         logger.warning(f"Could not parse config from filename: {filename}")
+        logger.warning(f"Cleaned filename: {filename_clean}")
         return {
             'embed_type': 'unknown',
-            'edge_attr': False,
+            'edge_attr': 'unknown',
             'attn_type': 'unknown',
             'config_str': filename_clean.replace(':', '-')
         }
@@ -304,25 +309,40 @@ class AttentionMapExtractor:
 
         return pred, attention_weights
 
-def find_checkpoint_files(checkpoint_dir):
-    """디렉토리에서 모든 .pt 파일 찾기"""
-    checkpoint_dir = Path(checkpoint_dir)
-    pt_files = list(checkpoint_dir.rglob("*.pt"))
+def find_checkpoint_files(checkpoint_path, pattern="*.pt"):
+    """디렉토리 또는 파일에서 패턴에 맞는 .pt 파일 찾기"""
+    checkpoint_path = Path(checkpoint_path)
     
-    # 파일명에 날짜가 포함된 것들만 필터링 (임시 파일 제외)
-    filtered_files = []
-    for pt_file in pt_files:
-        if re.search(r'\d{8}_\d{6}', pt_file.stem):  # 날짜 패턴이 있는 파일
-            filtered_files.append(pt_file)
+    # 파일인 경우 해당 파일만 반환
+    if checkpoint_path.is_file() and checkpoint_path.suffix == '.pt':
+        if re.search(r'\d{8}_\d{6}', checkpoint_path.stem):  # 날짜 패턴 확인
+            return [checkpoint_path]
+        else:
+            return []
     
-    return filtered_files
+    # 디렉토리인 경우 패턴에 맞는 파일들 찾기
+    if checkpoint_path.is_dir():
+        # 모든 .pt 파일 찾기
+        pt_files = list(checkpoint_path.rglob("*.pt"))
+        
+        # 파일명에 날짜가 포함된 것들만 필터링 (임시 파일 제외)
+        filtered_files = []
+        for pt_file in pt_files:
+            if re.search(r'\d{8}_\d{6}', pt_file.stem):  # 날짜 패턴이 있는 파일
+                # 패턴 매칭 확인
+                if fnmatch.fnmatch(pt_file.name, pattern):
+                    filtered_files.append(pt_file)
+        
+        return filtered_files
+    
+    return []
 
 def main():
     parser = argparse.ArgumentParser(description='Extract and save attention maps from checkpoints')
-    parser.add_argument('--checkpoint_path', type=str, default=None,
-                       help='Path to specific checkpoint file')
-    parser.add_argument('--checkpoint_dir', type=str, default=None,
-                       help='Directory containing checkpoint files (will process all .pt files)')
+    parser.add_argument('--checkpoint_dir', type=str, required=True,
+                       help='Directory containing checkpoint files OR path to specific checkpoint file')
+    parser.add_argument('--pattern', type=str, default="*.pt",
+                       help='Pattern to match checkpoint files (e.g., "*Edge-True*", "*gat*")')
     parser.add_argument('--output_dir', type=str, 
                        default="/storage/personal/eungyeop/experiments/attention_map",
                        help='Base output directory for attention maps')
@@ -331,20 +351,20 @@ def main():
     
     args = parser.parse_args()
     
-    if args.checkpoint_path is None and args.checkpoint_dir is None:
-        parser.error("Either --checkpoint_path or --checkpoint_dir must be specified")
-    
     # 처리할 checkpoint 파일들 수집
-    if args.checkpoint_path:
-        checkpoint_files = [Path(args.checkpoint_path)]
-    else:
-        checkpoint_files = find_checkpoint_files(args.checkpoint_dir)
+    checkpoint_files = find_checkpoint_files(args.checkpoint_dir, args.pattern)
     
     if not checkpoint_files:
-        logger.error("No checkpoint files found!")
+        checkpoint_path = Path(args.checkpoint_dir)
+        if checkpoint_path.is_file():
+            logger.error(f"Checkpoint file {args.checkpoint_dir} does not match the expected pattern (must contain date like 20250617_163404)!")
+        else:
+            logger.error(f"No checkpoint files found in {args.checkpoint_dir} matching pattern '{args.pattern}'!")
         return
     
-    logger.info(f"Found {len(checkpoint_files)} checkpoint files to process")
+    logger.info(f"Found {len(checkpoint_files)} checkpoint files matching pattern '{args.pattern}':")
+    for i, file in enumerate(checkpoint_files):
+        logger.info(f"  {i+1}. {file.name}")
     
     # 각 checkpoint에 대해 attention maps 추출
     success_count = 0
@@ -373,6 +393,7 @@ def main():
     logger.info(f"   Total files: {len(checkpoint_files)}")
     logger.info(f"   Successfully processed: {success_count}")
     logger.info(f"   Failed: {len(checkpoint_files) - success_count}")
+    logger.info(f"   Pattern used: {args.pattern}")
     logger.info(f"   Output directory: {args.output_dir}")
 
 if __name__ == "__main__":

@@ -920,8 +920,8 @@ def main():
     # 출력 디렉토리 설정
     if args.output_dir is None:
         config_str = extract_config_from_attention_path(attention_map_dir)
-        args.output_dir = Path(str(attention_map_dir).replace('/attention_map/', '/visualization/') + f'_clustering_{args.n_clusters}')
-    
+        base_visualization_dir = str(attention_map_dir).replace('/attention_map/', '/visualization/')
+        args.output_dir = Path(base_visualization_dir) / f'clustering2_{args.n_clusters}'
     args.output_dir = Path(args.output_dir)
     
     # 설정 정보 추출 및 로깅

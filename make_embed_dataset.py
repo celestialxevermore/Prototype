@@ -6,7 +6,7 @@ import os
 import sys
 import pickle, torch, random
 import argparse, pdb
-from table_to_embedding_ours import Table2EmbeddingTransformer
+#from LLM.tabular.ProtoLLM.utils.table_to_embedding_ours import Table2EmbeddingTransformer
 
 class TabularToEmbeddingDataset:
     def __init__(self, args, base_path: str = "/storage/personal/eungyeop/dataset/table/"):
@@ -145,8 +145,8 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
-        #"heart",
-        #"diabetes",
+        "heart",
+        "diabetes",
         "adult"
     ]
     

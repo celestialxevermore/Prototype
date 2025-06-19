@@ -11,7 +11,6 @@
 '''
 
 
-
 from transformers import LlamaConfig, LlamaModel, LlamaTokenizer, GPT2Config, GPT2Model, GPT2Tokenizer, BertConfig, BertModel, BertTokenizer
 import numpy as np 
 import pandas as pd 
@@ -51,11 +50,32 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         self.llm_model_name = args.llm_model
         self.source_dataset_name = source_dataset_name
         self._load_lm_model()
-        #self.word_embeddings = self.llm_model.get_input_embeddings().weight
         self.label_description = self._get_label_desc()
         self.label_embedding = self._transform_label()
         self.n_components = args.input_dim
         n_jobs: int = 1
+        
+        # 컬럼 정보를 저장할 변수들 초기화
+        self.cat_col_names = None
+        self.num_col_names = None
+        self.col_names = None
+        self.cat_name_to_description = None
+        self.num_name_to_description = None
+        
+    def _process_column_names(self, X):
+        """컬럼명 처리 로직을 분리한 메서드"""
+        cat_col_names = X.select_dtypes(include="object").columns 
+        cat_col_names = cat_col_names.str.replace("\n", " ", regex=True)
+        cat_col_names = list(cat_col_names)
+        
+        num_col_names = X.select_dtypes(exclude="object").columns 
+        num_col_names = num_col_names.str.replace("\n", " ", regex=True)
+        num_col_names = list(num_col_names)
+        
+        col_names = cat_col_names + num_col_names
+        
+        return cat_col_names, num_col_names, col_names
+        
     def fit(self, X, y=None):
         """Fit function used for the Table2GraphTransformer
 
@@ -78,21 +98,21 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         if not hasattr(self, "lm_model_"):
             self._load_lm_model()
         
-        # Relations
-        cat_col_names = X.select_dtypes(include="object").columns 
-        cat_col_names = cat_col_names.str.replace("\n", " ", regex=True)
-        self.cat_col_names = list(cat_col_names)
-        num_col_names = X.select_dtypes(exclude="object").columns 
-        num_col_names = num_col_names.str.replace("\n", " ", regex=True)
-        self.num_col_names = list(num_col_names)
-        self.col_names = self.cat_col_names + self.num_col_names # n_i  = \{n_1, n_2, ... n_d\}
+        # 컬럼명 처리 - fit에서 한 번만 수행
+        self.cat_col_names, self.num_col_names, self.col_names = self._process_column_names(X)
+        
+        # Description 매핑 생성 - fit에서 한 번만 수행
         self.cat_name_to_description = {name: self._get_feature_description(name) for name in self.cat_col_names}
         self.num_name_to_description = {name: self._get_feature_description(name) for name in self.num_col_names}
 
-        self.num_transformer = PowerTransformer().set_output(transform="pandas")
+        # Numerical transformer 설정
+        if self.scaler_type == 'pow':
+            self.num_transformer = PowerTransformer().set_output(transform="pandas")
+            if len(self.num_col_names) > 0:
+                X_num = X[self.num_col_names]
+                self.num_transformer.fit(X_num)
 
         return self
-
 
     def _load_lm_model(self):
         # GPT2 모델
@@ -201,9 +221,6 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         if hasattr(self, 'llm_model') and self.llm_model is not None:
             for param in self.llm_model.parameters():
                 param.requires_grad = False
-                
-        
-
 
     def _get_label_desc(self) -> str:
         if self.source_dataset_name is None:
@@ -276,50 +293,38 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         Embedding Data : list of size (n_samples).
             The list of transformed embedding data.
         """
+        # fit()에서 설정된 컬럼 정보 사용 (중복 제거)
+        if self.cat_col_names is None or self.num_col_names is None:
+            raise ValueError("Transformer must be fitted before transform. Call fit() first.")
+            
         X_ = X.copy()
         X_ = X_.replace("\n", " ", regex=True)
         num_data = X_.shape[0]
-
 
         y_ = None 
         if self.y_ is not None:
             y_ = np.array(self.y_)
             y_ = torch.tensor(y_).reshape((num_data, 1))
-        
 
-        # Separate categorical and numerical columns
+        # fit()에서 설정된 컬럼명 사용
         X_categorical = X_.select_dtypes(include="object").copy()
         X_categorical.columns = self.cat_col_names
         X_numerical = X_.select_dtypes(exclude="object").copy()
         X_numerical.columns = self.num_col_names
-        # Features for names
-        cat_col_names = X.select_dtypes(include="object").columns 
-        cat_col_names = cat_col_names.str.replace("\n", " ", regex=True)
-        self.cat_col_names = list(cat_col_names)
-        num_col_names = X.select_dtypes(exclude="object").columns 
-        num_col_names = num_col_names.str.replace("\n", " ", regex=True)
-        self.num_col_names = list(num_col_names)
-        self.col_names = self.cat_col_names + self.num_col_names # n_i  = \{n_1, n_2, ... n_d\}
-        self.cat_name_to_description = {name: self._get_feature_description(name) for name in self.cat_col_names}
-        self.num_name_to_description = {name: self._get_feature_description(name) for name in self.num_col_names}
-        if self.scaler_type == 'pow':
-            self.num_transformer = PowerTransformer().set_output(transform="pandas")
-            X_num = X[self.num_col_names]
-            self.num_transformer.fit(X_num)
-        self.is_fitted_ = True
 
+        # Numerical transformer 처리
         if len(self.num_col_names) != 0:
             X_numerical = self._get_num(X_numerical)
+            
         if not self.is_fitted_:
-            self.is_fitted = True 
-        #pdb.set_trace()
+            self.is_fitted_ = True 
 
         embedding_data = [
             self._get_embeddings(
                 X_categorical,
                 X_numerical,
-                self.cat_name_to_description,
-                self.num_name_to_description,
+                self.cat_name_to_description,  # fit()에서 생성된 것 사용
+                self.num_name_to_description,  # fit()에서 생성된 것 사용
                 y_[i] if y_ is not None else None,
                 idx=i,
             )
@@ -329,12 +334,9 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         return embedding_data
     
     def _get_num(self, X_numerical):
-        X_num = X_numerical.copy() 
-        if not self.is_fitted_:
-            X_num = self.num_transformer.fit_transform(X_num)
-        else:
-            X_num = self.num_transformer.transform(X_num)
-        return X_num   
+        """Transform numerical columns using power transformer"""
+        return self.num_transformer.transform(X_numerical)   
+        
     def _transform_cat(self, X_categorical, cat_name_to_description): 
         cat_name_embeddings = []
         cat_desc_embeddings = [] 
@@ -358,7 +360,6 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     cat_desc_embeddings.append(feature_desc_emb)
                     cat_value_embeddings.append(feature_value_emb)
             else:
-                #pdb.set_trace()
                 # Name embedding
                 feature_name_input = self.tokenizer(feature_name, return_tensors="pt", padding=True, truncation=True)
                 # Description embedding
@@ -391,12 +392,10 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 cat_name_embeddings.append(feature_name_emb)
                 cat_desc_embeddings.append(feature_desc_emb)
                 cat_value_embeddings.append(feature_value_emb)
-            #pdb.set_trace()
         cat_name_embeddings = torch.stack(cat_name_embeddings, dim= 0)
         cat_desc_embeddings = torch.stack(cat_desc_embeddings, dim= 0)
         cat_value_embeddings = torch.stack(cat_value_embeddings, dim = 0)
         return cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings, cat_desc_texts 
-
 
     def _transform_num(self, data_num, num_name_to_description):
         """
@@ -418,7 +417,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         for feature_name, value in data_num.items():
             description = num_name_to_description[feature_name]
             num_desc_texts.append(feature_name)
-            #pdb.set_trace()
+            
             if self.llm_model_name == 'sentence-bert':
                 with torch.no_grad():
                     # Feature name embedding
@@ -460,8 +459,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         num_desc_embeddings = torch.stack(num_desc_embeddings, dim=0)
 
         return num_name_embeddings, num_desc_embeddings, num_desc_texts
-
-
+    
     def _get_embeddings(self, X_categorical, X_numerical, cat_name_to_description, num_name_to_description, y, idx):
         """Transform to graph objects.
 
@@ -539,7 +537,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     'num_desc_embeddings': num_desc_embeddings,     # description embedding (edge attribute용)
                     'num_desc_texts': num_desc_texts
                 })
-                
+
         return data
 
 
