@@ -146,8 +146,8 @@ if __name__ == "__main__":
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
         "heart",
-        "diabetes",
-        "adult"
+        #"diabetes",
+        #"adult"
     ]
     
     for dataset_name in datasets_to_process:

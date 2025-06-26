@@ -28,7 +28,7 @@ def get_args():
     parser.add_argument('--random_seed', type=int, default=42, help='random_seed')
     parser.add_argument('--dataset_seed', type=int, default=4)
     
-    parser.add_argument('--source_dataset_name', type=str, default='cleveland', 
+    parser.add_argument('--source_data', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g',
                                 'diabetes','heart','myocardial','cleveland', 
                                 'heart_statlog','hungarian','switzerland'])
@@ -56,20 +56,20 @@ def main():
     args = get_args()
     fix_seed(args.random_seed)
     
-    logger.info(f"Starting experiment with dataset: {args.source_dataset_name}")
+    logger.info(f"Starting experiment with dataset: {args.source_data}")
     logger.info(f"Preparing Tabular datasets...")
 
     # 데이터셋 준비
     (X_train_full, X_val_full, X_test_full, 
      y_train_full, y_val_full, y_test_full), _ = ml_prepare_tabular_dataloaders(
-        args, args.source_dataset_name, args.random_seed
+        args, args.source_data, args.random_seed
     )
 
     X_train_few, y_train_few = get_few_shot_tabular_samples(X_train_full, y_train_full, args)
     X_val_few, y_val_few = X_val_full, y_val_full
     X_test_few, y_test_few = X_test_full, y_test_full
     
-    logger.info(f"Datasets prepared, source dataset names : {args.source_dataset_name}")
+    logger.info(f"Datasets prepared, source dataset names : {args.source_data}")
     
     # 이진 분류 여부 확인
     is_binary = (len(np.unique(y_train_full)) == 2)
@@ -122,13 +122,13 @@ def main():
 
         elif baseline == "lr":
             # Logistic Regression
-            full_baseline_results[baseline] = logistic_regression_benchmark(
+            full_baseline_results[baseline], _ = logistic_regression_benchmark(
                 args,
                 X_train_full, X_val_full, X_test_full,
                 y_train_full, y_val_full, y_test_full,
                 is_binary=is_binary,
             )
-            few_baseline_results[baseline] = logistic_regression_benchmark(
+            few_baseline_results[baseline], _ = logistic_regression_benchmark(
                 args,
                 X_train_few, X_val_few, X_test_few,
                 y_train_few, y_val_few, y_test_few,

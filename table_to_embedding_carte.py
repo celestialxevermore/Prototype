@@ -305,7 +305,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             
         if not self.is_fitted_:
             self.is_fitted_ = True 
-
+        
         embedding_data = [
             self._get_embeddings(
                 X_categorical,

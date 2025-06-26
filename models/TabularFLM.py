@@ -387,7 +387,7 @@ class Model(nn.Module):
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
         desc_embeddings = [] 
         name_value_embeddings = [] 
-        
+
 
         if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
             cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device).squeeze(-2)

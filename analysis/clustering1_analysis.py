@@ -12,6 +12,7 @@ import os
 # CUDA deterministic 설정을 가장 먼저 설정
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
+import pickle
 import torch
 import argparse
 import numpy as np
@@ -790,7 +791,17 @@ class AttentionInference:
         # K-means 클러스터링
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
         cluster_assignments = kmeans.fit_predict(flattened_maps)
-        
+        if output_dir:
+            # clustering 폴더 경로로 변경
+            clustering_dir = str(output_dir).replace('/visualization/', '/clustering/')
+            clustering_path = Path(clustering_dir)
+            clustering_path.mkdir(parents=True, exist_ok=True)
+            
+            # KMeans 모델 저장
+            kmeans_path = clustering_path / f'layer_{layer_idx}_kmeans_model.pkl'
+            with open(kmeans_path, 'wb') as f:
+                pickle.dump(kmeans, f)
+            logger.info(f"🔥 KMeans model saved to: {kmeans_path}")
         # 클러스터링 결과 출력
         unique_labels = np.unique(labels)
         for cluster_id in range(n_clusters):
@@ -1422,9 +1433,13 @@ class AttentionInference:
         logger.info(f"✅ Layer {layer_idx} distribution saved with clean legend!")
 
     def _visualize_cluster_centroids(self, cluster_centers, feature_names, layer_idx, output_dir, n_clusters):
-        """클러스터 센트로이드 히트맵 시각화 (모든 클러스터 지원 + 폴더 정리)"""
+        """클러스터 센트로이드 히트맵 시각화 (모든 클러스터 지원 + 폴더 정리 + 동일한 스케일)"""
         seq_len = len(feature_names)
         centroids_reshaped = cluster_centers.reshape(-1, seq_len, seq_len)
+        
+        # 🔥 전체 클러스터의 공통 스케일 계산
+        global_vmin = centroids_reshaped.min()
+        global_vmax = centroids_reshaped.max()
         
         # centroid 폴더 생성
         centroid_dir = output_dir / 'centroid'
@@ -1465,11 +1480,12 @@ class AttentionInference:
         else:
             axes = axes.flatten()
         
-        # 모든 클러스터 시각화 (제한 없음!)
+        # 🔥 모든 클러스터에 동일한 스케일 적용
         for i, centroid in enumerate(centroids_reshaped):
             ax = axes[i]
             
-            im = ax.imshow(centroid, cmap='viridis', interpolation='nearest')
+            im = ax.imshow(centroid, cmap='viridis', interpolation='nearest',
+                        vmin=global_vmin, vmax=global_vmax)  # 🔥 공통 스케일 적용
             ax.set_title(f'Cluster {i} Centroid', fontsize=11)
             
             # 축 라벨 설정
@@ -1488,7 +1504,8 @@ class AttentionInference:
         for i in range(n_clusters, len(axes)):
             axes[i].set_visible(False)
         
-        plt.suptitle(f'Layer {layer_idx} Cluster Centroids (All {n_clusters} clusters)', fontsize=14)
+        plt.suptitle(f'Layer {layer_idx} Cluster Centroids (All {n_clusters} clusters)\nScale: {global_vmin:.3f} - {global_vmax:.3f}', 
+                    fontsize=14)  # 🔥 스케일 정보 표시
         plt.tight_layout()
         
         # overview는 메인 폴더에 저장
@@ -1496,14 +1513,16 @@ class AttentionInference:
                 dpi=300, bbox_inches='tight')
         plt.close(fig)
         
-        logger.info(f"All {n_clusters} cluster centroids overview saved: layer_{layer_idx}_cluster_centroids_overview.png")
+        logger.info(f"All {n_clusters} cluster centroids overview saved with fixed scale [{global_vmin:.3f}, {global_vmax:.3f}]")
         
         # 2. 각 센트로이드별로 개별 상세 플롯 생성 (centroid 폴더에 저장)
         for i, centroid in enumerate(centroids_reshaped):
             fig, ax = plt.subplots(1, 1, figsize=(10, 8))
             
-            im = ax.imshow(centroid, cmap='viridis', interpolation='nearest')
-            ax.set_title(f'Cluster {i} Centroid - Layer {layer_idx}', fontsize=16, pad=20)
+            im = ax.imshow(centroid, cmap='viridis', interpolation='nearest',
+                        vmin=global_vmin, vmax=global_vmax)  # 🔥 공통 스케일 적용
+            ax.set_title(f'Cluster {i} Centroid - Layer {layer_idx}\nScale: {global_vmin:.3f} - {global_vmax:.3f}', 
+                        fontsize=16, pad=20)  # 🔥 스케일 정보 표시
             
             # 축 라벨 설정 (더 큰 폰트)
             ax.set_xticks(np.arange(len(feature_names)))
@@ -1511,13 +1530,15 @@ class AttentionInference:
             ax.set_xticklabels(feature_names, rotation=90, ha='right', fontsize=12)
             ax.set_yticklabels(feature_names, fontsize=12)
             
-            # 각 셀에 값 표시 (상세 버전)
+            # 각 셀에 값 표시 (상세 버전) - 🔥 텍스트 색상 기준을 공통 스케일로 조정
             for row in range(len(feature_names)):
                 for col in range(len(feature_names)):
                     value = centroid[row, col]
+                    # 공통 스케일의 중간값을 기준으로 텍스트 색상 결정
+                    threshold = (global_vmin + global_vmax) / 2
                     ax.text(col, row, f"{value:.2f}", 
                         ha="center", va="center", 
-                        color="white" if value > 0.15 else "black", 
+                        color="white" if value > threshold else "black", 
                         fontsize=10, weight='bold')
             
             # 컬러바 추가
@@ -1532,9 +1553,8 @@ class AttentionInference:
                     dpi=300, bbox_inches='tight')
             plt.close(fig)
         
-        logger.info(f"All {n_clusters} detailed centroids saved in {centroid_dir}")
+        logger.info(f"All {n_clusters} detailed centroids saved with fixed scale in {centroid_dir}")
         logger.info(f"All cluster centroids saved for layer {layer_idx}")
-
 
 def extract_checkpoint_config_for_folder(checkpoint_path):
     """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환"""

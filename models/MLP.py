@@ -237,4 +237,4 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
         'test_mlp_precision': test_precision
     }
     
-    return total_results
+    return total_results, model

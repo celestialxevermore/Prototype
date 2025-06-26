@@ -8,6 +8,7 @@ import pandas as pd
 from utils.metrics import compute_overall_accuracy
 import logging
 
+
 def logistic_regression_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_binary=True, max_iter=200):
     print("Input columns:", X_train.columns.tolist())
     categorical_columns = X_train.select_dtypes(include=['object', 'category']).columns
@@ -47,6 +48,7 @@ def logistic_regression_benchmark(args, X_train, X_valid, X_test, y_train, y_val
                 C=c,
                 penalty=penalty,
                 solver=solver,
+                class_weight='balanced',
                 random_state=args.random_seed
             )
             
@@ -114,4 +116,4 @@ def logistic_regression_benchmark(args, X_train, X_valid, X_test, y_train, y_val
         'best_lr_loss': best_loss,
     }
 
-    return total_results
+    return total_results, final_pipeline
