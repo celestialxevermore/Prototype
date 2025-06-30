@@ -208,28 +208,34 @@ class ClusterTrainingExperiment:
     
     def train_and_save_cluster_model(self, cluster_id, X_train, X_valid, y_train, y_valid, args, is_binary, models_dir):
         """
-        개별 클러스터 모델 학습 및 저장 - 기존 LogReg benchmark 사용
+        개별 클러스터 모델 학습 및 저장 - binary/multi-class 모두 지원
         """
         from models.LogReg import logistic_regression_benchmark
-        from models.MLP import mlp_benchmark
         import pickle
         
         try:
-            # 기존 LogReg benchmark 함수 사용 (공정한 비교)
+            # 클래스 수 확인
+            unique_labels = np.unique(y_train)
+            n_classes = len(unique_labels)
+            actual_is_binary = (n_classes == 2)
+            
+            logger.info(f"Cluster {cluster_id}: {n_classes} classes, Binary: {actual_is_binary}")
+            
+            # LogReg benchmark 사용
             result, trained_model = logistic_regression_benchmark(
                 args,
-                X_train, X_valid, X_valid,  # test는 valid로 임시 사용 (validation만 필요)
+                X_train, X_valid, X_valid,
                 y_train, y_valid, y_valid,
-                is_binary=is_binary
+                is_binary=actual_is_binary
             )
             
-            # 결과에서 validation 성능 추출
-            valid_auc = result.get('test_lr_auc', 0.0)  # test 자리에 valid를 넣었으므로
+            # 결과 추출
+            valid_auc = result.get('test_lr_auc', 0.0)
             valid_auprc = result.get('test_lr_auprc', 0.0)
             best_c = result.get('best_lr_c', 1.0)
             best_penalty = result.get('best_lr_penalty', 'l2')
             
-            # benchmark에서 받은 모델 바로 저장
+            # 모델 저장
             model_path = models_dir / f'cluster_{cluster_id}_model.pkl'
             with open(model_path, 'wb') as f:
                 pickle.dump(trained_model, f)
@@ -242,12 +248,14 @@ class ClusterTrainingExperiment:
                 'model_path': str(model_path),
                 'train_samples': len(X_train),
                 'valid_samples': len(X_valid),
+                'is_binary': actual_is_binary,
+                'n_classes': n_classes,
                 'train_label_dist': dict(zip(*np.unique(y_train, return_counts=True))),
                 'valid_label_dist': dict(zip(*np.unique(y_valid, return_counts=True)))
             }
             
             logger.info(f"Cluster {cluster_id}: AUC={valid_auc:.4f}, AUPRC={valid_auprc:.4f}, "
-                    f"C={best_c}, penalty={best_penalty}, Samples={len(X_train)}")
+                    f"Classes={n_classes}, Samples={len(X_train)}")
             
             return cluster_result
             
@@ -501,13 +509,6 @@ class ClusterTrainingExperiment:
     def predict_moe_on_test(self, cluster_results, checkpoint_dir):
         """
         MoE 방식으로 test 데이터 예측 (체크포인트로부터 실시간 attention 추출)
-        
-        Args:
-            cluster_results: 클러스터별 모델 결과
-            checkpoint_dir: TabularFLM 체크포인트 경로
-            
-        Returns:
-            dict: MoE 예측 결과
         """
         logger.info("=== MoE prediction on test data ===")
         import pickle
@@ -517,6 +518,13 @@ class ClusterTrainingExperiment:
         if X_test_full is None:
             logger.error("Failed to load test data")
             return None
+        
+        # 클래스 수 확인 (binary vs multi-class)
+        unique_labels = np.unique(y_test_full)
+        n_classes = len(unique_labels)
+        is_binary = (n_classes == 2)
+        
+        logger.info(f"Detected {n_classes} classes, Binary: {is_binary}")
         
         # 2. Test 데이터의 attention maps 추출
         test_attention_data = self.extract_test_attention_maps(checkpoint_dir)
@@ -534,17 +542,20 @@ class ClusterTrainingExperiment:
         logger.info(f"Loaded centroids with shape: {centroids.shape}")
         
         # 4. Test 샘플들의 attention maps를 centroid와 거리 계산으로 클러스터 할당
-        test_attention_maps = np.stack(test_attention_data['layer_2'])  # layer_2 사용
+        test_attention_maps = np.stack(test_attention_data['layer_2'])
         test_flattened = test_attention_maps.reshape(len(test_attention_maps), -1)
         
-        # 거리 계산 및 클러스터 할당
         distances = pairwise_distances(test_flattened, centroids, metric='euclidean')
         test_cluster_assignments = np.argmin(distances, axis=1)
         
         logger.info(f"Test cluster assignments: {np.bincount(test_cluster_assignments)}")
         
-        # 5. 각 test 샘플을 할당된 클러스터의 모델로 예측 (순서로 매칭)
-        all_predictions_proba = []  # AUC/AUPRC용
+        # 5. 각 test 샘플을 할당된 클러스터의 모델로 예측
+        if is_binary:
+            all_predictions_proba = []  # Binary: 단일 확률값
+        else:
+            all_predictions_proba = []  # Multi-class: 클래스별 확률값 배열
+        
         all_true_labels = []
         successful_predictions = 0
         
@@ -563,14 +574,18 @@ class ClusterTrainingExperiment:
                 with open(model_path, 'rb') as f:
                     model = pickle.load(f)
                 
-                # i번째 샘플 사용 (순서 매칭)
                 test_sample_df = X_test_full.iloc[[i]]
                 true_label = y_test_full.iloc[i]
                 
-                # 확률값만 수집 (threshold 적용 안함)
-                prediction_proba = model.predict_proba(test_sample_df)[0, 1]  # 이진분류 positive class
+                if is_binary:
+                    # Binary: positive class 확률만
+                    prediction_proba = model.predict_proba(test_sample_df)[0, 1]
+                    all_predictions_proba.append(prediction_proba)
+                else:
+                    # Multi-class: 모든 클래스 확률
+                    prediction_proba = model.predict_proba(test_sample_df)[0]  # shape: (n_classes,)
+                    all_predictions_proba.append(prediction_proba)
                 
-                all_predictions_proba.append(prediction_proba)
                 all_true_labels.append(true_label)
                 successful_predictions += 1
                 
@@ -585,9 +600,25 @@ class ClusterTrainingExperiment:
             logger.error("No predictions generated for MoE")
             return None
         
-        # 6. AUROC/AUPRC만 계산
-        test_auc = roc_auc_score(all_true_labels, all_predictions_proba)
-        test_auprc = average_precision_score(all_true_labels, all_predictions_proba)
+        # 6. AUC/AUPRC 계산
+        if is_binary:
+            test_auc = roc_auc_score(all_true_labels, all_predictions_proba)
+            test_auprc = average_precision_score(all_true_labels, all_predictions_proba)
+        else:
+            # Multi-class AUC
+            from sklearn.preprocessing import label_binarize
+            
+            # 확률값을 배열로 변환
+            all_predictions_proba = np.array(all_predictions_proba)  # shape: (n_samples, n_classes)
+            
+            # True labels를 binarize
+            y_true_bin = label_binarize(all_true_labels, classes=range(n_classes))
+            
+            # One-vs-Rest 방식으로 AUC 계산
+            test_auc = roc_auc_score(y_true_bin, all_predictions_proba, multi_class='ovr', average='macro')
+            
+            # Multi-class AUPRC는 macro average로 계산
+            test_auprc = average_precision_score(y_true_bin, all_predictions_proba, average='macro')
         
         # 클러스터별 예측 분포 로깅
         cluster_pred_counts = {}
@@ -602,6 +633,8 @@ class ClusterTrainingExperiment:
             'test_auprc': test_auprc,
             'total_test_samples': len(all_predictions_proba),
             'method': 'MoE',
+            'is_binary': is_binary,
+            'n_classes': n_classes,
             'cluster_assignments': test_cluster_assignments[:successful_predictions].tolist()
         }
         
@@ -612,13 +645,7 @@ class ClusterTrainingExperiment:
     
     def predict_full_on_test(self, full_result):
         """
-        Full population 모델로 test 데이터 예측 (실제 모델 로드 및 예측)
-        
-        Args:
-            full_result: 전체 모델 결과
-            
-        Returns:
-            dict: Full population 예측 결과
+        Full population 모델로 test 데이터 예측
         """
         logger.info("=== Full population prediction on test data ===")
         import pickle
@@ -629,6 +656,13 @@ class ClusterTrainingExperiment:
             logger.error("Failed to load test data")
             return None
         
+        # 클래스 수 확인
+        unique_labels = np.unique(y_test)
+        n_classes = len(unique_labels)
+        is_binary = (n_classes == 2)
+        
+        logger.info(f"Full population - Detected {n_classes} classes, Binary: {is_binary}")
+        
         # 전체 모델 로드
         model_path = full_result['model_path']
         
@@ -636,18 +670,32 @@ class ClusterTrainingExperiment:
             with open(model_path, 'rb') as f:
                 model = pickle.load(f)
             
-            # 확률값만 계산
-            y_pred_proba = model.predict_proba(X_test)[:, 1]  # 이진분류 가정
+            # 확률값 계산
+            y_pred_proba_full = model.predict_proba(X_test)
             
-            # AUROC/AUPRC만 계산
-            test_auc = roc_auc_score(y_test, y_pred_proba)
-            test_auprc = average_precision_score(y_test, y_pred_proba)
+            # AUC/AUPRC 계산
+            if is_binary:
+                y_pred_proba = y_pred_proba_full[:, 1]  # positive class만
+                test_auc = roc_auc_score(y_test, y_pred_proba)
+                test_auprc = average_precision_score(y_test, y_pred_proba)
+            else:
+                # Multi-class
+                from sklearn.preprocessing import label_binarize
+                
+                # True labels binarize
+                y_true_bin = label_binarize(y_test, classes=range(n_classes))
+                
+                # One-vs-Rest AUC
+                test_auc = roc_auc_score(y_true_bin, y_pred_proba_full, multi_class='ovr', average='macro')
+                test_auprc = average_precision_score(y_true_bin, y_pred_proba_full, average='macro')
             
             full_test_result = {
                 'test_auc': test_auc,
                 'test_auprc': test_auprc,
                 'total_test_samples': len(X_test),
-                'method': 'Full_Population'
+                'method': 'Full_Population',
+                'is_binary': is_binary,
+                'n_classes': n_classes
             }
             
             logger.info(f"Full population test prediction completed - Test AUC: {test_auc:.4f}, Test AUPRC: {test_auprc:.4f}")
