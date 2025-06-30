@@ -20,7 +20,11 @@ class TabularToEmbeddingDataset:
             "switzerland": ['target_binary', ['no','yes']],
             "heart_statlog": ['target_binary', ['no','yes']],
             "adult": ['target_binary', ['no','yes']],
-            "diabetes": ['target_binary', ['no','yes']]
+            "diabetes": ['target_binary', ['no','yes']],
+            "breast" : ['target_binary', [0,1]],
+            "higgs" : ['target_binary', [0,1]],
+            'bank' : ['target_binary', ['no','yes']],
+            "car": ['target_binary', ['unacceptable', 'acceptable', 'very good', 'good']]
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)
 
@@ -50,6 +54,15 @@ class TabularToEmbeddingDataset:
         elif data_name == 'diabetes' and 'Outcome' in DATASETS.columns:
             DATASETS['target_binary'] = DATASETS['Outcome']
             DATASETS = DATASETS.drop('Outcome', axis=1)
+        elif data_name =='breast' and 'target' in DATASETS.columns:
+            DATASETS['target_binary'] = DATASETS['target']
+            DATASETS = DATASETS.drop('target', axis = 1)
+        elif data_name == 'bank' and 'Class' in DATASETS.columns:
+            DATASETS['target_binary'] = DATASETS['Class']
+            DATASETS = DATASETS.drop('Class', axis = 1)
+        elif data_name =='car' and 'class' in DATASETS.columns:
+            DATASETS['target_binary'] = DATASETS['class']
+            DATASETS = DATASETS.drop('class', axis=1)
         
         class_name = self.dataset_and_class[data_name][0]
         class_values = self.dataset_and_class[data_name][1]
@@ -145,7 +158,10 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
-        "heart",
+        'car',
+        #'bank',
+        #"breast",
+        #"heart",
         #"diabetes",
         #"adult"
     ]

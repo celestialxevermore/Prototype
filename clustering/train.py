@@ -125,15 +125,6 @@ class ClusterTrainingExperiment:
         
         logger.info(f"Loaded full population - Train: {len(X_train_full)}, Valid: {len(X_valid_full)}")
         return X_train_full, X_valid_full, y_train_full, y_valid_full
-    
-    def find_optimal_threshold(self, y_true, y_pred_proba):
-        """
-        F1-score를 최대화하는 최적 threshold 찾기
-        """
-        precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
-        f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
-        optimal_idx = np.argmax(f1_scores)
-        return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
     def load_test_data(self):
         """
@@ -189,7 +180,7 @@ class ClusterTrainingExperiment:
                 logger.warning(f"Skipping cluster {cluster_id} due to empty data")
                 continue
             
-            # 클래스가 1개만 있는 경우 스킵 (주석처리됨)
+            # 클래스가 1개만 있는 경우 스킵
             if len(np.unique(y_train)) < 2:
                 logger.warning(f"Skipping cluster {cluster_id} - only one class in training data")
                 continue
@@ -238,10 +229,6 @@ class ClusterTrainingExperiment:
             best_c = result.get('best_lr_c', 1.0)
             best_penalty = result.get('best_lr_penalty', 'l2')
             
-            # 최적 threshold 계산 추가
-            y_valid_pred_proba = trained_model.predict_proba(X_valid)[:, 1]
-            optimal_threshold = self.find_optimal_threshold(y_valid, y_valid_pred_proba)
-            
             # benchmark에서 받은 모델 바로 저장
             model_path = models_dir / f'cluster_{cluster_id}_model.pkl'
             with open(model_path, 'wb') as f:
@@ -251,7 +238,6 @@ class ClusterTrainingExperiment:
                 'cluster_id': cluster_id,
                 'valid_auc': valid_auc,
                 'valid_auprc': valid_auprc,
-                'optimal_threshold': optimal_threshold,  # 추가!
                 'best_params': {'C': best_c, 'penalty': best_penalty},
                 'model_path': str(model_path),
                 'train_samples': len(X_train),
@@ -261,7 +247,7 @@ class ClusterTrainingExperiment:
             }
             
             logger.info(f"Cluster {cluster_id}: AUC={valid_auc:.4f}, AUPRC={valid_auprc:.4f}, "
-                    f"Threshold={optimal_threshold:.3f}, C={best_c}, penalty={best_penalty}, Samples={len(X_train)}")
+                    f"C={best_c}, penalty={best_penalty}, Samples={len(X_train)}")
             
             return cluster_result
             
@@ -332,10 +318,6 @@ class ClusterTrainingExperiment:
             best_c = result.get('best_lr_c', 1.0)
             best_penalty = result.get('best_lr_penalty', 'l2')
             
-            # Full population 모델도 threshold 계산
-            y_valid_pred_proba = trained_model.predict_proba(X_valid)[:, 1]
-            optimal_threshold = self.find_optimal_threshold(y_valid, y_valid_pred_proba)
-            
             # benchmark에서 받은 모델 바로 저장
             model_path = models_dir / 'full_population_model.pkl'
             with open(model_path, 'wb') as f:
@@ -344,7 +326,6 @@ class ClusterTrainingExperiment:
             full_result = {
                 'valid_auc': valid_auc,
                 'valid_auprc': valid_auprc,
-                'optimal_threshold': optimal_threshold,  # 추가!
                 'best_params': {'C': best_c, 'penalty': best_penalty},
                 'model_path': str(model_path),
                 'train_samples': len(X_train),
@@ -354,7 +335,7 @@ class ClusterTrainingExperiment:
             }
             
             logger.info(f"Full population: AUC={valid_auc:.4f}, AUPRC={valid_auprc:.4f}, "
-                    f"Threshold={optimal_threshold:.3f}, C={best_c}, penalty={best_penalty}, Samples={len(X_train)}")
+                    f"C={best_c}, penalty={best_penalty}, Samples={len(X_train)}")
             
             return full_result
             
@@ -407,7 +388,6 @@ class ClusterTrainingExperiment:
             logger.info("TabularFLM model loaded successfully")
             
             # 데이터로더 준비
-            #fix_seed(tabular_args.random_seed)
             results = prepare_embedding_dataloaders(tabular_args, tabular_args.source_data)
             _, _, test_loader = results['loaders']
             
@@ -565,7 +545,6 @@ class ClusterTrainingExperiment:
         
         # 5. 각 test 샘플을 할당된 클러스터의 모델로 예측 (순서로 매칭)
         all_predictions_proba = []  # AUC/AUPRC용
-        all_predictions_binary = []  # Accuracy/Precision/Recall/F1용
         all_true_labels = []
         successful_predictions = 0
         
@@ -579,7 +558,6 @@ class ClusterTrainingExperiment:
             
             # 해당 클러스터 모델 로드
             model_path = cluster_results[cluster_key]['model_path']
-            optimal_threshold = cluster_results[cluster_key]['optimal_threshold']
             
             try:
                 with open(model_path, 'rb') as f:
@@ -589,12 +567,10 @@ class ClusterTrainingExperiment:
                 test_sample_df = X_test_full.iloc[[i]]
                 true_label = y_test_full.iloc[i]
                 
-                # 예측 수행
+                # 확률값만 수집 (threshold 적용 안함)
                 prediction_proba = model.predict_proba(test_sample_df)[0, 1]  # 이진분류 positive class
-                prediction_binary = 1 if prediction_proba >= optimal_threshold else 0
                 
                 all_predictions_proba.append(prediction_proba)
-                all_predictions_binary.append(prediction_binary)
                 all_true_labels.append(true_label)
                 successful_predictions += 1
                 
@@ -609,13 +585,9 @@ class ClusterTrainingExperiment:
             logger.error("No predictions generated for MoE")
             return None
         
-        # 6. 전체 성능 계산
+        # 6. AUROC/AUPRC만 계산
         test_auc = roc_auc_score(all_true_labels, all_predictions_proba)
         test_auprc = average_precision_score(all_true_labels, all_predictions_proba)
-        test_accuracy = accuracy_score(all_true_labels, all_predictions_binary)
-        test_precision = precision_score(all_true_labels, all_predictions_binary, zero_division=0)
-        test_recall = recall_score(all_true_labels, all_predictions_binary, zero_division=0)
-        test_f1 = f1_score(all_true_labels, all_predictions_binary, zero_division=0)
         
         # 클러스터별 예측 분포 로깅
         cluster_pred_counts = {}
@@ -628,17 +600,12 @@ class ClusterTrainingExperiment:
         moe_result = {
             'test_auc': test_auc,
             'test_auprc': test_auprc,
-            'test_accuracy': test_accuracy,
-            'test_precision': test_precision,
-            'test_recall': test_recall,
-            'test_f1': test_f1,
             'total_test_samples': len(all_predictions_proba),
             'method': 'MoE',
             'cluster_assignments': test_cluster_assignments[:successful_predictions].tolist()
         }
         
         logger.info(f"MoE prediction completed - Test AUC: {test_auc:.4f}, Test AUPRC: {test_auprc:.4f}")
-        logger.info(f"MoE metrics - Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
         logger.info(f"Total test samples predicted: {len(all_predictions_proba)}")
         
         return moe_result
@@ -664,37 +631,26 @@ class ClusterTrainingExperiment:
         
         # 전체 모델 로드
         model_path = full_result['model_path']
-        optimal_threshold = full_result['optimal_threshold']
         
         try:
             with open(model_path, 'rb') as f:
                 model = pickle.load(f)
             
-            # 예측 수행
+            # 확률값만 계산
             y_pred_proba = model.predict_proba(X_test)[:, 1]  # 이진분류 가정
-            y_pred_binary = (y_pred_proba >= optimal_threshold).astype(int)
             
-            # 성능 계산
+            # AUROC/AUPRC만 계산
             test_auc = roc_auc_score(y_test, y_pred_proba)
             test_auprc = average_precision_score(y_test, y_pred_proba)
-            test_accuracy = accuracy_score(y_test, y_pred_binary)
-            test_precision = precision_score(y_test, y_pred_binary, zero_division=0)
-            test_recall = recall_score(y_test, y_pred_binary, zero_division=0)
-            test_f1 = f1_score(y_test, y_pred_binary, zero_division=0)
             
             full_test_result = {
                 'test_auc': test_auc,
                 'test_auprc': test_auprc,
-                'test_accuracy': test_accuracy,
-                'test_precision': test_precision,
-                'test_recall': test_recall,
-                'test_f1': test_f1,
                 'total_test_samples': len(X_test),
                 'method': 'Full_Population'
             }
             
             logger.info(f"Full population test prediction completed - Test AUC: {test_auc:.4f}, Test AUPRC: {test_auprc:.4f}")
-            logger.info(f"Full population metrics - Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
             logger.info(f"Total test samples: {len(X_test)}")
             
             return full_test_result
@@ -720,19 +676,11 @@ class ClusterTrainingExperiment:
             'MoE': {
                 'test_auc': moe_result['test_auc'],
                 'test_auprc': moe_result['test_auprc'],
-                'test_accuracy': moe_result['test_accuracy'],
-                'test_precision': moe_result['test_precision'],
-                'test_recall': moe_result['test_recall'],
-                'test_f1': moe_result['test_f1'],
                 'test_samples': moe_result['total_test_samples'],
             },
             'Full_Population': {
                 'test_auc': full_result['test_auc'],
                 'test_auprc': full_result['test_auprc'],
-                'test_accuracy': full_result['test_accuracy'],
-                'test_precision': full_result['test_precision'],
-                'test_recall': full_result['test_recall'],
-                'test_f1': full_result['test_f1'],
                 'test_samples': full_result['total_test_samples'],
             }
         }
@@ -740,29 +688,16 @@ class ClusterTrainingExperiment:
         # 성능 차이 계산
         auc_diff = moe_result['test_auc'] - full_result['test_auc']
         auprc_diff = moe_result['test_auprc'] - full_result['test_auprc']
-        accuracy_diff = moe_result['test_accuracy'] - full_result['test_accuracy']
-        precision_diff = moe_result['test_precision'] - full_result['test_precision']
-        recall_diff = moe_result['test_recall'] - full_result['test_recall']
-        f1_diff = moe_result['test_f1'] - full_result['test_f1']
         
-        logger.info(f"MoE - AUC: {moe_result['test_auc']:.4f}, AUPRC: {moe_result['test_auprc']:.4f}, "
-                   f"Acc: {moe_result['test_accuracy']:.4f}, F1: {moe_result['test_f1']:.4f}")
-        logger.info(f"Full - AUC: {full_result['test_auc']:.4f}, AUPRC: {full_result['test_auprc']:.4f}, "
-                   f"Acc: {full_result['test_accuracy']:.4f}, F1: {full_result['test_f1']:.4f}")
-        logger.info(f"Differences (MoE - Full): AUC: {auc_diff:+.4f}, AUPRC: {auprc_diff:+.4f}, "
-                   f"Acc: {accuracy_diff:+.4f}, F1: {f1_diff:+.4f}")
+        logger.info(f"MoE - AUC: {moe_result['test_auc']:.4f}, AUPRC: {moe_result['test_auprc']:.4f}")
+        logger.info(f"Full - AUC: {full_result['test_auc']:.4f}, AUPRC: {full_result['test_auprc']:.4f}")
+        logger.info(f"Differences (MoE - Full): AUC: {auc_diff:+.4f}, AUPRC: {auprc_diff:+.4f}")
         
         comparison['Performance_Difference'] = {
             'auc_diff': auc_diff,
             'auprc_diff': auprc_diff,
-            'accuracy_diff': accuracy_diff,
-            'precision_diff': precision_diff,
-            'recall_diff': recall_diff,
-            'f1_diff': f1_diff,
             'better_method_auc': 'MoE' if auc_diff > 0 else 'Full_Population',
-            'better_method_auprc': 'MoE' if auprc_diff > 0 else 'Full_Population',
-            'better_method_accuracy': 'MoE' if accuracy_diff > 0 else 'Full_Population',
-            'better_method_f1': 'MoE' if f1_diff > 0 else 'Full_Population'
+            'better_method_auprc': 'MoE' if auprc_diff > 0 else 'Full_Population'
         }
         
         return comparison
@@ -776,32 +711,18 @@ def prepare_cluster_results(moe_result, full_result):
             "MoE": {
                 "MoE_best_test_auc": moe_result['test_auc'],
                 "MoE_best_test_auprc": moe_result['test_auprc'],
-                "MoE_best_test_accuracy": moe_result['test_accuracy'],
-                "MoE_best_test_precision": moe_result['test_precision'],
-                "MoE_best_test_recall": moe_result['test_recall'],
-                "MoE_best_test_f1": moe_result['test_f1'],
                 "MoE_test_samples": moe_result['total_test_samples'],
             },
             "Full_Population": {
                 "Full_best_test_auc": full_result['test_auc'],
                 "Full_best_test_auprc": full_result['test_auprc'],
-                "Full_best_test_accuracy": full_result['test_accuracy'],
-                "Full_best_test_precision": full_result['test_precision'],
-                "Full_best_test_recall": full_result['test_recall'],
-                "Full_best_test_f1": full_result['test_f1'],
                 "Full_test_samples": full_result['total_test_samples'],
             },
             "Performance_Comparison": {
                 "auc_difference": moe_result['test_auc'] - full_result['test_auc'],
                 "auprc_difference": moe_result['test_auprc'] - full_result['test_auprc'],
-                "accuracy_difference": moe_result['test_accuracy'] - full_result['test_accuracy'],
-                "precision_difference": moe_result['test_precision'] - full_result['test_precision'],
-                "recall_difference": moe_result['test_recall'] - full_result['test_recall'],
-                "f1_difference": moe_result['test_f1'] - full_result['test_f1'],
                 "better_method_auc": 'MoE' if (moe_result['test_auc'] - full_result['test_auc']) > 0 else 'Full_Population',
                 "better_method_auprc": 'MoE' if (moe_result['test_auprc'] - full_result['test_auprc']) > 0 else 'Full_Population',
-                "better_method_accuracy": 'MoE' if (moe_result['test_accuracy'] - full_result['test_accuracy']) > 0 else 'Full_Population',
-                "better_method_f1": 'MoE' if (moe_result['test_f1'] - full_result['test_f1']) > 0 else 'Full_Population',
             }
         }
     }
@@ -830,7 +751,7 @@ def save_cluster_results(clustering_dir, results, n_clusters):
             config_name = part
     
     data = {
-        "Experimental Memo": "Cluster-based MoE vs Full Population LogReg comparison with optimal thresholds",
+        "Experimental Memo": "Cluster-based MoE vs Full Population LogReg comparison (AUROC/AUPRC only)",
         "dataset": dataset_name,
         "configuration": config_name,
         "clustering_directory": str(clustering_dir),
@@ -839,8 +760,8 @@ def save_cluster_results(clustering_dir, results, n_clusters):
             "n_clusters": n_clusters,
             "model_type": "LogisticRegression",
             "comparison_type": "MoE_vs_Full_Population",
-            "threshold_optimization": "F1-score maximization",
-            "evaluation_metrics": ["AUROC", "AUPRC", "Accuracy", "Precision", "Recall", "F1-Score"]
+            "evaluation_metrics": ["AUROC", "AUPRC"],
+            "threshold_optimization": "None (threshold-independent evaluation)"
         },
         "results": results['Best_results']
     }
@@ -927,30 +848,24 @@ def main():
     logger.info("="*50)
     logger.info(f"Number of clusters: {experiment.n_clusters}")
     logger.info(f"MoE Test - AUC: {moe_result['test_auc']:.4f}, AUPRC: {moe_result['test_auprc']:.4f}")
-    logger.info(f"MoE Test - Accuracy: {moe_result['test_accuracy']:.4f}, F1: {moe_result['test_f1']:.4f}")
     logger.info(f"Full Test - AUC: {full_test_result['test_auc']:.4f}, AUPRC: {full_test_result['test_auprc']:.4f}")
-    logger.info(f"Full Test - Accuracy: {full_test_result['test_accuracy']:.4f}, F1: {full_test_result['test_f1']:.4f}")
     
     auc_improvement = moe_result['test_auc'] - full_test_result['test_auc']
     auprc_improvement = moe_result['test_auprc'] - full_test_result['test_auprc']
-    accuracy_improvement = moe_result['test_accuracy'] - full_test_result['test_accuracy']
-    f1_improvement = moe_result['test_f1'] - full_test_result['test_f1']
     
     logger.info(f"Improvements (MoE vs Full):")
     logger.info(f"  AUC: {auc_improvement:+.4f}")
     logger.info(f"  AUPRC: {auprc_improvement:+.4f}")
-    logger.info(f"  Accuracy: {accuracy_improvement:+.4f}")
-    logger.info(f"  F1-Score: {f1_improvement:+.4f}")
     
     if auc_improvement > 0:
         logger.info("🎉 MoE approach shows better AUC performance!")
     else:
         logger.info("📊 Full population approach shows better AUC performance.")
         
-    if f1_improvement > 0:
-        logger.info("🎉 MoE approach shows better F1-Score performance!")
+    if auprc_improvement > 0:
+        logger.info("🎉 MoE approach shows better AUPRC performance!")
     else:
-        logger.info("📊 Full population approach shows better F1-Score performance.")
+        logger.info("📊 Full population approach shows better AUPRC performance.")
     
     logger.info("="*50)
     

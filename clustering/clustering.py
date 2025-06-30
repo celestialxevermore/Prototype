@@ -305,7 +305,7 @@ class ClusteringInference:
             cluster_assignments = kmeans.predict(flattened_maps)
             
         else:
-            pdb.set_trace()
+            #pdb.set_trace()
             # 모델이 없으면 새로 생성 (fallback)
             logger.warning(f"KMeans model not found at: {kmeans_model_path}")
             logger.warning("Creating new KMeans model...")

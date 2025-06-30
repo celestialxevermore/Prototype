@@ -52,7 +52,7 @@ def get_args():
     parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_data', type=str, default='heart', 
-                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland'])
+                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast'])
     parser.add_argument('--target_data', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
