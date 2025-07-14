@@ -180,81 +180,116 @@ class ClusterAnalyzer:
        return stats_results
    
     def _plot_label_distribution_simple(self, cluster_label_data, all_labels, stats_results, layer_idx, output_dir):
-       """라벨 분포 시각화 (NPZ 데이터만 사용)"""
-       fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-       
-       # 클러스터 ID를 숫자순으로 정렬
-       cluster_ids = sorted(list(cluster_label_data.keys()))
-       
-       # 데이터 준비
-       labels_data = []
-       for cluster_id in cluster_ids:
-           labels = cluster_label_data[cluster_id]
-           unique_labels, counts = np.unique(labels, return_counts=True)
-           
-           for label, count in zip(unique_labels, counts):
-               labels_data.append({
-                   'Cluster': f'Cluster {cluster_id}',
-                   'Label': f'Label {int(label)}',
-                   'Count': count,
-                   'cluster_id': cluster_id
-               })
-       
-       df_labels = pd.DataFrame(labels_data)
-       df_labels = df_labels.sort_values('cluster_id')
-       
-       # 스택 바 차트 (개수)
-       pivot_df = df_labels.pivot(index='Cluster', columns='Label', values='Count').fillna(0)
-       cluster_order = [f'Cluster {cid}' for cid in cluster_ids]
-       pivot_df = pivot_df.reindex(cluster_order)
-       
-       bars = pivot_df.plot(kind='bar', stacked=True, ax=ax1, color=['skyblue', 'lightcoral'])
-       ax1.set_title(f'Layer {layer_idx} - Label Distribution by Cluster\n(Count)')
-       ax1.set_xlabel('Cluster')
-       ax1.set_ylabel('Count')
-       ax1.legend(title='Label')
-       ax1.tick_params(axis='x', rotation=45)
-       
-       # 각 바 위에 숫자 표시
-       for container in ax1.containers:
-           ax1.bar_label(container, label_type='center', fontsize=10, color='white', weight='bold')
-       
-       # 스택 바 차트 (비율)
-       pivot_df_norm = pivot_df.div(pivot_df.sum(axis=1), axis=0)
-       bars2 = pivot_df_norm.plot(kind='bar', stacked=True, ax=ax2, color=['skyblue', 'lightcoral'])
-       ax2.set_title(f'Layer {layer_idx} - Label Proportion by Cluster\n(Ratio)')
-       ax2.set_xlabel('Cluster')
-       ax2.set_ylabel('Proportion')
-       ax2.legend(title='Label')
-       ax2.tick_params(axis='x', rotation=45)
-       
-       # 비율 표시
-       for container in ax2.containers:
-           ax2.bar_label(container, labels=[f'{v:.2f}' if v > 0.05 else '' for v in container.datavalues], 
-                       label_type='center', fontsize=9, color='white', weight='bold')
-       
-       # Chi-square 결과 표시
-       if stats_results['label_chi2']:
-           chi2_result = stats_results['label_chi2']
-           fig.suptitle(f'Chi-square test: p={chi2_result["p_value"]:.4f} ' + 
-                       ('(Significant)' if chi2_result['significant'] else '(Not Significant)'), 
-                       fontsize=14)
-       
-       # 통계 정보 표시
-       total_samples = sum(len(labels) for labels in cluster_label_data.values())
-       stats_text = f"Total samples: {total_samples}\n"
-       stats_text += f"Clusters: {len(cluster_ids)}\n"
-       stats_text += f"Labels: {len(all_labels)}"
-       
-       ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, 
-               fontsize=10, verticalalignment='top',
-               bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8))
-       
-       plt.tight_layout()
-       fig.savefig(output_dir / f'layer_{layer_idx}_label_distribution_only.png', dpi=300, bbox_inches='tight')
-       plt.close(fig)
-       
-       logger.info(f"Label distribution plot saved for layer {layer_idx}")
+        """라벨 분포 시각화 (NPZ 데이터만 사용) - Multi-class 색상 개선"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # 클러스터 ID를 숫자순으로 정렬
+        cluster_ids = sorted(list(cluster_label_data.keys()))
+        
+        # 데이터 준비
+        labels_data = []
+        for cluster_id in cluster_ids:
+            labels = cluster_label_data[cluster_id]
+            unique_labels, counts = np.unique(labels, return_counts=True)
+            
+            for label, count in zip(unique_labels, counts):
+                labels_data.append({
+                    'Cluster': f'Cluster {cluster_id}',
+                    'Label': f'Label {int(label)}',
+                    'Count': count,
+                    'cluster_id': cluster_id
+                })
+        
+        df_labels = pd.DataFrame(labels_data)
+        df_labels = df_labels.sort_values('cluster_id')
+        
+        # 스택 바 차트 (개수)
+        pivot_df = df_labels.pivot(index='Cluster', columns='Label', values='Count').fillna(0)
+        cluster_order = [f'Cluster {cid}' for cid in cluster_ids]
+        pivot_df = pivot_df.reindex(cluster_order)
+        
+        # Multi-class용 색상 팔레트 생성
+        n_labels = len(all_labels)
+        if n_labels == 2:
+            # Binary classification: 기존 색상 유지
+            colors = ['skyblue', 'lightcoral']
+        else:
+            # Multi-class: 구분되는 색상 팔레트 사용
+            import matplotlib.cm as cm
+            import matplotlib.colors as mcolors
+            
+            if n_labels <= 10:
+                # 10개 이하: 구분되는 색상 팔레트 사용
+                colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+                        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'][:n_labels]
+            else:
+                # 10개 초과: colormap 사용
+                cmap = cm.get_cmap('tab20' if n_labels <= 20 else 'hsv')
+                colors = [cmap(i / n_labels) for i in range(n_labels)]
+        
+        bars = pivot_df.plot(kind='bar', stacked=True, ax=ax1, color=colors)
+        ax1.set_title(f'Layer {layer_idx} - Label Distribution by Cluster\n(Count)')
+        ax1.set_xlabel('Cluster')
+        ax1.set_ylabel('Count')
+        ax1.legend(title='Label', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax1.tick_params(axis='x', rotation=45)
+        
+        # 각 바 위에 숫자 표시 (값이 충분히 클 때만)
+        for container in ax1.containers:
+            labels = [f'{int(v)}' if v > max(pivot_df.values.max() * 0.02, 50) else '' 
+                    for v in container.datavalues]
+            ax1.bar_label(container, labels=labels, label_type='center', 
+                        fontsize=9, color='white', weight='bold')
+        
+        # 스택 바 차트 (비율)
+        pivot_df_norm = pivot_df.div(pivot_df.sum(axis=1), axis=0)
+        bars2 = pivot_df_norm.plot(kind='bar', stacked=True, ax=ax2, color=colors)
+        ax2.set_title(f'Layer {layer_idx} - Label Proportion by Cluster\n(Ratio)')
+        ax2.set_xlabel('Cluster')
+        ax2.set_ylabel('Proportion')
+        ax2.legend(title='Label', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax2.tick_params(axis='x', rotation=45)
+        
+        # 비율 표시 (5% 이상일 때만)
+        for container in ax2.containers:
+            labels = [f'{v:.2f}' if v > 0.05 else '' for v in container.datavalues]
+            ax2.bar_label(container, labels=labels, label_type='center', 
+                        fontsize=9, color='white', weight='bold')
+        
+        # Chi-square 결과 표시
+        if stats_results['label_chi2']:
+            chi2_result = stats_results['label_chi2']
+            fig.suptitle(f'Chi-square test: p={chi2_result["p_value"]:.4f} ' + 
+                        ('(Significant)' if chi2_result['significant'] else '(Not Significant)'), 
+                        fontsize=14)
+        
+        # 통계 정보 표시
+        total_samples = sum(len(labels) for labels in cluster_label_data.values())
+        stats_text = f"Total samples: {total_samples}\n"
+        stats_text += f"Clusters: {len(cluster_ids)}\n"
+        stats_text += f"Labels: {len(all_labels)}\n"
+        
+        # 라벨별 전체 분포 추가
+        all_label_counts = {}
+        for labels in cluster_label_data.values():
+            for label in labels:
+                all_label_counts[label] = all_label_counts.get(label, 0) + 1
+        
+        stats_text += "\nOverall Label Distribution:\n"
+        for label in sorted(all_label_counts.keys()):
+            count = all_label_counts[label]
+            percentage = (count / total_samples) * 100
+            stats_text += f"Label {int(label)}: {count} ({percentage:.1f}%)\n"
+        
+        ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, 
+                fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8))
+        
+        plt.tight_layout()
+        fig.savefig(output_dir / f'layer_{layer_idx}_label_distribution_only.png', dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info(f"Label distribution plot saved for layer {layer_idx}")
    
     def _convert_numpy_types(self, obj):
        """numpy 타입을 JSON 직렬화 가능한 Python 타입으로 변환"""
@@ -742,93 +777,105 @@ class ClusterAnalyzer:
        return all_results
    
     def _create_cross_layer_comparison(self, all_results, output_dir):
-       """레이어 간 라벨 분포 비교 시각화"""
-       
-       fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-       
-       layers = sorted(all_results.keys())
-       chi2_pvalues = []
-       n_clusters_list = []
-       clsi_scores = []
-       
-       for layer_idx in layers:
-           stats = all_results[layer_idx]['stats_results']
-           cluster_data = all_results[layer_idx]['cluster_data']
-           
-           # Chi-square p-value
-           if stats['label_chi2']:
-               p_val = max(stats['label_chi2']['p_value'], 1e-50)
-               chi2_pvalues.append(p_val)
-           else:
-               chi2_pvalues.append(1.0)
-           
-           # 클러스터 수
-           n_clusters_list.append(len(cluster_data))
-           
-           # CLSI 계산
-           clsi_result = self.cluster_label_specialization_index(cluster_data)
-           clsi_scores.append(clsi_result['clsi'])
-       
-       # 1. Chi-square p-value 시각화
-       bars1 = ax1.bar([f'Layer {l}' for l in layers], chi2_pvalues, 
-                   color=['red' if p < 0.05 else 'lightcoral' for p in chi2_pvalues])
-       ax1.axhline(y=0.05, color='black', linestyle='--', alpha=0.7, label='alpha=0.05')
-       ax1.set_title('Chi-square Test p-values\n(Label Distribution Differences)')
-       ax1.set_ylabel('p-value')
-       ax1.set_yscale('log')
-       ax1.set_ylim(1e-50, 1.1)
-       ax1.legend()
-       ax1.grid(True, alpha=0.3)
-       
-       # p < 0.05인 경우 별표 표시
-       for i, p in enumerate(chi2_pvalues):
-           if p < 0.05:
-               ax1.text(i, max(p, 1e-45), '*', ha='center', va='bottom', fontsize=16, color='white')
-       
-       # 2. 레이어별 클러스터 수
-       bars2 = ax2.bar([f'Layer {l}' for l in layers], n_clusters_list, color='lightblue')
-       ax2.set_title('Number of Clusters by Layer')
-       ax2.set_ylabel('Number of Clusters')
-       ax2.grid(True, alpha=0.3)
-       
-       # 클러스터 수 표시
-       for bar, count in zip(bars2, n_clusters_list):
-           ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.1,
-                   f'{count}', ha='center', va='bottom', fontsize=12, weight='bold')
-       
-       # 3. CLSI 점수 비교
-       bars3 = ax3.bar([f'Layer {l}' for l in layers], clsi_scores, color='darkgreen', alpha=0.8)
-       ax3.set_title('CLSI Score by Layer')
-       ax3.set_xlabel('Layer')
-       ax3.set_ylabel('CLSI Score')
-       ax3.grid(True, alpha=0.3)
-       
-       # CLSI 점수 표시
-       for bar, score in zip(bars3, clsi_scores):
-           ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                   f'{score:.3f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-       
-       # 4. 클러스터 편향도 분포 (모든 레이어)
-       for layer_idx in layers:
-           cluster_data = all_results[layer_idx]['cluster_data']
-           clsi_result = self.cluster_label_specialization_index(cluster_data)
-           biases = [cluster['bias'] for cluster in clsi_result['cluster_details']]
-           
-           if biases:
-               ax4.hist(biases, alpha=0.6, label=f'Layer {layer_idx}', bins=10, density=True)
-       
-       ax4.set_xlabel('Cluster Bias (0=balanced, 1=completely biased)')
-       ax4.set_ylabel('Density')
-       ax4.set_title('Cluster Bias Distribution by Layer')
-       ax4.legend()
-       ax4.grid(True, alpha=0.3)
-       
-       plt.suptitle('Cross-Layer Label Distribution Analysis', fontsize=16, fontweight='bold')
-       plt.tight_layout()
-       fig.savefig(output_dir / 'cross_layer_analysis.png', dpi=300, bbox_inches='tight')
-       plt.close(fig)
-       
-       logger.info("Cross-layer analysis plot saved")
+        """레이어 간 라벨 분포 비교 시각화 - Multi-class 색상 개선"""
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        
+        layers = sorted(all_results.keys())
+        chi2_pvalues = []
+        n_clusters_list = []
+        clsi_scores = []
+        
+        # 레이어별 색상 설정
+        if len(layers) <= 3:
+            layer_colors = ['#1f77b4', '#ff7f0e', '#2ca02c'][:len(layers)]
+        else:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap('viridis')
+            layer_colors = [cmap(i / (len(layers) - 1)) for i in range(len(layers))]
+        
+        for layer_idx in layers:
+            stats = all_results[layer_idx]['stats_results']
+            cluster_data = all_results[layer_idx]['cluster_data']
+            
+            # Chi-square p-value
+            if stats['label_chi2']:
+                p_val = max(stats['label_chi2']['p_value'], 1e-50)
+                chi2_pvalues.append(p_val)
+            else:
+                chi2_pvalues.append(1.0)
+            
+            # 클러스터 수
+            n_clusters_list.append(len(cluster_data))
+            
+            # CLSI 계산
+            clsi_result = self.cluster_label_specialization_index(cluster_data)
+            clsi_scores.append(clsi_result['clsi'])
+        
+        # 1. Chi-square p-value 시각화
+        p_value_colors = ['red' if p < 0.05 else 'lightcoral' for p in chi2_pvalues]
+        bars1 = ax1.bar([f'Layer {l}' for l in layers], chi2_pvalues, 
+                    color=p_value_colors, edgecolor='black', linewidth=1)
+        ax1.axhline(y=0.05, color='black', linestyle='--', alpha=0.7, label='alpha=0.05')
+        ax1.set_title('Chi-square Test p-values\n(Label Distribution Differences)')
+        ax1.set_ylabel('p-value')
+        ax1.set_yscale('log')
+        ax1.set_ylim(1e-50, 1.1)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # p < 0.05인 경우 별표 표시
+        for i, p in enumerate(chi2_pvalues):
+            if p < 0.05:
+                ax1.text(i, max(p, 1e-45), '*', ha='center', va='bottom', fontsize=16, color='white')
+        
+        # 2. 레이어별 클러스터 수
+        bars2 = ax2.bar([f'Layer {l}' for l in layers], n_clusters_list, 
+                    color=layer_colors, edgecolor='black', linewidth=1)
+        ax2.set_title('Number of Clusters by Layer')
+        ax2.set_ylabel('Number of Clusters')
+        ax2.grid(True, alpha=0.3)
+        
+        # 클러스터 수 표시
+        for bar, count in zip(bars2, n_clusters_list):
+            ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.1,
+                    f'{count}', ha='center', va='bottom', fontsize=12, weight='bold')
+        
+        # 3. CLSI 점수 비교
+        bars3 = ax3.bar([f'Layer {l}' for l in layers], clsi_scores, 
+                    color='darkgreen', alpha=0.8, edgecolor='black', linewidth=1)
+        ax3.set_title('CLSI Score by Layer')
+        ax3.set_xlabel('Layer')
+        ax3.set_ylabel('CLSI Score')
+        ax3.grid(True, alpha=0.3)
+        
+        # CLSI 점수 표시
+        for bar, score in zip(bars3, clsi_scores):
+            ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                    f'{score:.3f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+        
+        # 4. 클러스터 편향도 분포 (모든 레이어)
+        for i, layer_idx in enumerate(layers):
+            cluster_data = all_results[layer_idx]['cluster_data']
+            clsi_result = self.cluster_label_specialization_index(cluster_data)
+            biases = [cluster['bias'] for cluster in clsi_result['cluster_details']]
+            
+            if biases:
+                ax4.hist(biases, alpha=0.6, label=f'Layer {layer_idx}', bins=10, 
+                        density=True, color=layer_colors[i], edgecolor='black', linewidth=0.5)
+        
+        ax4.set_xlabel('Cluster Bias (0=balanced, 1=completely biased)')
+        ax4.set_ylabel('Density')
+        ax4.set_title('Cluster Bias Distribution by Layer')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        plt.suptitle('Cross-Layer Label Distribution Analysis', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        fig.savefig(output_dir / 'cross_layer_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info("Cross-layer analysis plot saved")
    
     def print_cluster_summary(self, layer_idx=None, include_clsi=True):
        """클러스터 요약 정보를 콘솔에 출력 (CLSI 포함)"""

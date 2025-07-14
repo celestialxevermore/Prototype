@@ -41,37 +41,31 @@ def binary_evaluate(model, loader, criterion, device):
     return test_loss, np.array(y_true), np.array(y_pred)
 
 def multi_train(model, train_loader, criterion, optimizer, device):
-    
     model.train()
     total_loss = 0 
-    for step, data in enumerate(train_loader):
-        data = data.to(device)
+    for step, batch in enumerate(train_loader):
         optimizer.zero_grad()
-        output = model(data.x, data.edge_index, data.batch)
-        #output = model(data.x, data.edge_index, data.edge_attr, data.batch)
-        loss = criterion(output, data.y)
+        loss = model(batch, batch['y'])
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * data.num_graphs 
-        #print(f"Step [{step+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+        total_loss += loss.item() * len(batch['y'])
     return total_loss / len(train_loader.dataset)
 
 def multi_evaluate(model, loader, criterion, device):
     model.eval()
-    total_loss = 0 
-    y_true = []
-    y_pred = [] 
+    test_loss = 0
+    y_true, y_pred = [], []
+    
     with torch.no_grad():
-        for data in loader:
-            data = data.to(device)
-            output = model(data.x, data.edge_index, data.batch)
-            #output = model(data.x, data.edge_index, data.edge_attr, data.batch)
-            loss = criterion(output, data.y)
-            total_loss += loss.item() * data.num_graphs
-            y_true.extend(data.y.cpu().numpy())
-            y_pred.extend(torch.softmax(output, dim=1).cpu().numpy())
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    if y_pred.ndim == 1: 
-        y_pred = y_pred.reshape(-1,1)
-    return total_loss / len(loader.dataset), y_true, y_pred
+        for batch in loader:
+            pred = model.predict(batch)  # 모델의 예측값
+            loss = model(batch, batch['y'])  # 손실 계산
+            
+            test_loss += loss.item() * len(batch['y'])
+            
+            y_true.extend(batch['y'].cpu().numpy())
+            # multi-class이므로 softmax 적용
+            y_pred.extend(torch.softmax(pred, dim=1).cpu().numpy())
+    
+    test_loss /= len(loader.dataset)
+    return test_loss, np.array(y_true), np.array(y_pred)

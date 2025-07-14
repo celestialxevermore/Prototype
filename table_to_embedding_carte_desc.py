@@ -222,20 +222,33 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             for param in self.llm_model.parameters():
                 param.requires_grad = False
 
+    # def _get_label_desc(self) -> str:
+    #     if self.source_dataset_name is None:
+    #         raise ValueError("source_dataset_name is not set")
+    #     label_desc_path = f"/storage/personal/eungyeop/dataset/feature_description/{self.source_dataset_name}/{self.source_dataset_name}-metadata.json"
+    
+    #     with open(label_desc_path, 'r') as f:
+    #         metadata = json.load(f)
+    #         # target_binary 키에 해당하는 description을 가져옴
+    #         label_description = metadata.get('target_binary')
+            
+    #         if label_description is None:
+    #             raise ValueError("target_binary description not found in metadata")
+    #     return label_description
     def _get_label_desc(self) -> str:
         if self.source_dataset_name is None:
             raise ValueError("source_dataset_name is not set")
         label_desc_path = f"/storage/personal/eungyeop/dataset/feature_description/{self.source_dataset_name}/{self.source_dataset_name}-metadata.json"
-    
+
         with open(label_desc_path, 'r') as f:
             metadata = json.load(f)
-            # target_binary 키에 해당하는 description을 가져옴
-            label_description = metadata.get('target_binary')
             
-            if label_description is None:
-                raise ValueError("target_binary description not found in metadata")
-        return label_description
-    
+            # target_binary 또는 target_multiclass 찾기
+            for key in ['target_binary', 'target_multiclass']:
+                if key in metadata:
+                    return metadata[key]
+                    
+            raise ValueError("target_binary or target_multiclass description not found in metadata")
     def _transform_label(self):
         """
         레이블 설명을 임베딩으로 변환

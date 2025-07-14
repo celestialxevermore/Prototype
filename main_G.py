@@ -31,9 +31,9 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 p = psutil.Process()
 
-p.cpu_affinity(range(1, 80))
+p.cpu_affinity(range(40, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-#os.environ["CUDA_VISIBLE_DEVICES"]="4"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
@@ -52,7 +52,7 @@ def get_args():
     parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_data', type=str, default='heart', 
-                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast'])
+                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast','magic_telescope','forest_covertype_sampled', 'higgs_sampled'])
     parser.add_argument('--target_data', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -73,8 +73,8 @@ def get_args():
     parser.add_argument('--frozen', type = bool, default = False)
     #parser.add_argument('--use_edge_attr', action='store_true')
     parser.add_argument('--edge_type', default = 'mlp', choices= ['mlp','normal','no_use'])
-    parser.add_argument('--embed_type', default = 'ours', choices = ['carte', 'carte_desc','ours','ours2'])
-    parser.add_argument('--attn_type', default='gat', choices= ['gat','att'])
+    parser.add_argument('--embed_type', default = 'carte', choices = ['carte', 'carte_desc','ours','ours2'])
+    parser.add_argument('--attn_type', default='gat_v1', choices= ['gat_v1','att','gat_v2'])
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -172,7 +172,7 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
 
         else:
             # Multi-class Classification
-            n_classes = model.output_dim
+            n_classes = y_pred_train.shape[1]
             y_true_train_bin = label_binarize(y_true_train, classes=range(n_classes))
             y_true_val_bin = label_binarize(y_true_val, classes=range(n_classes))
             train_auc = roc_auc_score(y_true_train_bin, y_pred_train, multi_class='ovr', average='macro')
@@ -266,7 +266,7 @@ def final_test_evaluate(model, test_loader, criterion, device, is_binary, thresh
         test_f1 = f1_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_acc = accuracy_score(y_true_test, y_pred_test_bin)
     else:
-        n_classes = model.output_dim
+        n_classes = y_pred_test.shape[1]
         y_true_test_bin = label_binarize(y_true_test, classes=range(n_classes))
         test_auc = roc_auc_score(y_true_test_bin, y_pred_test, multi_class='ovr', average='macro')
         preds_argmax = y_pred_test.argmax(axis=1)
@@ -303,6 +303,10 @@ def main():
     results = prepare_embedding_dataloaders(args, args.source_data)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
+    
+    args.num_classes = num_classes 
+    args.output_dim = num_classes if num_classes > 2 else 1
+    logger.info(f"Dataset: {args.source_data}, Classes: {num_classes}, Output dim: {args.output_dim}")
     
     if args.few_shot > 0:
         logger.info(f"Preparing few-shot samples (K={args.few_shot})...")

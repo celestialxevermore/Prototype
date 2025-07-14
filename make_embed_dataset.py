@@ -16,6 +16,7 @@ class TabularToEmbeddingDataset:
         self.dataset_and_class = {
             "heart": ['target_binary', ['no','yes']],
             "cleveland": ['target_binary', ['no','yes']],
+            "credit-g" :['target_binary', ['no','yes']],
             "hungarian": ['target_binary', ['no','yes']],
             "switzerland": ['target_binary', ['no','yes']],
             "heart_statlog": ['target_binary', ['no','yes']],
@@ -24,7 +25,11 @@ class TabularToEmbeddingDataset:
             "breast" : ['target_binary', [0,1]],
             "higgs" : ['target_binary', [0,1]],
             'bank' : ['target_binary', ['no','yes']],
-            "car": ['target_binary', ['unacceptable', 'acceptable', 'very good', 'good']]
+            'higgs_sampled' : ["target_binary", [0.0, 1.0]],
+            'magic_telescope' : ["target_binary", ['g','h']],
+            "car": ['target_multiclass', ['unacceptable', 'acceptable', 'very good', 'good']],
+            'forest_covertype_sampled': ['target_multiclass', [1,2,3,4,5,6,7]],
+            "communities": ['target_multiclass', ['medium', 'high', 'low']],
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)
 
@@ -47,27 +52,48 @@ class TabularToEmbeddingDataset:
         """데이터셋 전처리"""
         assert data_name in self.dataset_and_class, f"{data_name} is not a valid dataset name"
         
-        # 데이터셋별 원래 label 이름을 target_binary로 변경
-        if data_name == 'adult' and 'income' in DATASETS.columns:
-            DATASETS['target_binary'] = DATASETS['income']
-            DATASETS = DATASETS.drop('income', axis=1)
-        elif data_name == 'diabetes' and 'Outcome' in DATASETS.columns:
-            DATASETS['target_binary'] = DATASETS['Outcome']
-            DATASETS = DATASETS.drop('Outcome', axis=1)
-        elif data_name =='breast' and 'target' in DATASETS.columns:
-            DATASETS['target_binary'] = DATASETS['target']
-            DATASETS = DATASETS.drop('target', axis = 1)
-        elif data_name == 'bank' and 'Class' in DATASETS.columns:
-            DATASETS['target_binary'] = DATASETS['Class']
-            DATASETS = DATASETS.drop('Class', axis = 1)
-        elif data_name =='car' and 'class' in DATASETS.columns:
-            DATASETS['target_binary'] = DATASETS['class']
-            DATASETS = DATASETS.drop('class', axis=1)
-        
-        class_name = self.dataset_and_class[data_name][0]
+        class_name = self.dataset_and_class[data_name][0] 
         class_values = self.dataset_and_class[data_name][1]
-        
-        class_mapping = {label: idx for idx, label in enumerate(class_values)}
+
+        if class_name == 'target_binary':
+            # 데이터셋별 원래 label 이름을 target_binary로 변경
+            if data_name == 'adult' and 'income' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['income']
+                DATASETS = DATASETS.drop('income', axis=1)
+            elif data_name == 'diabetes' and 'Outcome' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['Outcome']
+                DATASETS = DATASETS.drop('Outcome', axis=1)
+            elif data_name =='breast' and 'target' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['target']
+                DATASETS = DATASETS.drop('target', axis = 1)
+            elif data_name == 'bank' and 'Class' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['Class']
+                DATASETS = DATASETS.drop('Class', axis = 1)
+            elif data_name == 'higgs_sampled' and 'target' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['target']
+                DATASETS = DATASETS.drop('target', axis = 1)
+            elif data_name == 'magic_telescope' and 'Class' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['Class']
+                DATASETS = DATASETS.drop('Class', axis = 1)
+            elif data_name == 'credit-g' and 'class' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['class']
+                DATASETS = DATASETS.drop('class', axis = 1)
+
+            
+            class_mapping = {label: idx for idx, label in enumerate(class_values)}
+            
+        elif class_name == 'target_multiclass':
+            # 데이터셋별 원래 label 이름을 target_multiclass로 변경
+            if data_name == 'car' and 'class' in DATASETS.columns:
+                DATASETS['target_multiclass'] = DATASETS['class']
+                DATASETS = DATASETS.drop('class', axis=1)
+            elif data_name == 'forest_covertype_sampled' and 'Cover_Type' in DATASETS.columns:
+                DATASETS['target_multiclass'] = DATASETS['Cover_Type']
+                DATASETS = DATASETS.drop('Cover_Type', axis=1)
+            elif data_name == 'communities' and 'ViolentCrimesPerPop' in DATASETS.columns:
+                DATASETS['target_multiclass'] = DATASETS['ViolentCrimesPerPop']
+                DATASETS = DATASETS.drop('ViolentCrimesPerPop', axis=1)
+            class_mapping = {label: idx for idx, label in enumerate(class_values)}
         
         X = DATASETS.drop(class_name, axis=1)
         X = X.reset_index(drop=True)
@@ -158,12 +184,17 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
-        'car',
+        #'credit-g',
+        #"communities",
+        #"forest_covertype_sampled",
+        #'magic_telescope',
+        #'higgs_sampled',
+        #'car',
         #'bank',
-        #"breast",
-        #"heart",
-        #"diabetes",
-        #"adult"
+        #"breast"
+        "heart",
+        "diabetes",
+        "adult"
     ]
     
     for dataset_name in datasets_to_process:

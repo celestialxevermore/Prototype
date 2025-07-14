@@ -55,7 +55,7 @@ class AdaptiveGraphAttention(nn.Module):
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
         self.v_proj = nn.Linear(input_dim, input_dim)
-        if self.args.attn_type =='gat':
+        if self.args.attn_type in ['gat_v1', 'gat_v2']:
             if self.args.edge_type == 'normal':
                 self.attn_proj = nn.Linear(self.head_dim * 3, 1)
             elif self.args.edge_type == 'mlp':
@@ -68,6 +68,22 @@ class AdaptiveGraphAttention(nn.Module):
                 )
             elif self.args.edge_type == 'no_use':
                 self.attn_proj = nn.Linear(self.head_dim * 2, 1)
+        elif self.args.attn_type == 'gate':
+            if self.args.edge_type == 'normal':
+                self.gate_proj = nn.Linear(self.head_dim * 3, 1)
+                self.content_proj = nn.Linear(self.head_dim * 3, 1)
+            elif self.args.edge_type == 'mlp':
+                self.gate_proj = nn.Linear(self.head_dim * 3, 1)
+                self.content_proj = nn.Linear(self.head_dim * 3, 1)
+                self.edge_update = nn.Sequential(
+                    nn.Linear(input_dim * 2, input_dim),
+                    nn.LayerNorm(input_dim),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim)
+                )
+            elif self.args.edge_type == 'no_use':
+                self.gate_proj = nn.Linear(self.head_dim * 2, 1)
+                self.content_proj = nn.Linear(self.head_dim * 2, 1)
         
         self.out_proj = nn.Linear(input_dim, input_dim)
         nn_init.xavier_uniform_(self.q_proj.weight, gain=1 / math.sqrt(2))
@@ -109,7 +125,7 @@ class AdaptiveGraphAttention(nn.Module):
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         
         # Attention 계산 방식 선택
-        if self.args.attn_type == 'gat':
+        if self.args.attn_type == 'gat_v1':
             # GAT-style attention (concat + MLP)
             if self.args.edge_type == "normal":
                 # Case 1: GAT with edge attributes - MLP([q | k | edge_attr])
@@ -170,7 +186,140 @@ class AdaptiveGraphAttention(nn.Module):
                 ], dim = -1)
                 
                 attn_weights = self.attn_proj(qk_expanded).squeeze(-1)
+        elif self.args.attn_type == 'gat_v2':
+           # GAT-v2 style attention (LeakyReLU before attention)
+           if self.args.edge_type == "normal":
+               target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+               cls_edge_attr = desc_embeddings
+
+               edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+               edge_attr[:, 1:, 1:] = target_desc
+               edge_attr[:, 0, 1:] = cls_edge_attr
+               
+               edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+               edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+               edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+               
+               q_expanded = q.unsqueeze(3)
+               k_expanded = k.unsqueeze(2)
+               qke_expanded = torch.cat([
+                   q_expanded.expand(-1,-1,-1, new_seq, -1),
+                   k_expanded.expand(-1,-1, new_seq, -1, -1),
+                   edge_attr
+               ], dim = -1)
+               
+               # GAT-v2: LeakyReLU before attention
+               activated_features = F.leaky_relu(qke_expanded)
+               attn_weights = self.attn_proj(activated_features).squeeze(-1)
+           elif self.args.edge_type == "mlp":
+               node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+               node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+               var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
+               cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+               edge_dim = var_edge_attr.size(-1)
+               edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+               edge_attr[:, 1:, 1:] = var_edge_attr
+               edge_attr[:, 0, 1:] = cls_edge_attr
+               edge_attr[:, 1:, 0] = cls_edge_attr
+               
+               edge_attr = self.edge_update(edge_attr)
+               edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+               edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+               edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+               
+               q_expanded = q.unsqueeze(3)
+               k_expanded = k.unsqueeze(2)
+               qke_expanded = torch.cat([
+                   q_expanded.expand(-1,-1,-1, new_seq, -1),
+                   k_expanded.expand(-1,-1, new_seq, -1, -1),
+                   edge_attr
+               ], dim = -1)
+               
+               # GAT-v2: LeakyReLU before attention
+               activated_features = F.leaky_relu(qke_expanded)
+               attn_weights = self.attn_proj(activated_features).squeeze(-1)
+           elif self.args.edge_type == 'no_use':
+               q_expanded = q.unsqueeze(3)
+               k_expanded = k.unsqueeze(2)
+               qk_expanded = torch.cat([
+                   q_expanded.expand(-1,-1,-1, new_seq, -1),
+                   k_expanded.expand(-1,-1, new_seq, -1, -1)
+               ], dim = -1)
+               
+               # GAT-v2: LeakyReLU before attention
+               activated_features = F.leaky_relu(qk_expanded)
+               attn_weights = self.attn_proj(activated_features).squeeze(-1)
+        elif self.args.attn_type == "gate":
+            # Gate attention mechanism
+            if self.args.edge_type == "normal":
+                # Edge attributes 준비
+                target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                cls_edge_attr = desc_embeddings
+
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = target_desc
+                edge_attr[:, 0, 1:] = cls_edge_attr
                 
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                # Gate mechanism: σ(W_g * [q|k|e]) * tanh(W_c * [q|k|e])
+                gate_values = torch.sigmoid(self.gate_proj(qke_expanded))  # [batch, n_heads, seq, seq, 1]
+                content_values = torch.tanh(self.content_proj(qke_expanded))  # [batch, n_heads, seq, seq, 1]
+                attn_weights = (gate_values * content_values).squeeze(-1)  # [batch, n_heads, seq, seq]
+                
+            elif self.args.edge_type == "mlp":
+                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
+                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+                edge_dim = var_edge_attr.size(-1)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = var_edge_attr
+                edge_attr[:, 0, 1:] = cls_edge_attr
+                edge_attr[:, 1:, 0] = cls_edge_attr
+                
+                edge_attr = self.edge_update(edge_attr)
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                # Gate mechanism: σ(W_g * [q|k|e]) * tanh(W_c * [q|k|e])
+                gate_values = torch.sigmoid(self.gate_proj(qke_expanded))
+                content_values = torch.tanh(self.content_proj(qke_expanded))
+                attn_weights = (gate_values * content_values).squeeze(-1)
+                
+            elif self.args.edge_type == 'no_use':
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qk_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1)
+                ], dim = -1)
+                
+                # Gate mechanism: σ(W_g * [q|k]) * tanh(W_c * [q|k])
+                gate_values = torch.sigmoid(self.gate_proj(qk_expanded))
+                content_values = torch.tanh(self.content_proj(qk_expanded))
+                attn_weights = (gate_values * content_values).squeeze(-1)
+
+
         elif self.args.attn_type == "att":
             # Case 3: Standard dot-product attention (use_edge_attr는 무시)
             attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
@@ -203,6 +352,7 @@ class Model(nn.Module):
         self.llm_model = llm_model
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.output_dim = output_dim 
         self.num_layers = num_layers
         self.source_data = args.source_data
         num_layers = args.num_layers
@@ -212,6 +362,7 @@ class Model(nn.Module):
         self.enc_type = args.enc_type
         self.experiment_id = experiment_id
         self.mode = mode
+        self.num_classes = args.num_classes
         
         # GMM 관련 속성 추가
         self.use_gmm = args.use_gmm 
@@ -255,11 +406,11 @@ class Model(nn.Module):
                 nn.ReLU(),
                 nn.Dropout(dropout_rate),
 
-                nn.Linear(hidden_dim, 1)
+                nn.Linear(hidden_dim, output_dim)
             ).to(self.device)
+        self.criterion = nn.BCEWithLogitsLoss() if self.num_classes ==2 else nn.CrossEntropyLoss()
         self._init_weights()
-
-    
+        
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -375,13 +526,19 @@ class Model(nn.Module):
         
         logger.info(f"Attention maps saved for {batch_size} samples across {len(attention_weights)} layers to {self.attention_save_dir}")
 
-
-    def forward(self, batch, y):
-        target = y.to(self.device).view(-1,1).float()
+    def forward(self, batch, y):        
+        target = y.to(self.device)
+        
+        if self.num_classes == 2:
+            target = target.view(-1, 1).float()
+        else:
+            # Multi-class classification  
+            target = target.squeeze()
+            target = target.long()
         pred = self.predict(batch)
         loss = self.criterion(pred, target)
         return loss
-    
+
     def predict(self, batch):
         
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
@@ -390,22 +547,22 @@ class Model(nn.Module):
 
 
         if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device).squeeze(-2)
-            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
             
             name_value_embeddings.append(cat_name_value_embeddings)
             desc_embeddings.append(cat_desc_embeddings)
             
         if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
-            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
             
         
         if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
-
+        #pdb.set_trace()
         desc_embeddings = torch.cat(desc_embeddings, dim = 1)
         name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
         

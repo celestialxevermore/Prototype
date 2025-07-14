@@ -469,15 +469,15 @@ class ClusterTrainingExperiment:
         name_value_embeddings = [] 
         
         if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device).squeeze(-2)
-            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
             
             name_value_embeddings.append(cat_name_value_embeddings)
             desc_embeddings.append(cat_desc_embeddings)
             
         if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
-            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
             
@@ -506,11 +506,14 @@ class ClusterTrainingExperiment:
 
         return pred, attention_weights
     
-    def predict_moe_on_test(self, cluster_results, checkpoint_dir):
+    def predict_moe_on_test(self, cluster_results, checkpoint_dir, pred_type='hard'):
         """
         MoE 방식으로 test 데이터 예측 (체크포인트로부터 실시간 attention 추출)
+        
+        Args:
+            pred_type (str): 'hard', 'inv', 'exp'
         """
-        logger.info("=== MoE prediction on test data ===")
+        logger.info(f"=== MoE prediction on test data (pred_type: {pred_type}) ===")
         import pickle
         
         # 1. 전체 test 데이터 로드
@@ -519,12 +522,13 @@ class ClusterTrainingExperiment:
             logger.error("Failed to load test data")
             return None
         
-        # 클래스 수 확인 (binary vs multi-class)
+        # 클래스 수 확인 (전체 데이터셋 기준)
         unique_labels = np.unique(y_test_full)
         n_classes = len(unique_labels)
         is_binary = (n_classes == 2)
         
-        logger.info(f"Detected {n_classes} classes, Binary: {is_binary}")
+        logger.info(f"Global dataset: {n_classes} classes, Binary: {is_binary}")
+        logger.info(f"Class labels: {unique_labels}")
         
         # 2. Test 데이터의 attention maps 추출
         test_attention_data = self.extract_test_attention_maps(checkpoint_dir)
@@ -541,62 +545,177 @@ class ClusterTrainingExperiment:
         centroids = np.load(centroids_path)
         logger.info(f"Loaded centroids with shape: {centroids.shape}")
         
-        # 4. Test 샘플들의 attention maps를 centroid와 거리 계산으로 클러스터 할당
+        # 4. Test 샘플들의 attention maps를 centroid와 거리 계산
         test_attention_maps = np.stack(test_attention_data['layer_2'])
         test_flattened = test_attention_maps.reshape(len(test_attention_maps), -1)
         
         distances = pairwise_distances(test_flattened, centroids, metric='euclidean')
-        test_cluster_assignments = np.argmin(distances, axis=1)
         
-        logger.info(f"Test cluster assignments: {np.bincount(test_cluster_assignments)}")
-        
-        # 5. 각 test 샘플을 할당된 클러스터의 모델로 예측
-        if is_binary:
-            all_predictions_proba = []  # Binary: 단일 확률값
-        else:
-            all_predictions_proba = []  # Multi-class: 클래스별 확률값 배열
-        
-        all_true_labels = []
-        successful_predictions = 0
-        
-        for i in range(len(test_attention_maps)):
-            assigned_cluster = test_cluster_assignments[i]
-            cluster_key = f'cluster_{assigned_cluster}'
+        # 5. pred_type에 따른 할당 방식 결정
+        if pred_type == 'hard':
+            # Hard assignment
+            test_cluster_assignments = np.argmin(distances, axis=1)
+            logger.info(f"Test cluster assignments: {np.bincount(test_cluster_assignments)}")
             
-            if cluster_key not in cluster_results:
-                logger.warning(f"No model for cluster {assigned_cluster}, skipping sample {i}")
-                continue
+            # Hard assignment 예측 (기존 방식)
+            if is_binary:
+                all_predictions_proba = []
+            else:
+                all_predictions_proba = np.zeros((len(test_attention_maps), n_classes))
+                sample_mask = np.zeros(len(test_attention_maps), dtype=bool)
             
-            # 해당 클러스터 모델 로드
-            model_path = cluster_results[cluster_key]['model_path']
+            all_true_labels = []
+            successful_predictions = 0
             
-            try:
-                with open(model_path, 'rb') as f:
-                    model = pickle.load(f)
+            for i in range(len(test_attention_maps)):
+                assigned_cluster = test_cluster_assignments[i]
+                cluster_key = f'cluster_{assigned_cluster}'
                 
+                if cluster_key not in cluster_results:
+                    logger.warning(f"No model for cluster {assigned_cluster}, skipping sample {i}")
+                    continue
+                
+                # 해당 클러스터 모델 로드
+                model_path = cluster_results[cluster_key]['model_path']
+                
+                try:
+                    with open(model_path, 'rb') as f:
+                        model = pickle.load(f)
+                    
+                    test_sample_df = X_test_full.iloc[[i]]
+                    true_label = y_test_full.iloc[i]
+                    
+                    if is_binary:
+                        prediction_proba = model.predict_proba(test_sample_df)[0, 1]
+                        all_predictions_proba.append(prediction_proba)
+                        all_true_labels.append(true_label)
+                    else:
+                        cluster_proba = model.predict_proba(test_sample_df)[0]
+                        cluster_classes = model.classes_
+                        
+                        global_proba = np.zeros(n_classes)
+                        for cluster_class_idx, cluster_class in enumerate(cluster_classes):
+                            if cluster_class in unique_labels:
+                                global_class_idx = np.where(unique_labels == cluster_class)[0][0]
+                                global_proba[global_class_idx] = cluster_proba[cluster_class_idx]
+                        
+                        if global_proba.sum() > 0:
+                            global_proba = global_proba / global_proba.sum()
+                        else:
+                            global_proba = np.ones(n_classes) / n_classes
+                        
+                        all_predictions_proba[i] = global_proba
+                        sample_mask[i] = True
+                        all_true_labels.append(true_label)
+                    
+                    successful_predictions += 1
+                    
+                    if successful_predictions % 50 == 0:
+                        logger.info(f"Processed {successful_predictions} predictions...")
+                    
+                except Exception as e:
+                    logger.error(f"Error predicting sample {i} with cluster {assigned_cluster}: {e}")
+                    continue
+                    
+        else:
+            # Soft assignment
+            if pred_type == 'inv':
+                # Inverse distance weighting
+                weights = 1.0 / (distances + 1e-8)  # 0으로 나누기 방지
+            elif pred_type == 'exp':
+                # Exponential distance weighting
+                weights = np.exp(-distances)
+            else:
+                raise ValueError(f"Unknown pred_type: {pred_type}")
+            
+            # 가중치 정규화
+            weights = weights / weights.sum(axis=1, keepdims=True)
+            
+            logger.info(f"Soft assignment weights computed for {len(weights)} samples")
+            
+            # Soft assignment 예측
+            if is_binary:
+                all_predictions_proba = []
+            else:
+                all_predictions_proba = np.zeros((len(test_attention_maps), n_classes))
+            
+            all_true_labels = []
+            successful_predictions = 0
+            
+            for i in range(len(test_attention_maps)):
+                sample_weights = weights[i]  # 이 샘플의 클러스터별 가중치
                 test_sample_df = X_test_full.iloc[[i]]
                 true_label = y_test_full.iloc[i]
                 
                 if is_binary:
-                    # Binary: positive class 확률만
-                    prediction_proba = model.predict_proba(test_sample_df)[0, 1]
-                    all_predictions_proba.append(prediction_proba)
+                    weighted_prediction = 0.0
                 else:
-                    # Multi-class: 모든 클래스 확률
-                    prediction_proba = model.predict_proba(test_sample_df)[0]  # shape: (n_classes,)
-                    all_predictions_proba.append(prediction_proba)
+                    weighted_prediction = np.zeros(n_classes)
                 
-                all_true_labels.append(true_label)
-                successful_predictions += 1
+                total_weight_used = 0.0
                 
-                if successful_predictions % 50 == 0:
-                    logger.info(f"Processed {successful_predictions} predictions...")
+                # 각 클러스터에서 예측하고 가중평균
+                for cluster_id in range(self.n_clusters):
+                    cluster_key = f'cluster_{cluster_id}'
+                    cluster_weight = sample_weights[cluster_id]
+                    
+                    if cluster_weight < 1e-6:  # 매우 작은 가중치는 무시
+                        continue
+                        
+                    if cluster_key not in cluster_results:
+                        continue
+                    
+                    try:
+                        model_path = cluster_results[cluster_key]['model_path']
+                        with open(model_path, 'rb') as f:
+                            model = pickle.load(f)
+                        
+                        if is_binary:
+                            cluster_pred = model.predict_proba(test_sample_df)[0, 1]
+                            weighted_prediction += cluster_weight * cluster_pred
+                        else:
+                            cluster_proba = model.predict_proba(test_sample_df)[0]
+                            cluster_classes = model.classes_
+                            
+                            # Global 확률 배열에 매핑
+                            global_proba = np.zeros(n_classes)
+                            for cluster_class_idx, cluster_class in enumerate(cluster_classes):
+                                if cluster_class in unique_labels:
+                                    global_class_idx = np.where(unique_labels == cluster_class)[0][0]
+                                    global_proba[global_class_idx] = cluster_proba[cluster_class_idx]
+                            
+                            # 확률 정규화
+                            if global_proba.sum() > 0:
+                                global_proba = global_proba / global_proba.sum()
+                            else:
+                                global_proba = np.ones(n_classes) / n_classes
+                            
+                            weighted_prediction += cluster_weight * global_proba
+                        
+                        total_weight_used += cluster_weight
+                        
+                    except Exception as e:
+                        logger.error(f"Error predicting sample {i} with cluster {cluster_id}: {e}")
+                        continue
                 
-            except Exception as e:
-                logger.error(f"Error predicting sample {i} with cluster {assigned_cluster}: {e}")
-                continue
+                # 사용된 가중치로 정규화
+                if total_weight_used > 0:
+                    if is_binary:
+                        final_prediction = weighted_prediction / total_weight_used
+                        all_predictions_proba.append(final_prediction)
+                    else:
+                        final_prediction = weighted_prediction / total_weight_used
+                        all_predictions_proba[i] = final_prediction
+                    
+                    all_true_labels.append(true_label)
+                    successful_predictions += 1
+                    
+                    if successful_predictions % 50 == 0:
+                        logger.info(f"Processed {successful_predictions} soft predictions...")
+                else:
+                    logger.warning(f"No valid predictions for sample {i}")
         
-        if len(all_predictions_proba) == 0:
+        if successful_predictions == 0:
             logger.error("No predictions generated for MoE")
             return None
         
@@ -605,41 +724,33 @@ class ClusterTrainingExperiment:
             test_auc = roc_auc_score(all_true_labels, all_predictions_proba)
             test_auprc = average_precision_score(all_true_labels, all_predictions_proba)
         else:
-            # Multi-class AUC
+            if pred_type == 'hard':
+                valid_predictions = all_predictions_proba[sample_mask]
+                valid_labels = np.array(all_true_labels)
+            else:
+                valid_predictions = all_predictions_proba[:successful_predictions]
+                valid_labels = np.array(all_true_labels)
+            
+            logger.info(f"Multi-class prediction shapes: predictions={valid_predictions.shape}, labels={valid_labels.shape}")
+            
             from sklearn.preprocessing import label_binarize
             
-            # 확률값을 배열로 변환
-            all_predictions_proba = np.array(all_predictions_proba)  # shape: (n_samples, n_classes)
-            
-            # True labels를 binarize
-            y_true_bin = label_binarize(all_true_labels, classes=range(n_classes))
-            
-            # One-vs-Rest 방식으로 AUC 계산
-            test_auc = roc_auc_score(y_true_bin, all_predictions_proba, multi_class='ovr', average='macro')
-            
-            # Multi-class AUPRC는 macro average로 계산
-            test_auprc = average_precision_score(y_true_bin, all_predictions_proba, average='macro')
-        
-        # 클러스터별 예측 분포 로깅
-        cluster_pred_counts = {}
-        for i in range(successful_predictions):
-            cluster_id = test_cluster_assignments[i]
-            cluster_pred_counts[cluster_id] = cluster_pred_counts.get(cluster_id, 0) + 1
-        
-        logger.info(f"Predictions per cluster: {cluster_pred_counts}")
+            y_true_bin = label_binarize(valid_labels, classes=unique_labels)
+            test_auc = roc_auc_score(y_true_bin, valid_predictions, multi_class='ovr', average='macro')
+            test_auprc = average_precision_score(y_true_bin, valid_predictions, average='macro')
         
         moe_result = {
             'test_auc': test_auc,
             'test_auprc': test_auprc,
-            'total_test_samples': len(all_predictions_proba),
+            'total_test_samples': successful_predictions,
             'method': 'MoE',
+            'pred_type': pred_type,
             'is_binary': is_binary,
-            'n_classes': n_classes,
-            'cluster_assignments': test_cluster_assignments[:successful_predictions].tolist()
+            'n_classes': n_classes
         }
         
         logger.info(f"MoE prediction completed - Test AUC: {test_auc:.4f}, Test AUPRC: {test_auprc:.4f}")
-        logger.info(f"Total test samples predicted: {len(all_predictions_proba)}")
+        logger.info(f"Total test samples predicted: {successful_predictions}")
         
         return moe_result
     
@@ -725,6 +836,7 @@ class ClusterTrainingExperiment:
                 'test_auc': moe_result['test_auc'],
                 'test_auprc': moe_result['test_auprc'],
                 'test_samples': moe_result['total_test_samples'],
+                'pred_type': moe_result['pred_type']
             },
             'Full_Population': {
                 'test_auc': full_result['test_auc'],
@@ -737,7 +849,7 @@ class ClusterTrainingExperiment:
         auc_diff = moe_result['test_auc'] - full_result['test_auc']
         auprc_diff = moe_result['test_auprc'] - full_result['test_auprc']
         
-        logger.info(f"MoE - AUC: {moe_result['test_auc']:.4f}, AUPRC: {moe_result['test_auprc']:.4f}")
+        logger.info(f"MoE ({moe_result['pred_type']}) - AUC: {moe_result['test_auc']:.4f}, AUPRC: {moe_result['test_auprc']:.4f}")
         logger.info(f"Full - AUC: {full_result['test_auc']:.4f}, AUPRC: {full_result['test_auprc']:.4f}")
         logger.info(f"Differences (MoE - Full): AUC: {auc_diff:+.4f}, AUPRC: {auprc_diff:+.4f}")
         
@@ -760,6 +872,7 @@ def prepare_cluster_results(moe_result, full_result):
                 "MoE_best_test_auc": moe_result['test_auc'],
                 "MoE_best_test_auprc": moe_result['test_auprc'],
                 "MoE_test_samples": moe_result['total_test_samples'],
+                "MoE_pred_type": moe_result['pred_type']
             },
             "Full_Population": {
                 "Full_best_test_auc": full_result['test_auc'],
@@ -776,12 +889,12 @@ def prepare_cluster_results(moe_result, full_result):
     }
     return results
 
-def save_cluster_results(clustering_dir, results, n_clusters):
+def save_cluster_results(clustering_dir, results, n_clusters, pred_type):
     """
     결과를 clustering 디렉토리에 저장
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"cluster_training_results_{n_clusters}_{timestamp}.json"
+    filename = f"cluster_training_results_{n_clusters}_{pred_type}_{timestamp}.json"
     filepath = clustering_dir / filename
     
     # 디렉토리에서 dataset 정보 추출
@@ -809,7 +922,8 @@ def save_cluster_results(clustering_dir, results, n_clusters):
             "model_type": "LogisticRegression",
             "comparison_type": "MoE_vs_Full_Population",
             "evaluation_metrics": ["AUROC", "AUPRC"],
-            "threshold_optimization": "None (threshold-independent evaluation)"
+            "threshold_optimization": "None (threshold-independent evaluation)",
+            "pred_type": pred_type
         },
         "results": results['Best_results']
     }
@@ -840,6 +954,8 @@ def get_args():
                        help='Path to clustering results directory')
     parser.add_argument('--checkpoint_dir', type=str, required=True,
                        help='Path to TabularFLM checkpoint for attention extraction')
+    parser.add_argument('--pred_type', type=str, default='hard', choices=['hard', 'inv', 'exp'],
+                       help='Prediction type: hard, inv (inverse), exp (exponential)')
     parser.add_argument('--random_seed', type=int, default=2021, 
                        help='Random seed')
     parser.add_argument('--device', type=str, default='cuda',
@@ -856,6 +972,7 @@ def main():
     logger.info(f"Starting cluster training experiment")
     logger.info(f"Clustering directory: {args.clustering_dir}")
     logger.info(f"Checkpoint directory: {args.checkpoint_dir}")
+    logger.info(f"Prediction type: {args.pred_type}")
     
     # 실험 실행
     experiment = ClusterTrainingExperiment(args.clustering_dir, args.device)
@@ -872,9 +989,9 @@ def main():
         logger.error("Failed to train models")
         return
     
-    # 3. Test 데이터에서 성능 비교 (checkpoint_dir 전달)
+    # 3. Test 데이터에서 성능 비교 (pred_type 전달)
     logger.info("Step 3: Evaluating on test data...")
-    moe_result = experiment.predict_moe_on_test(cluster_results, args.checkpoint_dir)
+    moe_result = experiment.predict_moe_on_test(cluster_results, args.checkpoint_dir, args.pred_type)
     full_test_result = experiment.predict_full_on_test(full_result)
     
     if moe_result is None or full_test_result is None:
@@ -885,16 +1002,17 @@ def main():
     logger.info("Step 4: Comparing performance...")
     comparison = experiment.compare_performance(moe_result, full_test_result)
     
-    # 5. 결과 저장
+    # 5. 결과 저장 (pred_type 전달)
     logger.info("Step 5: Saving results...")
     results = prepare_cluster_results(moe_result, full_test_result)
-    save_cluster_results(Path(args.clustering_dir), results, experiment.n_clusters)
+    save_cluster_results(Path(args.clustering_dir), results, experiment.n_clusters, args.pred_type)
     
     # 6. 상세 결과 출력
     logger.info("\n" + "="*50)
     logger.info("FINAL RESULTS SUMMARY")
     logger.info("="*50)
     logger.info(f"Number of clusters: {experiment.n_clusters}")
+    logger.info(f"Prediction type: {args.pred_type}")
     logger.info(f"MoE Test - AUC: {moe_result['test_auc']:.4f}, AUPRC: {moe_result['test_auprc']:.4f}")
     logger.info(f"Full Test - AUC: {full_test_result['test_auc']:.4f}, AUPRC: {full_test_result['test_auprc']:.4f}")
     

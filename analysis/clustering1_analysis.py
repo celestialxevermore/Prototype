@@ -201,15 +201,15 @@ class AttentionInference:
         name_value_embeddings = [] 
         
         if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device).squeeze(-2)
-            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device).squeeze(-2)
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
             
             name_value_embeddings.append(cat_name_value_embeddings)
             desc_embeddings.append(cat_desc_embeddings)
             
         if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device).squeeze(-2)
-            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device).squeeze(-2)
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
             
