@@ -246,7 +246,9 @@ class ComprehensiveClusteringAnalyzer:
             num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
-            
+        desc_embeddings, name_value_embeddings = self.model.remove_feature(
+            batch, desc_embeddings, name_value_embeddings
+        )
         if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
 
@@ -2176,6 +2178,7 @@ def main():
                        help='Path to model checkpoint')
     parser.add_argument('--mode', type=str, choices=['Full', 'Few'], default='Full',
                        help='Which model to use (Full or Few)')
+    parser.add_argument('--del_feat', nargs='+', default=[], help="features to remove")
     parser.add_argument('--min_k', type=int, default=2,
                        help='Minimum number of clusters to test (default: 2)')
     parser.add_argument('--max_k', type=int, default=100,

@@ -212,7 +212,11 @@ class AttentionInference:
             num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
-            
+        
+
+        desc_embeddings, name_value_embeddings = self.model.remove_feature(
+            batch, desc_embeddings, name_value_embeddings
+        )
         if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
 
@@ -1567,7 +1571,7 @@ def extract_checkpoint_config_for_folder(checkpoint_path):
     filename_clean = re.sub(r'_\d{8}_\d{6}', '', filename)
     
     # "Embed:carte_desc_Edge:mlp_A:att" 형태를 파싱
-    pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+)'
+    pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+(?:_[^:_]+)*)'
     match = re.match(pattern, filename_clean)
     
     if match:
@@ -1592,7 +1596,8 @@ def main():
                        help='Which model to use (Full or Few)')
     parser.add_argument('--layer_idx', type=int, default=2,
                        help='Layer index for clustering (default: 2)')
-    parser.add_argument('--n_clusters', type=int, default=8,
+    parser.add_argument('--del_feat', nargs='+', default=[], help="features to remove")
+    parser.add_argument('--n_clusters', type=int, default=5,
                        help='Number of clusters for K-means')
     parser.add_argument('--max_samples', type=int, default=5,
                        help='Maximum number of samples for graph visualization ONLY')
