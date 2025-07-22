@@ -19,9 +19,11 @@ from utils.train_test import binary_train, binary_evaluate, multi_train, multi_e
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM import Model
+from models.TabularFLM_A import Model
 import psutil
 from utils.visualization import visualize_model_structure
+import copy 
+from utils.ablation import extract_important_features, determine_del_feat_by_scenario, save_scenario_results_individually
 from torch_geometric.data import Batch
 from datetime import datetime
 import networkx as nx               
@@ -76,7 +78,7 @@ def get_args():
     parser.add_argument('--embed_type', default = 'carte', choices = ['carte', 'carte_desc','ours','ours2'])
     parser.add_argument('--attn_type', default='gat_v1', choices= ['gat_v1','att','gat_v2', 'gate'])
     parser.add_argument('--del_feat', nargs='+', default = [], help='Features to remove from the model. Usage: --del_feat feature1 feature2 feature3')
-    parser.add_argument('--del_exp', default="You did not entered the exp type", choices=['exp1','exp2','exp3','exp4','exp5'])
+    
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -221,7 +223,12 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}/{args.random_seed}"
             os.makedirs(checkpoint_dir, exist_ok=True)
             # 항상 같은 파일명으로 덮어쓰기
-            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_D:{args.del_feat}_S:{args.random_seed}_{experiment_id}.pt")
+            # 삭제된 feature가 많으면 "..." 처리
+            if len(str(args.del_feat)) > 50:
+                del_feat_str = "..."
+            else:
+                del_feat_str = str(args.del_feat)
+            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_D:{del_feat_str}_S:{args.random_seed}_{experiment_id}.pt")
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -290,18 +297,16 @@ def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretr
 
 def main():
     start_time = time.time()
-    args  = get_args()
+    args = get_args()
     
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
     
-    logger.info(f"Starting experiment with dataset: {args.source_data}")
+    logger.info(f"Starting ablation study experiment with dataset: {args.source_data}")
     logger.info(f"Device: {device}")
 
     logger.info("Preparing Tabular datasets...")
-    # if args.embed_type in ['carte', 'carte_desc']:
-    #     args.use_edge_attr = True
-
+    
     results = prepare_embedding_dataloaders(args, args.source_data)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
@@ -320,109 +325,244 @@ def main():
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
     
-    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model,experiment_id, mode="Full")
-    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode = "Few")
-    model_full = model_full.to(device)
-    model_few = model_few.to(device)
-    optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
-
-
-    if args.few_shot == 4:
-        logger.info(f"[Source-Only: Full] Start Training..")
-
-        (train_losses_full, val_losses_full,
-        train_aucs_full, val_aucs_full,
-        train_precisions_full, val_precisions_full,
-        train_recalls_full, val_recalls_full,
-        train_f1s_full, val_f1s_full,
-        train_accs_full, val_accs_full,
-        best_epoch_full, best_val_auc_full, best_threshold_full
-        ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
-                            device, args.train_epochs, is_binary, mode="Full")
-
-        logger.info("[Full-shot] Final Testing with best threshold from Validation")
-        (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
-        test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
-                                                                threshold=best_threshold_full)
-
-    # 4-2) 최종 Test - Few
-    logger.info("[Few-shot] Start Training...")
-    (train_losses_few, val_losses_few,
-    train_aucs_few, val_aucs_few,
-    train_precisions_few, val_precisions_few,
-    train_recalls_few, val_recalls_few,
-    train_f1s_few, val_f1s_few,
-    train_accs_few, val_accs_few,
-    best_epoch_few, best_val_auc_few, best_threshold_few
-    ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary, mode="Few")
-
-    logger.info("[Few-shot] Final Testing with best threshold from Validation")
-    (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
-    test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
-                                                        threshold=best_threshold_few)
-
-
-
+    # =================================================================
+    # Phase 1: Baseline (전체 변수 사용) & Attention Analysis
+    # =================================================================
+    logger.info("=" * 60)
+    logger.info("Phase 1: Baseline analysis with all features")
+    logger.info("=" * 60)
     
-    if args.few_shot == 4:
-        full_ours_results = wrap_up_results_(
-            train_losses=train_losses_full, 
-            val_losses=val_losses_full,
-            test_losses=[],  # 필요하면 test_loss 리스트 넣기
-            train_aucs=train_aucs_full,
-            val_aucs=val_aucs_full,
-            test_aucs=[test_auc_full], 
-            train_precisions=train_precisions_full,
-            val_precisions=val_precisions_full,
-            test_precisions=[test_precision_full],
-            train_recalls=train_recalls_full,
-            val_recalls=val_recalls_full,
-            test_recalls=[test_recall_full],
-            train_f1s=train_f1s_full,
-            val_f1s=val_f1s_full,
-            test_f1s=[test_f1_full],
-            all_y_true=[all_y_true_full],
-            all_y_pred=[all_y_pred_full],
-            best_epoch=best_epoch_full,
-            best_ours_auc=test_auc_full,
-            best_ours_acc=test_acc_full,
-            best_ours_precision=test_precision_full,
-            best_ours_recall=test_recall_full,
-            best_ours_f1=test_f1_full,
-            train_accs=train_accs_full,
-            val_accs=val_accs_full,
-            test_accs=[test_acc_full]
-            )
-    else: 
-        full_ours_results = None
+    # 전체 변수로 학습
+    args_phase1 = copy.deepcopy(args)
+    args_phase1.del_feat = []  # 전체 변수 사용
+    
+    logger.info(f"Phase 1 del_feat: {args_phase1.del_feat}")
+    logger.info(f"Phase 1 should use all features")
+    
+    # Baseline Full-shot 실험
+    logger.info("[Baseline - Full-shot] Start Training...")
+    model_analysis_full = Model(args_phase1, args.input_dim, args.hidden_dim, args.output_dim, 
+                               args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode="Baseline_Full")
+    model_analysis_full = model_analysis_full.to(device)
+    optimizer_analysis_full = optim.Adam(model_analysis_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
+    
+    # Baseline Full-shot 학습 & 평가
+    (train_losses_baseline_full, val_losses_baseline_full, train_aucs_baseline_full, val_aucs_baseline_full,
+     train_precisions_baseline_full, val_precisions_baseline_full, train_recalls_baseline_full, val_recalls_baseline_full,
+     train_f1s_baseline_full, val_f1s_baseline_full, train_accs_baseline_full, val_accs_baseline_full,
+     best_epoch_baseline_full, best_val_auc_baseline_full, best_threshold_baseline_full) = train_and_validate(
+        args_phase1, model_analysis_full, train_loader_full_s, val_loader_full_s, 
+        criterion, optimizer_analysis_full, device, args.train_epochs, is_binary, mode="Baseline_Full")
+    
+    # Baseline Full-shot 최종 테스트
+    (test_loss_baseline_full, test_auc_baseline_full, test_precision_baseline_full, test_recall_baseline_full, 
+     test_f1_baseline_full, test_acc_baseline_full, all_y_true_baseline_full, all_y_pred_baseline_full) = final_test_evaluate(
+        model_analysis_full, test_loader_full_s, criterion, device, is_binary, threshold=best_threshold_baseline_full)
+    
+    # Baseline Few-shot 실험
+    logger.info("[Baseline - Few-shot] Start Training...")
+    model_analysis_few = Model(args_phase1, args.input_dim, args.hidden_dim, args.output_dim,
+                              args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode="Baseline_Few")
+    model_analysis_few = model_analysis_few.to(device)
+    optimizer_analysis_few = optim.Adam(model_analysis_few.parameters(), lr=args.source_lr_few, weight_decay=1e-5)
+    
+    # Baseline Few-shot 학습 & 평가
+    (train_losses_baseline_few, val_losses_baseline_few, train_aucs_baseline_few, val_aucs_baseline_few,
+     train_precisions_baseline_few, val_precisions_baseline_few, train_recalls_baseline_few, val_recalls_baseline_few,
+     train_f1s_baseline_few, val_f1s_baseline_few, train_accs_baseline_few, val_accs_baseline_few,
+     best_epoch_baseline_few, best_val_auc_baseline_few, best_threshold_baseline_few) = train_and_validate(
+        args_phase1, model_analysis_few, train_loader_few_s, val_loader_few_s, 
+        criterion, optimizer_analysis_few, device, args.train_epochs, is_binary, mode="Baseline_Few")
+    
+    # Baseline Few-shot 최종 테스트
+    (test_loss_baseline_few, test_auc_baseline_few, test_precision_baseline_few, test_recall_baseline_few,
+     test_f1_baseline_few, test_acc_baseline_few, all_y_true_baseline_few, all_y_pred_baseline_few) = final_test_evaluate(
+        model_analysis_few, test_loader_few_s, criterion, device, is_binary, threshold=best_threshold_baseline_few)
+    
+    # Attention 분석하여 중요한 변수 추출 (Full-shot 모델 사용)
+    logger.info("Extracting attention weights and identifying important features...")
+    important_features, all_features, unimportant_features = extract_important_features(model_analysis_full, train_loader_full_s, device)
+    
+    logger.info(f"Important features (Top-3): {important_features}")
+    logger.info(f"All features ({len(all_features)} total): {all_features}")
+    
+    # Baseline 결과 정리
+    baseline_full_results = wrap_up_results_(
+        train_losses_baseline_full, val_losses_baseline_full, [],
+        train_aucs_baseline_full, val_aucs_baseline_full, [test_auc_baseline_full],
+        train_precisions_baseline_full, val_precisions_baseline_full, [test_precision_baseline_full],
+        train_recalls_baseline_full, val_recalls_baseline_full, [test_recall_baseline_full],
+        train_f1s_baseline_full, val_f1s_baseline_full, [test_f1_baseline_full],
+        [all_y_true_baseline_full], [all_y_pred_baseline_full],
+        best_epoch_baseline_full, test_auc_baseline_full, test_acc_baseline_full, 
+        test_precision_baseline_full, test_recall_baseline_full, test_f1_baseline_full,
+        train_accs_baseline_full, val_accs_baseline_full, [test_acc_baseline_full]
+    )
+    
+    baseline_few_results = wrap_up_results_(
+        train_losses_baseline_few, val_losses_baseline_few, [],
+        train_aucs_baseline_few, val_aucs_baseline_few, [test_auc_baseline_few],
+        train_precisions_baseline_few, val_precisions_baseline_few, [test_precision_baseline_few],
+        train_recalls_baseline_few, val_recalls_baseline_few, [test_recall_baseline_few],
+        train_f1s_baseline_few, val_f1s_baseline_few, [test_f1_baseline_few],
+        [all_y_true_baseline_few], [all_y_pred_baseline_few],
+        best_epoch_baseline_few, test_auc_baseline_few, test_acc_baseline_few,
+        test_precision_baseline_few, test_recall_baseline_few, test_f1_baseline_few,
+        train_accs_baseline_few, val_accs_baseline_few, [test_acc_baseline_few]
+    )
+    
+    # =================================================================
+    # Phase 2: Scenario-based Ablation Studies
+    # =================================================================
+    logger.info("=" * 60)
+    logger.info("Phase 2: Scenario-based ablation studies")
+    logger.info("=" * 60)
+    
+    scenarios = {
+        0: "Baseline (No feature removal)",  # 새로 추가
+        1: "Remove top-3 important features",
+        2: "Remove top-3 important + 1 unimportant features",  # 수정
+        3: "Remove bottom-3 unimportant features",
+        4: "Keep only top-3 important features"
+    }
+    
+    all_scenario_results = {}
+    
+    # Baseline 결과를 시나리오 0으로 저장
+    all_scenario_results[0] = {
+        'description': "Baseline (No feature removal)",
+        'removed_features': [],
+        'full_results': baseline_full_results,
+        'few_results': baseline_few_results,
+        'scenario_args': args_phase1
+    }
+    
+    logger.info(f"Scenario 0: Baseline (No feature removal)")
+    logger.info(f"Full-shot - Test AUC: {test_auc_baseline_full:.4f}, Test ACC: {test_acc_baseline_full:.4f}")
+    logger.info(f"Few-shot - Test AUC: {test_auc_baseline_few:.4f}, Test ACC: {test_acc_baseline_few:.4f}")
+    
+    for scenario_id, description in scenarios.items():
+        if scenario_id == 0:  # Baseline은 이미 처리함
+            continue
+            
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Scenario {scenario_id}: {description}")
+        logger.info(f"{'='*60}")
+        
+        # 시나리오별 del_feat 설정
+        args_scenario = copy.deepcopy(args)
+        args_scenario.del_feat = determine_del_feat_by_scenario(scenario_id, important_features, all_features,unimportant_features)
+        
+        logger.info(f"Removing features: {args_scenario.del_feat}")
+        
+        # Full-shot 실험
+        logger.info(f"[Scenario {scenario_id} - Full-shot] Start Training...")
+        model_full = Model(args_scenario, args.input_dim, args.hidden_dim, args.output_dim,
+                          args.num_layers, args.dropout_rate, args.llm_model, experiment_id, 
+                          mode=f"Scenario_{scenario_id}_Full")
+        model_full = model_full.to(device)
+        optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
+        
+        # Full-shot 학습 & 평가
+        (train_losses_full, val_losses_full, train_aucs_full, val_aucs_full, 
+         train_precisions_full, val_precisions_full, train_recalls_full, val_recalls_full,
+         train_f1s_full, val_f1s_full, train_accs_full, val_accs_full,
+         best_epoch_full, best_val_auc_full, best_threshold_full) = train_and_validate(
+            args_scenario, model_full, train_loader_full_s, val_loader_full_s, 
+            criterion, optimizer_full, device, args.train_epochs, is_binary, 
+            mode=f"Scenario_{scenario_id}_Full")
+        
+        # Full-shot 최종 테스트
+        (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full, 
+         test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(
+            model_full, test_loader_full_s, criterion, device, is_binary, threshold=best_threshold_full)
+        
+        # Few-shot 실험
+        logger.info(f"[Scenario {scenario_id} - Few-shot] Start Training...")
+        model_few = Model(args_scenario, args.input_dim, args.hidden_dim, args.output_dim,
+                         args.num_layers, args.dropout_rate, args.llm_model, experiment_id, 
+                         mode=f"Scenario_{scenario_id}_Few")
+        model_few = model_few.to(device)
+        optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr_few, weight_decay=1e-5)
+        
+        # Few-shot 학습 & 평가
+        (train_losses_few, val_losses_few, train_aucs_few, val_aucs_few,
+         train_precisions_few, val_precisions_few, train_recalls_few, val_recalls_few,
+         train_f1s_few, val_f1s_few, train_accs_few, val_accs_few,
+         best_epoch_few, best_val_auc_few, best_threshold_few) = train_and_validate(
+            args_scenario, model_few, train_loader_few_s, val_loader_few_s, 
+            criterion, optimizer_few, device, args.train_epochs, is_binary,
+            mode=f"Scenario_{scenario_id}_Few")
+        
+        # Few-shot 최종 테스트
+        (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
+         test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
+            model_few, test_loader_few_s, criterion, device, is_binary, threshold=best_threshold_few)
+        
+        # 결과 정리
+        full_results = wrap_up_results_(
+            train_losses_full, val_losses_full, [],
+            train_aucs_full, val_aucs_full, [test_auc_full],
+            train_precisions_full, val_precisions_full, [test_precision_full],
+            train_recalls_full, val_recalls_full, [test_recall_full],
+            train_f1s_full, val_f1s_full, [test_f1_full],
+            [all_y_true_full], [all_y_pred_full],
+            best_epoch_full, test_auc_full, test_acc_full, test_precision_full, test_recall_full, test_f1_full,
+            train_accs_full, val_accs_full, [test_acc_full]
+        )
+        
+        few_results = wrap_up_results_(
+            train_losses_few, val_losses_few, [],
+            train_aucs_few, val_aucs_few, [test_auc_few],
+            train_precisions_few, val_precisions_few, [test_precision_few],
+            train_recalls_few, val_recalls_few, [test_recall_few],
+            train_f1s_few, val_f1s_few, [test_f1_few],
+            [all_y_true_few], [all_y_pred_few],
+            best_epoch_few, test_auc_few, test_acc_few, test_precision_few, test_recall_few, test_f1_few,
+            train_accs_few, val_accs_few, [test_acc_few]
+        )
+        
+        # 시나리오 결과 저장
+        all_scenario_results[scenario_id] = {
+            'description': description,
+            'removed_features': args_scenario.del_feat.copy(),
+            'full_results': full_results,
+            'few_results': few_results,
+            'scenario_args': args_scenario
+        }
+        
+        logger.info(f"Scenario {scenario_id} completed.")
+        logger.info(f"Full-shot - Test AUC: {test_auc_full:.4f}, Test ACC: {test_acc_full:.4f}")
+        logger.info(f"Few-shot - Test AUC: {test_auc_few:.4f}, Test ACC: {test_acc_few:.4f}")
+    
+    # =================================================================
+    # 결과 저장 (각 시나리오별로 개별 JSON 파일 생성)
+    # =================================================================
+    logger.info("=" * 60)
+    logger.info("Saving scenario results...")
+    logger.info("=" * 60)
+    
+    save_scenario_results_individually(args, all_scenario_results, important_features, all_features, unimportant_features)
+    
+    # 전체 요약 로그
+    logger.info("=" * 60)
+    logger.info("ABLATION STUDY SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"Important features identified: {important_features}")
+    
+    for scenario_id, scenario_data in all_scenario_results.items():
+        logger.info(f"\nScenario {scenario_id}: {scenario_data['description']}")
+        logger.info(f"  Removed features: {scenario_data['removed_features']}")
+        
+        full_results = scenario_data['full_results']
+        few_results = scenario_data['few_results']
 
-
-    few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
-    train_losses_few, val_losses_few, [],
-    train_aucs_few, val_aucs_few, [test_auc_few],
-    train_precisions_few, val_precisions_few, [test_precision_few],
-    train_recalls_few, val_recalls_few, [test_recall_few],
-    train_f1s_few, val_f1s_few, [test_f1_few],
-    [all_y_true_few], [all_y_pred_few],
-    best_epoch_few, test_auc_few, test_acc_few,
-    test_precision_few, test_recall_few, test_f1_few,
-    train_accs=train_accs_few,
-    val_accs=val_accs_few,
-    test_accs=[test_acc_few]
-)
-
-
-    results = prepare_results_(full_ours_results, few_ours_results)
-
-    # 결과 저장
-    logger.info("Saving results...")
-    save_results_(args, results)
-    logger.info("Results saved")
+        logger.info(f"  Full-shot: AUC={full_results['best_ours_auc']:.4f}, ACC={full_results['best_ours_acc']:.4f}")
+        logger.info(f"  Few-shot:  AUC={few_results['best_ours_auc']:.4f}, ACC={few_results['best_ours_acc']:.4f}")
     end_time = time.time()
     total_time = end_time - start_time
-    logger.info(f"Total experiment time: {format_time(total_time)}")
+    logger.info(f"\nTotal experiment time: {format_time(total_time)}")
+    logger.info("Ablation study completed successfully!")
 
 if __name__ == "__main__":
     main()

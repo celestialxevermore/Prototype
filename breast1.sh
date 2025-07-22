@@ -1,11 +1,11 @@
 #!/bin/bash
 
 gpu_id=4
-source_datasets="heart"
+source_datasets="breast"
 random_seeds="42 44 46 48 50"
 embed_types="carte"
 edge_types="mlp"
-attn_types="gat_v2"
+attn_types="gat_v1"
 few_shots="4 8 16 32 64"
 
 for random_seed in $random_seeds; do

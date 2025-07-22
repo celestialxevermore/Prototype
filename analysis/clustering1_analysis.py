@@ -37,27 +37,122 @@ from utils.util import setup_logger, fix_seed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-# 기존 모듈들 import
-#from models.TabularFLM import Model
-# from dataset.data_dataloaders import prepare_embedding_dataloaders, get_few_shot_embedding_samples
-# from utils.util import setup_logger, fix_seed
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+def extract_deleted_features_from_checkpoint(checkpoint_path):
+    """
+    체크포인트 파일명에서 D:[변수명] 패턴을 추출하여 삭제된 변수 리스트 반환
+    
+    Args:
+        checkpoint_path (str): 체크포인트 파일 경로
+        
+    Returns:
+        list: 삭제된 변수 이름 리스트
+        str: D:[변수명] 부분 (폴더명용)
+    """
+    filename = Path(checkpoint_path).stem
+    
+    # D:[변수명] 패턴 추출 - 여러 형식 지원
+    import re
+    patterns = [
+        r"D:\[([^\]]*)\]",           # D:[Age] 또는 D:['Age'] 형식
+        r"D_\[([^\]]*)\]",           # D_[Age] 형식 (백업)
+        r"D-\[([^\]]*)\]",           # D-[Age] 형식 (백업)
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, filename)
+        if match:
+            deleted_vars_str = match.group(1)  # 대괄호 안의 내용
+            d_part = match.group(0)  # D:[...] 전체
+            
+            if deleted_vars_str:
+                # 쉼표로 분리하여 변수 리스트 생성
+                # 작은따옴표, 큰따옴표, 공백 모두 제거
+                deleted_features = []
+                for var in deleted_vars_str.split(','):
+                    clean_var = var.strip().strip("'\"")  # 공백과 따옴표 제거
+                    if clean_var:  # 빈 문자열이 아닌 경우만 추가
+                        deleted_features.append(clean_var)
+            else:
+                deleted_features = []
+                
+            logger.info(f"🔥 Auto-detected deleted features from filename: {deleted_features}")
+            logger.info(f"🔥 Original D part: {d_part}")
+            
+            # 폴더명용으로 깔끔하게 변환 (D:[Age] 형식으로 통일)
+            if deleted_features:
+                clean_d_part = f"D:[{','.join(deleted_features)}]"
+                logger.info(f"🔥 Clean D part for folder: {clean_d_part}")
+                return deleted_features, clean_d_part
+            else:
+                return [], ""
+    
+    logger.info("🔥 No D:[...] pattern found in filename - using all features")
+    return [], ""
+
+def extract_checkpoint_config_for_folder(checkpoint_path):
+    """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환 (D:[...], S:42 제외)"""
+    filename = Path(checkpoint_path).stem
+    
+    # 날짜/시간 패턴 제거 (20250617_173832 형태)
+    import re
+    
+    # 🔥 여러 패턴들을 모두 제거하여 기본 설정만 추출
+    filename_clean = re.sub(r'_\d{8}_\d{6}', '', filename)
+    
+    # 여러 패턴 제거: D:[...], S:42, 실험 ID 등
+    patterns_to_remove = [
+        r'_D:\[[^\]]*\]',        # _D:[...] 형식
+        r'_D_\[[^\]]*\]',        # _D_[...] 형식
+        r'_D-\[[^\]]*\]',        # _D-[...] 형식
+        r'_S:\d+',               # _S:42 형식 (🔥 추가!)
+        r'_[a-f0-9-]{36}',       # UUID 형식 제거
+        r'_experiment',          # _experiment 제거
+        r'_inference',           # _inference 제거
+    ]
+    
+    for pattern in patterns_to_remove:
+        filename_clean = re.sub(pattern, '', filename_clean)
+    
+    # "Embed:carte_desc_Edge:mlp_A:gat_v1" 형태를 파싱
+    pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+(?:_[^:_]+)*)'
+    match = re.match(pattern, filename_clean)
+    
+    if match:
+        embed_type = match.group(1)  # carte, carte_desc, ours, ours2
+        edge_attr = match.group(2)   # mlp, no_use, normal
+        attn_type = match.group(3)   # att, gat, gat_v1
+        
+        # 폴더명 생성: Embed-carte_desc_Edge-mlp_A-gat_v1 (variant까지 포함)
+        folder_name = f"Embed-{embed_type}_Edge-{edge_attr}_A-{attn_type}"
+        return folder_name
+    else:
+        # 패턴 매칭 실패시 원본 사용하되 콜론을 대시로 변경
+        logger.warning(f"Could not parse config from filename: {filename_clean}")
+        return filename_clean.replace(':', '-')
 
 class AttentionInference:
-    def __init__(self, checkpoint_dir, device='cuda'):
+    def __init__(self, checkpoint_dir, device='cuda', auto_del_feat=None):
         """
         Args:
             checkpoint_dir (str): 체크포인트 파일 경로
             device (str): 'cuda' 또는 'cpu'
+            auto_del_feat (list): 자동으로 추출된 삭제할 변수 리스트
         """
         self.checkpoint_dir = checkpoint_dir
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         
+        # 🔥 실제 체크포인트 경로 확인
+        logger.info(f"🔥 Attempting to load checkpoint from: {checkpoint_dir}")
+        
         # 체크포인트 로드
         self.checkpoint = torch.load(checkpoint_dir, map_location=self.device)
         self.args = self.checkpoint['args']
+        
+        # 🔥 자동 추출된 삭제 변수를 args에 적용
+        if auto_del_feat is not None:
+            self.args.del_feat = auto_del_feat
+            logger.info(f"🔥 Applied auto-detected del_feat: {auto_del_feat}")
         
         logger.info(f"Loaded checkpoint from {checkpoint_dir}")
         logger.info(f"Checkpoint epoch: {self.checkpoint['epoch']}, Val AUC: {self.checkpoint['val_auc']:.4f}")
@@ -720,7 +815,7 @@ class AttentionInference:
         ax2.grid(True, alpha=0.2, axis='x', linestyle='-', linewidth=0.5)
         ax2.set_xlim(0, max(display_distances) * 1.2)
         
-        # ========== 3. Top 20 Closest Pairs (텍스트 리스트) ==========
+        # ========== 3. Top 20 Farthest Pairs ==========
         ax3 = plt.subplot(1, 3, 3)
 
         # 가장 먼 20개 쌍 선택 (끝에서부터)
@@ -765,7 +860,7 @@ class AttentionInference:
         # 레이아웃 조정
         plt.tight_layout(rect=[0, 0, 1, 0.92])
         
-        # ✅ 이 부분이 누락되어 있었음!
+        # 저장
         plt.savefig(output_dir / f'layer_{layer_idx}_improved_distance_analysis.png', 
                 dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
         plt.close()
@@ -795,6 +890,7 @@ class AttentionInference:
         # K-means 클러스터링
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
         cluster_assignments = kmeans.fit_predict(flattened_maps)
+        
         if output_dir:
             # clustering 폴더 경로로 변경
             clustering_dir = str(output_dir).replace('/visualization/', '/clustering/')
@@ -806,6 +902,7 @@ class AttentionInference:
             with open(kmeans_path, 'wb') as f:
                 pickle.dump(kmeans, f)
             logger.info(f"🔥 KMeans model saved to: {kmeans_path}")
+            
         # 클러스터링 결과 출력
         unique_labels = np.unique(labels)
         for cluster_id in range(n_clusters):
@@ -819,7 +916,7 @@ class AttentionInference:
             
             logger.info(f"Cluster {cluster_id}: {cluster_samples} samples, distribution: {label_dist}")
         
-        # 🔥 개선된 거리 분석 추가
+        # 개선된 거리 분석 추가
         if output_dir:
             self._plot_improved_pairwise_distances(flattened_maps, n_clusters, layer_idx, output_dir)
         
@@ -846,13 +943,6 @@ class AttentionInference:
     def _save_centroids_npy(self, cluster_centers, feature_names, layer_idx, output_dir, n_clusters):
         """
         클러스터 센트로이드를 NPY 파일로 저장
-        
-        Args:
-            cluster_centers: K-means 센트로이드 [n_clusters, flattened_dim]
-            feature_names: 피처 이름 리스트
-            layer_idx: 레이어 인덱스
-            output_dir: 출력 디렉토리
-            n_clusters: 클러스터 수
         """
         seq_len = len(feature_names)
         centroids_reshaped = cluster_centers.reshape(-1, seq_len, seq_len)
@@ -891,10 +981,6 @@ class AttentionInference:
     def generate_centroid_summary(self, main_output_dir, n_clusters):
         """
         모든 레이어의 centroid 결과를 비교 요약하는 함수
-        
-        Args:
-            main_output_dir: clustering_{n_clusters} 메인 디렉토리
-            n_clusters: 클러스터 수
         """
         main_output_dir = Path(main_output_dir)
         summary_dir = main_output_dir / 'centroid_summary'
@@ -1063,8 +1149,6 @@ class AttentionInference:
         ax1.grid(True, alpha=0.3)
         
         # 전체 변화량 분포
-        all_changes = []
-        cluster_labels = []
         boxplot_data = []
         boxplot_labels = []
         
@@ -1073,10 +1157,6 @@ class AttentionInference:
             if cluster_changes:  # 변화가 있는 클러스터만
                 boxplot_data.append(cluster_changes)
                 boxplot_labels.append(f"C{cluster['cluster_id']}")
-                
-            for change in cluster['layer_changes']:
-                all_changes.append(change['change_magnitude'])
-                cluster_labels.append(f"C{cluster['cluster_id']}")
         
         if boxplot_data:
             ax2.boxplot(boxplot_data, labels=boxplot_labels)
@@ -1283,7 +1363,7 @@ class AttentionInference:
 
     def _visualize_clustering_distribution(self, flattened_maps, cluster_assignments, labels, 
                              layer_idx, output_dir):
-        """클러스터링 분포 시각화 (t-SNE) - 같은 클러스터는 같은 색상, 레전드 중복 제거"""
+        """클러스터링 분포 시각화 (t-SNE)"""
         perplexity = min(30, len(flattened_maps)-1, max(1, len(flattened_maps)//3))
         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         tsne_embeddings = tsne.fit_transform(flattened_maps)
@@ -1295,14 +1375,14 @@ class AttentionInference:
         unique_clusters = np.unique(cluster_assignments)
         unique_labels = np.unique(labels)
         
-        # 🔥 클러스터별 기본 색상 설정 (기존과 동일)
+        # 클러스터별 기본 색상 설정
         base_colors = plt.cm.tab10(np.linspace(0, 1, max(len(unique_clusters), 1)))
         
-        # 🔥 레전드 중복 방지를 위한 추적 변수
+        # 레전드 중복 방지를 위한 추적 변수
         legend_added = {
-            'clusters': set(),  # 이미 추가된 클러스터들
-            'labels': set(),    # 이미 추가된 라벨들  
-            'centroid': False   # 센트로이드 레전드 추가 여부
+            'clusters': set(),
+            'labels': set(),
+            'centroid': False
         }
         
         # 클러스터와 라벨 조합으로 시각화
@@ -1326,45 +1406,35 @@ class AttentionInference:
                             marker = 's'  # 네모
                             marker_name = 'Label 1'
                         
-                        # 🔥 레전드 라벨 결정: 중복 방지 로직
+                        # 레전드 라벨 결정: 중복 방지 로직
                         cluster_key = f'cluster_{cluster_id}'
                         label_key = f'label_{label}'
                         
-                        # 레전드 라벨 전략:
-                        # 1. 클러스터별로 첫 번째로 나오는 경우만 클러스터 이름 표시
-                        # 2. 라벨별로 첫 번째로 나오는 경우만 라벨 설명 표시
                         legend_label = None
                         
                         if cluster_key not in legend_added['clusters']:
-                            # 이 클러스터가 처음 나오는 경우
                             if label_key not in legend_added['labels']:
-                                # 이 라벨도 처음 나오는 경우
                                 legend_label = f'Cluster {cluster_id} ({marker_name})'
                                 legend_added['labels'].add(label_key)
                             else:
-                                # 라벨은 이미 나왔지만 클러스터는 처음
                                 legend_label = f'Cluster {cluster_id}'
                             legend_added['clusters'].add(cluster_key)
                         elif label_key not in legend_added['labels']:
-                            # 클러스터는 이미 나왔지만 라벨이 처음
                             legend_label = f'{marker_name}'
                             legend_added['labels'].add(label_key)
-                        # 둘 다 이미 나온 경우는 레전드에 추가하지 않음 (None)
                         
                         ax.scatter(label_points[:, 0], label_points[:, 1], 
                                 color=base_colors[i], 
-                                label=legend_label,  # None이면 레전드에 안 나타남
+                                label=legend_label,
                                 alpha=0.7, s=50, marker=marker)
         
-        # 🔥 클러스터 센트로이드 추가 (각 클러스터 색상으로 표시)
+        # 클러스터 센트로이드 추가
         for i, cluster_id in enumerate(unique_clusters):
             cluster_mask = cluster_assignments == cluster_id
             if np.any(cluster_mask):
-                # 해당 클러스터 포인트들의 평균 위치 (t-SNE 공간에서)
                 centroid_x = np.mean(tsne_embeddings[cluster_mask, 0])
                 centroid_y = np.mean(tsne_embeddings[cluster_mask, 1])
                 
-                # 🔥 각 클러스터별로 센트로이드 레전드 추가
                 centroid_label = f'C{cluster_id} Centroid'
                 
                 ax.scatter(centroid_x, centroid_y, marker='*', s=100, 
@@ -1377,22 +1447,18 @@ class AttentionInference:
         ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
         ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
         
-        # 🔥 개선된 범례: 중복 없이 깔끔하게
+        # 범례 정리
         handles, labels_legend = ax.get_legend_handles_labels()
         if handles:
-            # 범례 순서 조정: 클러스터들 먼저, 그 다음 라벨 설명, 마지막에 센트로이드
             legend_items = list(zip(handles, labels_legend))
             
             cluster_items = [(h, l) for h, l in legend_items if l and 'Cluster' in l and 'Centroid' not in l]
             label_items = [(h, l) for h, l in legend_items if l and 'Label' in l and 'Cluster' not in l]
             centroid_items = [(h, l) for h, l in legend_items if l and 'Centroid' in l]
             
-            # 클러스터 아이템을 번호순으로 정렬
             cluster_items.sort(key=lambda x: int(x[1].split()[1]) if 'Cluster' in x[1] and x[1].split()[1].isdigit() else 999)
-            # 센트로이드 아이템을 번호순으로 정렬  
             centroid_items.sort(key=lambda x: int(x[1].split('C')[1].split()[0]) if 'C' in x[1] else 999)
             
-            # 최종 순서
             final_items = cluster_items + label_items + centroid_items
             final_handles, final_labels = zip(*final_items) if final_items else ([], [])
             
@@ -1401,7 +1467,7 @@ class AttentionInference:
         
         ax.grid(True, alpha=0.3)
         
-        # 클러스터 및 label 통계 정보
+        # 클러스터 통계 정보
         cluster_stats = []
         for cluster_id in unique_clusters:
             cluster_mask = cluster_assignments == cluster_id
@@ -1437,11 +1503,11 @@ class AttentionInference:
         logger.info(f"✅ Layer {layer_idx} distribution saved with clean legend!")
 
     def _visualize_cluster_centroids(self, cluster_centers, feature_names, layer_idx, output_dir, n_clusters):
-        """클러스터 센트로이드 히트맵 시각화 (모든 클러스터 지원 + 폴더 정리 + 동일한 스케일)"""
+        """클러스터 센트로이드 히트맵 시각화"""
         seq_len = len(feature_names)
         centroids_reshaped = cluster_centers.reshape(-1, seq_len, seq_len)
         
-        # 🔥 전체 클러스터의 공통 스케일 계산
+        # 전체 클러스터의 공통 스케일 계산
         global_vmin = centroids_reshaped.min()
         global_vmax = centroids_reshaped.max()
         
@@ -1449,21 +1515,16 @@ class AttentionInference:
         centroid_dir = output_dir / 'centroid'
         centroid_dir.mkdir(parents=True, exist_ok=True)
         
-        # 1. 전체 overview: 동적 레이아웃 결정 (제한 없음)
+        # 1. 전체 overview: 동적 레이아웃 결정
         if n_clusters <= 5:
-            # 5개 이하: 1행으로 배치
             rows, cols = 1, n_clusters
         elif n_clusters <= 10:
-            # 6-10개: 2행으로 배치
             rows, cols = 2, (n_clusters + 1) // 2
         elif n_clusters <= 15:
-            # 11-15개: 3행으로 배치
             rows, cols = 3, (n_clusters + 2) // 3
         elif n_clusters <= 20:
-            # 16-20개: 4행으로 배치
             rows, cols = 4, (n_clusters + 3) // 4
         else:
-            # 20개 초과: 5행으로 배치
             rows, cols = 5, (n_clusters + 4) // 5
         
         # 적절한 크기 계산
@@ -1484,12 +1545,12 @@ class AttentionInference:
         else:
             axes = axes.flatten()
         
-        # 🔥 모든 클러스터에 동일한 스케일 적용
+        # 모든 클러스터에 동일한 스케일 적용
         for i, centroid in enumerate(centroids_reshaped):
             ax = axes[i]
             
             im = ax.imshow(centroid, cmap='viridis', interpolation='nearest',
-                        vmin=global_vmin, vmax=global_vmax)  # 🔥 공통 스케일 적용
+                        vmin=global_vmin, vmax=global_vmax)
             ax.set_title(f'Cluster {i} Centroid', fontsize=11)
             
             # 축 라벨 설정
@@ -1497,8 +1558,6 @@ class AttentionInference:
             ax.set_yticks(np.arange(len(feature_names)))
             ax.set_xticklabels(feature_names, rotation=90, ha='right', fontsize=8)
             ax.set_yticklabels(feature_names, fontsize=8)
-            
-            # 숫자는 표시하지 않음 (깔끔한 overview용)
             
             # 컬러바 추가
             cbar = plt.colorbar(im, ax=ax)
@@ -1509,7 +1568,7 @@ class AttentionInference:
             axes[i].set_visible(False)
         
         plt.suptitle(f'Layer {layer_idx} Cluster Centroids (All {n_clusters} clusters)\nScale: {global_vmin:.3f} - {global_vmax:.3f}', 
-                    fontsize=14)  # 🔥 스케일 정보 표시
+                    fontsize=14)
         plt.tight_layout()
         
         # overview는 메인 폴더에 저장
@@ -1519,26 +1578,25 @@ class AttentionInference:
         
         logger.info(f"All {n_clusters} cluster centroids overview saved with fixed scale [{global_vmin:.3f}, {global_vmax:.3f}]")
         
-        # 2. 각 센트로이드별로 개별 상세 플롯 생성 (centroid 폴더에 저장)
+        # 2. 각 센트로이드별로 개별 상세 플롯 생성
         for i, centroid in enumerate(centroids_reshaped):
             fig, ax = plt.subplots(1, 1, figsize=(10, 8))
             
             im = ax.imshow(centroid, cmap='viridis', interpolation='nearest',
-                        vmin=global_vmin, vmax=global_vmax)  # 🔥 공통 스케일 적용
+                        vmin=global_vmin, vmax=global_vmax)
             ax.set_title(f'Cluster {i} Centroid - Layer {layer_idx}\nScale: {global_vmin:.3f} - {global_vmax:.3f}', 
-                        fontsize=16, pad=20)  # 🔥 스케일 정보 표시
+                        fontsize=16, pad=20)
             
-            # 축 라벨 설정 (더 큰 폰트)
+            # 축 라벨 설정
             ax.set_xticks(np.arange(len(feature_names)))
             ax.set_yticks(np.arange(len(feature_names)))
             ax.set_xticklabels(feature_names, rotation=90, ha='right', fontsize=12)
             ax.set_yticklabels(feature_names, fontsize=12)
             
-            # 각 셀에 값 표시 (상세 버전) - 🔥 텍스트 색상 기준을 공통 스케일로 조정
+            # 각 셀에 값 표시
             for row in range(len(feature_names)):
                 for col in range(len(feature_names)):
                     value = centroid[row, col]
-                    # 공통 스케일의 중간값을 기준으로 텍스트 색상 결정
                     threshold = (global_vmin + global_vmax) / 2
                     ax.text(col, row, f"{value:.2f}", 
                         ha="center", va="center", 
@@ -1560,132 +1618,180 @@ class AttentionInference:
         logger.info(f"All {n_clusters} detailed centroids saved with fixed scale in {centroid_dir}")
         logger.info(f"All cluster centroids saved for layer {layer_idx}")
 
-def extract_checkpoint_config_for_folder(checkpoint_path):
-    """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환"""
+def extract_seed_from_checkpoint(checkpoint_path):
+    """체크포인트 파일명에서 S:42 패턴을 추출하여 시드값 반환"""
     filename = Path(checkpoint_path).stem
     
-    # 날짜/시간 패턴 제거 (20250617_173832 형태)
     import re
-    
-    # 수정: re.sub()에 교체할 문자열 '' 추가
-    filename_clean = re.sub(r'_\d{8}_\d{6}', '', filename)
-    
-    # "Embed:carte_desc_Edge:mlp_A:att" 형태를 파싱
-    pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+(?:_[^:_]+)*)'
-    match = re.match(pattern, filename_clean)
+    pattern = r'S:(\d+)'
+    match = re.search(pattern, filename)
     
     if match:
-        embed_type = match.group(1)  # carte, carte_desc, ours, ours2
-        edge_attr = match.group(2)   # mlp, no_use, normal
-        attn_type = match.group(3)   # att, gat
-        
-        # 폴더명 생성: Embed-carte_desc_Edge-mlp_A-att
-        folder_name = f"Embed-{embed_type}_Edge-{edge_attr}_A-{attn_type}"
-        return folder_name
+        seed_value = int(match.group(1))
+        logger.info(f"🎲 Auto-detected seed from filename: {seed_value}")
+        return seed_value
     else:
-        # 패턴 매칭 실패시 원본 사용하되 콜론을 대시로 변경
-        logger.warning(f"Could not parse config from filename: {filename_clean}")
-        return filename_clean.replace(':', '-')
-
+        logger.info("🎲 No S:[seed] pattern found in filename")
+        return None
 
 def main():
-    parser = argparse.ArgumentParser(description='Attention Maps Inference')
-    parser.add_argument('--checkpoint_dir', type=str, required=True,
-                       help='Path to model checkpoint')
-    parser.add_argument('--mode', type=str, choices=['Full', 'Few'], default='Full',
-                       help='Which model to use (Full or Few)')
-    parser.add_argument('--layer_idx', type=int, default=2,
-                       help='Layer index for clustering (default: 2)')
-    parser.add_argument('--del_feat', nargs='+', default=[], help="features to remove")
-    parser.add_argument('--n_clusters', type=int, default=5,
-                       help='Number of clusters for K-means')
-    parser.add_argument('--max_samples', type=int, default=5,
-                       help='Maximum number of samples for graph visualization ONLY')
-    parser.add_argument('--output_dir', type=str, default=None,
-                       help='Output directory for results')
-    parser.add_argument('--save_attention_maps', action='store_true',
-                       help='Save individual attention map files')
-    parser.add_argument('--viz_graph', action='store_true',
-                       help='Generate graph structure visualization')
-    
-    args = parser.parse_args()
-    
-    # 🔥 출력 디렉토리 수정: checkpoints → visualization으로 경로 변경
-    if args.output_dir is None:
-        checkpoint_file = Path(args.checkpoint_dir)
-        config_folder = extract_checkpoint_config_for_folder(args.checkpoint_dir)
-        
-        # 체크포인트 파일의 부모 디렉토리 경로를 가져와서 변환
-        # /storage/personal/eungyeop/experiments/checkpoints/gpt2_mean/heart/Full/파일명.pt
-        # → /storage/personal/eungyeop/experiments/visualization/gpt2_mean/heart/Full/config/
-        checkpoint_parent_str = str(checkpoint_file.parent)
-        
-        # checkpoints를 visualization으로 변경
-        if '/checkpoints/' in checkpoint_parent_str:
-            viz_parent_str = checkpoint_parent_str.replace('/checkpoints/', '/visualization/')
-        else:
-            # fallback: 직접 경로 구성
-            viz_parent_str = '/storage/personal/eungyeop/experiments/visualization/gpt2_mean/heart/Full'
-        
-        # 최종 출력 경로: .../visualization/.../config_folder/clustering_{n_clusters}/
-        args.output_dir = Path(viz_parent_str) / config_folder / f'clustering1_{args.n_clusters}'
-    
-    logger.info(f"📁 Results will be saved to: {args.output_dir}")
+   parser = argparse.ArgumentParser(description='Attention Maps Inference')
+   parser.add_argument('--checkpoint_dir', type=str, required=True,
+                      help='Path to model checkpoint')
+   parser.add_argument('--mode', type=str, choices=['Full', 'Few'], default='Full',
+                      help='Which model to use (Full or Few)')
+   parser.add_argument('--layer_idx', type=int, default=2,
+                      help='Layer index for clustering (default: 2)')
+   parser.add_argument('--del_feat', nargs='+', default=[], help="features to remove (will be overridden by auto-detection)")
+   parser.add_argument('--n_clusters', type=int, default=3,
+                      help='Number of clusters for K-means')
+   parser.add_argument('--max_samples', type=int, default=5,
+                      help='Maximum number of samples for graph visualization ONLY')
+   parser.add_argument('--output_dir', type=str, default=None,
+                      help='Output directory for results')
+   parser.add_argument('--save_attention_maps', action='store_true',
+                      help='Save individual attention map files')
+   parser.add_argument('--viz_graph', action='store_true',
+                      help='Generate graph structure visualization')
+   
+   args = parser.parse_args()
+   
+   # 🔥 원본 체크포인트 경로 저장 (쉘 해석 전)
+   original_checkpoint_path = args.checkpoint_dir
+   logger.info(f"🔥 Original checkpoint path: {original_checkpoint_path}")
+   
+   # 🔥 체크포인트 파일명에서 자동으로 삭제된 변수 추출
+   auto_del_feat, d_part = extract_deleted_features_from_checkpoint(original_checkpoint_path)
+   
+   # 🎲 체크포인트 파일명에서 시드값 추출
+   seed_value = extract_seed_from_checkpoint(original_checkpoint_path)
+   
+   # 🔥 실제 파일 존재 여부 확인 및 경로 보정
+   checkpoint_file = Path(original_checkpoint_path)
+   if not checkpoint_file.exists():
+       # 파일이 없으면 glob 패턴으로 찾아보기
+       parent_dir = checkpoint_file.parent
+       filename_pattern = checkpoint_file.name.replace('[', r'\[').replace(']', r'\]')
+       
+       import glob
+       matching_files = glob.glob(str(parent_dir / filename_pattern))
+       
+       if not matching_files:
+           # 다른 패턴들도 시도
+           base_name = checkpoint_file.stem
+           # D:[Age] -> D:['Age'] 또는 D:["Age"] 패턴 찾기
+           possible_patterns = [
+               base_name.replace("D:[", "D:['").replace("]", "']") + ".pt",
+               base_name.replace("D:[", 'D:["').replace("]", '"]') + ".pt",
+           ]
+           
+           for pattern in possible_patterns:
+               potential_path = parent_dir / pattern
+               logger.info(f"🔥 Trying pattern: {potential_path}")
+               if potential_path.exists():
+                   args.checkpoint_dir = str(potential_path)
+                   logger.info(f"🔥 Found actual file: {args.checkpoint_dir}")
+                   break
+           else:
+               logger.error(f"❌ Could not find checkpoint file. Tried:")
+               logger.error(f"   Original: {original_checkpoint_path}")
+               for pattern in possible_patterns:
+                   logger.error(f"   Pattern: {parent_dir / pattern}")
+               raise FileNotFoundError(f"Checkpoint file not found: {original_checkpoint_path}")
+       else:
+           args.checkpoint_dir = matching_files[0]
+           logger.info(f"🔥 Found file via glob: {args.checkpoint_dir}")
+   
+   # 🔥 출력 디렉토리 수정: seed 폴더 추가
+   if args.output_dir is None:
+       # 기본 설정 폴더 (D:[...] 제외) - 원본 경로 사용
+       config_folder = extract_checkpoint_config_for_folder(original_checkpoint_path)
+       
+       # 체크포인트 파일의 부모 디렉토리 경로를 가져와서 변환
+       checkpoint_parent_str = str(Path(args.checkpoint_dir).parent)
+       
+       # checkpoints를 visualization으로 변경
+       if '/checkpoints/' in checkpoint_parent_str:
+           viz_parent_str = checkpoint_parent_str.replace('/checkpoints/', '/visualization/')
+       else:
+           # fallback: 직접 경로 구성
+           viz_parent_str = '/storage/personal/eungyeop/experiments/visualization/gpt2_mean/heart/Full'
+       
+       # 체크포인트 경로에서 seed 폴더 구조 제거 후 기본 경로만 사용
+       base_viz_parent = viz_parent_str.split(f'/{seed_value}')[0] if seed_value else viz_parent_str
+       
+       # 🎲 시드 폴더 추가
+       if seed_value is not None:
+           seed_folder = f'seed_{seed_value}'
+       else:
+           seed_folder = 'seed_unknown'
+       
+       # 🔥 clustering 폴더명에 D:[...] 정보 추가
+       if d_part:
+           clustering_folder = f'clustering1_{args.n_clusters}_{d_part}'
+       else:
+           clustering_folder = f'clustering1_{args.n_clusters}'
+       
+       # 최종 출력 경로: .../visualization/.../config_folder/seed_42/clustering_{n_clusters}_D:[...]/
+       args.output_dir = Path(base_viz_parent) / config_folder / seed_folder / clustering_folder
+   
+   logger.info(f"📁 Results will be saved to: {args.output_dir}")
 
-    # Inference 실행
-    inference = AttentionInference(args.checkpoint_dir)
-    
-    # 데이터로더 선택
-    if args.mode == 'Full':
-        data_loader = inference.combined_loader
-        logger.info("Using Full dataset loader")
-    else:
-        data_loader = inference.train_loader_few if hasattr(inference, 'train_loader_few') else inference.test_loader
-        logger.info("Using Few-shot dataset loader")
-    
-    # 🔥 클러스터링 결과를 위한 상위 폴더 생성
-    clustering_results_dir = Path(args.output_dir) / 'clustering_results'
-    clustering_results_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 그래프 시각화 (max_samples 개수만큼만)
-    if args.viz_graph:
-        logger.info(f"Generating graph visualizations for {args.max_samples} samples...")
-        graph_output_dir = Path(args.output_dir) / 'graph_visualization'
-        inference.visualize_graph_structure(data_loader, graph_output_dir, args.max_samples)
-    
-    # Attention maps 추출 (전체 데이터에 대해 무조건)
-    logger.info("Extracting attention maps for clustering (FULL DATASET)...")
-    attention_data = inference.extract_attention_maps(data_loader)
-    
-    # Attention maps 저장 (옵션)
-    if args.save_attention_maps:
-        save_dir = Path(args.output_dir) / 'attention_maps'
-        inference.save_attention_maps(attention_data, save_dir)
+   # 🔥 Inference 실행 시 자동 추출된 삭제 변수 적용
+   # 보정된 checkpoint_dir 경로 사용
+   inference = AttentionInference(args.checkpoint_dir, auto_del_feat=auto_del_feat)
+   
+   # 데이터로더 선택
+   if args.mode == 'Full':
+       data_loader = inference.combined_loader
+       logger.info("Using Full dataset loader")
+   else:
+       data_loader = inference.train_loader_few if hasattr(inference, 'train_loader_few') else inference.test_loader
+       logger.info("Using Few-shot dataset loader")
+   
+   # 🔥 클러스터링 결과를 위한 상위 폴더 생성
+   clustering_results_dir = Path(args.output_dir) / 'clustering_results'
+   clustering_results_dir.mkdir(parents=True, exist_ok=True)
+   
+   # 그래프 시각화 (max_samples 개수만큼만)
+   if args.viz_graph:
+       logger.info(f"Generating graph visualizations for {args.max_samples} samples...")
+       graph_output_dir = Path(args.output_dir) / 'graph_visualization'
+       inference.visualize_graph_structure(data_loader, graph_output_dir, args.max_samples)
+   
+   # Attention maps 추출 (전체 데이터에 대해 무조건)
+   logger.info("Extracting attention maps for clustering (FULL DATASET)...")
+   attention_data = inference.extract_attention_maps(data_loader)
+   
+   # Attention maps 저장 (옵션)
+   if args.save_attention_maps:
+       save_dir = Path(args.output_dir) / 'attention_maps'
+       inference.save_attention_maps(attention_data, save_dir)
 
-    # 모든 레이어에 대해 클러스터링
-    for layer_idx in range(len(inference.model.layers)):
-        logger.info(f"Performing clustering on layer {layer_idx}...")
-        # 🔥 레이어별 결과를 clustering_results 폴더 아래에 저장
-        layer_output_dir = clustering_results_dir / f'layer_{layer_idx}'
-        clustering_results = inference.perform_clustering(
-            attention_data, 
-            layer_idx=layer_idx,
-            n_clusters=args.n_clusters,
-            output_dir=layer_output_dir
-        )
-        logger.info(f"Saving attention maps by cluster for layer {layer_idx}...")
-        inference.save_attention_maps_by_cluster(
-            attention_data,  # 🔥 attention_data 추가
-            clustering_results, 
-            clustering_results_dir,
-            layer_idx
-        )
-    
-    # 🔥 전체 센트로이드 요약 분석 - clustering_results 폴더 사용
-    logger.info("Generating comprehensive centroid summary...")
-    inference.generate_centroid_summary(clustering_results_dir, args.n_clusters)
-    
-    logger.info(f"Inference completed! Results saved to {args.output_dir}")
+   # 모든 레이어에 대해 클러스터링
+   for layer_idx in range(len(inference.model.layers)):
+       logger.info(f"Performing clustering on layer {layer_idx}...")
+       # 🔥 레이어별 결과를 clustering_results 폴더 아래에 저장
+       layer_output_dir = clustering_results_dir / f'layer_{layer_idx}'
+       clustering_results = inference.perform_clustering(
+           attention_data, 
+           layer_idx=layer_idx,
+           n_clusters=args.n_clusters,
+           output_dir=layer_output_dir
+       )
+       logger.info(f"Saving attention maps by cluster for layer {layer_idx}...")
+       inference.save_attention_maps_by_cluster(
+           attention_data,
+           clustering_results, 
+           clustering_results_dir,
+           layer_idx
+       )
+   
+   # 🔥 전체 센트로이드 요약 분석 - clustering_results 폴더 사용
+   logger.info("Generating comprehensive centroid summary...")
+   inference.generate_centroid_summary(clustering_results_dir, args.n_clusters)
+   
+   logger.info(f"Inference completed! Results saved to {args.output_dir}")
 
 if __name__ == "__main__":
-    main()
+   main()

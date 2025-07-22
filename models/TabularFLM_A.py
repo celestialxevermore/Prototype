@@ -351,15 +351,6 @@ class Model(nn.Module):
         self.mode = mode
         self.num_classes = args.num_classes
         
-        # GMM 관련 속성 추가
-        self.use_gmm = args.use_gmm 
-        self.use_gmm2 = args.use_gmm2
-        self.num_prototypes = args.num_prototypes
-        self.stage_num = args.gmm_stage_num
-        self.momentum = args.gmm_momentum 
-        self.beta = args.gmm_beta 
-        self.lambd = args.gmm_lambda
-        self.eps = args.gmm_eps
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
@@ -537,8 +528,6 @@ class Model(nn.Module):
             removed_cat = [name for name in cat_feature_names if name in removed_set]
             
             if removed_cat:
-                #print(f"Removing categorical features: {removed_cat}")
-                
                 # batch에서 직접 제거
                 batch['cat_desc_texts'] = [batch['cat_desc_texts'][i] for i in keep_indices]
                 batch['cat_desc_embeddings'] = batch['cat_desc_embeddings'][:, keep_indices, :]
@@ -559,7 +548,6 @@ class Model(nn.Module):
             removed_num = [name for name in num_feature_names if name in removed_set]
             
             if removed_num:
-
                 # batch에서 직접 제거
                 batch['num_desc_texts'] = [batch['num_desc_texts'][i] for i in keep_indices]
                 batch['num_desc_embeddings'] = batch['num_desc_embeddings'][:, keep_indices, :]
@@ -572,6 +560,141 @@ class Model(nn.Module):
         
         return filtered_desc_embeddings, filtered_name_value_embeddings
 
+    def extract_cls_attention_weights(self, data_loader, device, top_k=3):
+        """
+        완전히 학습된 모델에서 CLS 토큰의 attention weight를 추출하여 중요한 변수들을 찾음
+        
+        Args:
+            data_loader: 데이터 로더
+            device: 디바이스
+            top_k: 상위 몇 개의 변수를 추출할지
+        
+        Returns:
+            important_features: 중요한 변수들의 이름 리스트 (attention 높은 순)
+            all_features: 전체 변수들의 이름 리스트
+            unimportant_features: 안중요한 변수들의 이름 리스트 (attention 낮은 순)
+        """
+        self.eval()
+        all_feature_names = None
+        all_attentions = []  # 모든 배치의 attention 저장
+        
+        with torch.no_grad():
+            for batch in data_loader:
+                # Feature names 추출 (첫 번째 배치에서만)
+                if all_feature_names is None:
+                    all_feature_names = self.extract_feature_names(batch)
+                
+                # 임베딩 준비 (전체 변수 사용 - remove_feature 호출하지 않음)
+                desc_embeddings, name_value_embeddings = self._prepare_embeddings_for_attention(batch)
+                
+                # CLS token 추가
+                cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
+                name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
+                x = name_value_embeddings
+                
+                # 마지막 레이어까지 forward pass
+                for i, layer in enumerate(self.layers):
+                    norm_x = self.layer_norms[i](x)
+                    attn_output, attn_weights = layer(desc_embeddings, norm_x)
+                    
+                    if i == len(self.layers) - 1:  # 마지막 레이어의 attention 저장
+                        # CLS -> 다른 노드들로의 attention weights 추출
+                        # attn_weights: [batch_size, n_heads, seq_len, seq_len]
+                        cls_to_vars_attention = attn_weights[:, :, 0, 1:]  # [batch, heads, num_vars]
+                        all_attentions.append(cls_to_vars_attention)
+                    
+                    x = x + attn_output
+        
+        # 모든 배치의 attention을 연결하고 평균화
+        final_attention = torch.cat(all_attentions, dim=0).mean(dim=(0, 1))  # [num_vars]
+        
+        # 🔥 전체 변수의 attention 순위 계산 (높은 순으로 정렬)
+        sorted_indices = torch.argsort(final_attention, descending=True)
+        
+        # Top-k 중요 변수 (attention 높은 순)
+        if len(final_attention) < top_k:
+            top_k = len(final_attention)
+        
+        top_indices = sorted_indices[:top_k]
+        important_features = [all_feature_names[i] for i in top_indices]
+        
+        # 🔥 Bottom-k 안중요 변수 (attention 낮은 순)
+        bottom_indices = sorted_indices[-top_k:] if len(sorted_indices) >= top_k else []
+        unimportant_features = [all_feature_names[i] for i in bottom_indices]
+        
+        logger.info(f"CLS Attention weights for top {top_k} features:")
+        for i, (idx, feat) in enumerate(zip(top_indices, important_features)):
+            weight = final_attention[idx].item()
+            logger.info(f"  {i+1}. {feat}: {weight:.6f}")
+        
+        logger.info(f"CLS Attention weights for bottom {len(unimportant_features)} features:")
+        for i, (idx, feat) in enumerate(zip(bottom_indices, unimportant_features)):
+            weight = final_attention[idx].item()
+            logger.info(f"  {i+1}. {feat}: {weight:.6f}")
+        
+        return important_features, all_feature_names, unimportant_features
+
+    def _prepare_embeddings_for_attention(self, batch):
+        """
+        Attention 분석용 임베딩 준비 함수 (remove_feature 호출하지 않음)
+        전체 변수로 attention 분석할 때 사용
+        """
+        desc_embeddings = [] 
+        name_value_embeddings = [] 
+
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
+            
+            name_value_embeddings.append(cat_name_value_embeddings)
+            desc_embeddings.append(cat_desc_embeddings)
+            
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
+            name_value_embeddings.append(num_prompt_embeddings)
+            desc_embeddings.append(num_desc_embeddings)
+        
+        if not desc_embeddings or not name_value_embeddings:
+            raise ValueError("No categorical or numerical features found in batch")
+
+        desc_embeddings = torch.cat(desc_embeddings, dim=1)
+        name_value_embeddings = torch.cat(name_value_embeddings, dim=1)
+        
+        return desc_embeddings, name_value_embeddings
+
+    def _prepare_embeddings(self, batch):
+        """
+        배치에서 임베딩을 준비하는 헬퍼 함수 (기존 predict 함수에서 추출)
+        일반 학습/예측용 - remove_feature 호출함
+        """
+        desc_embeddings = [] 
+        name_value_embeddings = [] 
+
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
+            
+            name_value_embeddings.append(cat_name_value_embeddings)
+            desc_embeddings.append(cat_desc_embeddings)
+            
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
+            name_value_embeddings.append(num_prompt_embeddings)
+            desc_embeddings.append(num_desc_embeddings)
+        
+        desc_embeddings, name_value_embeddings = self.remove_feature(
+            batch, desc_embeddings, name_value_embeddings
+        )
+        
+        if not desc_embeddings or not name_value_embeddings:
+            raise ValueError("No categorical or numerical features found in batch")
+
+        desc_embeddings = torch.cat(desc_embeddings, dim=1)
+        name_value_embeddings = torch.cat(name_value_embeddings, dim=1)
+        
+        return desc_embeddings, name_value_embeddings
 
     def forward(self, batch, y):        
         target = y.to(self.device)
@@ -587,11 +710,9 @@ class Model(nn.Module):
         return loss
 
     def predict(self, batch):
-        
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
         desc_embeddings = [] 
         name_value_embeddings = [] 
-
 
         if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
             cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
@@ -606,11 +727,9 @@ class Model(nn.Module):
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
         
-        
         desc_embeddings, name_value_embeddings = self.remove_feature(
             batch, desc_embeddings, name_value_embeddings
         )
-        
         
         if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")

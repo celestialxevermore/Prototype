@@ -116,4 +116,4 @@ def logistic_regression_benchmark(args, X_train, X_valid, X_test, y_train, y_val
         'best_lr_loss': best_loss,
     }
 
-    return total_results, final_pipeline
+    return total_results

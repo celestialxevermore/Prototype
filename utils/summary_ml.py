@@ -20,7 +20,7 @@ def process_ml_results(base_directory):
     results_by_dataset = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
     full_results_by_dataset = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))  # 시드별 full 결과 저장
     
-    for dataset in ['adult', 'diabetes', 'heart']:
+    for dataset in ['adult', 'heart', 'diabetes']:
         dataset_path = os.path.join(base_directory, dataset)
         if not os.path.exists(dataset_path):
             continue

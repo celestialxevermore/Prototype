@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class LabelBasedClusteringInference:
-    def __init__(self, checkpoint_dir, device='cuda'):
+    def __init__(self, checkpoint_dir, device='cuda', auto_del_feat=None):
         """
         Args:
             checkpoint_dir (str): 체크포인트 파일 경로
@@ -45,7 +45,9 @@ class LabelBasedClusteringInference:
         # 체크포인트 로드
         self.checkpoint = torch.load(checkpoint_dir, map_location=self.device)
         self.args = self.checkpoint['args']
-        
+        if auto_del_feat is not None:
+            self.args.del_feat = auto_del_feat
+            logger.info(f"🔥 Applied auto-detected del_feat: {auto_del_feat}")
         logger.info(f"Loaded checkpoint from {checkpoint_dir}")
         logger.info(f"Checkpoint epoch: {self.checkpoint['epoch']}, Val AUC: {self.checkpoint['val_auc']:.4f}")
         
@@ -1230,25 +1232,88 @@ class LabelBasedClusteringInference:
             logger.info(f"Label {label_key}: Train={train_count}, Valid={valid_count}, Test={test_count}, Clusters={n_clusters}")
 
 
+def extract_deleted_features_from_checkpoint(checkpoint_path):
+    """
+    체크포인트 파일명에서 D:[변수명] 패턴을 추출하여 삭제된 변수 리스트 반환
+    
+    Args:
+        checkpoint_path (str): 체크포인트 파일 경로
+        
+    Returns:
+        list: 삭제된 변수 이름 리스트
+        str: D:[변수명] 부분 (폴더명용)
+    """
+    filename = Path(checkpoint_path).stem
+    
+    # D:[변수명] 패턴 추출 - 여러 형식 지원
+    import re
+    patterns = [
+        r"D:\[([^\]]*)\]",           # D:[Age] 또는 D:['Age'] 형식
+        r"D_\[([^\]]*)\]",           # D_[Age] 형식 (백업)
+        r"D-\[([^\]]*)\]",           # D-[Age] 형식 (백업)
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, filename)
+        if match:
+            deleted_vars_str = match.group(1)  # 대괄호 안의 내용
+            d_part = match.group(0)  # D:[...] 전체
+            
+            if deleted_vars_str:
+                # 쉼표로 분리하여 변수 리스트 생성
+                # 작은따옴표, 큰따옴표, 공백 모두 제거
+                deleted_features = []
+                for var in deleted_vars_str.split(','):
+                    clean_var = var.strip().strip("'\"")  # 공백과 따옴표 제거
+                    if clean_var:  # 빈 문자열이 아닌 경우만 추가
+                        deleted_features.append(clean_var)
+            else:
+                deleted_features = []
+                
+            logger.info(f"🔥 Auto-detected deleted features from filename: {deleted_features}")
+            logger.info(f"🔥 Original D part: {d_part}")
+            
+            # 폴더명용으로 깔끔하게 변환 (D:[Age] 형식으로 통일)
+            if deleted_features:
+                clean_d_part = f"D:[{','.join(deleted_features)}]"
+                logger.info(f"🔥 Clean D part for folder: {clean_d_part}")
+                return deleted_features, clean_d_part
+            else:
+                return [], ""
+    
+    logger.info("🔥 No D:[...] pattern found in filename - using all features")
+    return [], ""
+
 def extract_checkpoint_config_for_folder(checkpoint_path):
-    """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환"""
+    """체크포인트 파일명에서 설정 정보를 추출해서 폴더명으로 변환 (D:[...] 제외)"""
     filename = Path(checkpoint_path).stem
     
     # 날짜/시간 패턴 제거 (20250617_173832 형태)
     import re
+    
+    # 🔥 D:[...] 패턴들을 모두 제거하여 기본 설정만 추출
     filename_clean = re.sub(r'_\d{8}_\d{6}', '', filename)
     
-    # "Embed:carte_desc_Edge:mlp_A:att" 형태를 파싱
-    # 🔥 수정: 마지막 그룹에서 언더스코어도 포함하도록 변경
+    # 여러 D: 패턴 제거
+    d_patterns = [
+        r'_D:\[[^\]]*\]',        # _D:[...] 형식
+        r'_D_\[[^\]]*\]',        # _D_[...] 형식
+        r'_D-\[[^\]]*\]',        # _D-[...] 형식
+    ]
+    
+    for pattern in d_patterns:
+        filename_clean = re.sub(pattern, '', filename_clean)
+    
+    # "Embed:carte_desc_Edge:mlp_A:gat_v1" 형태를 파싱
     pattern = r'Embed:([^:_]+(?:_[^:_]+)*?)_Edge:([^:_]+)_A:([^:_]+(?:_[^:_]+)*)'
     match = re.match(pattern, filename_clean)
     
     if match:
         embed_type = match.group(1)  # carte, carte_desc, ours, ours2
         edge_attr = match.group(2)   # mlp, no_use, normal
-        attn_type = match.group(3)   # att, gat, gat_v1, gat_v2
+        attn_type = match.group(3)   # att, gat, gat_v1
         
-        # 폴더명 생성: Embed-carte_desc_Edge-mlp_A-att
+        # 폴더명 생성: Embed-carte_desc_Edge-mlp_A-gat_v1 (variant까지 포함)
         folder_name = f"Embed-{embed_type}_Edge-{edge_attr}_A-{attn_type}"
         return folder_name
     else:
@@ -1275,17 +1340,49 @@ def main():
                        help='Disable visualization (overrides --visualize)')
     
     args = parser.parse_args()
+     # 🔥 원본 체크포인트 경로 저장 (쉘 해석 전)
+    original_checkpoint_path = args.checkpoint_dir
+    logger.info(f"🔥 Original checkpoint path: {original_checkpoint_path}")
+    auto_del_feat, d_part = extract_deleted_features_from_checkpoint(original_checkpoint_path)
+    
+    # 시각화 설정
+    enable_visualization = args.visualize and not args.no_visualize
+    checkpoint_file = Path(original_checkpoint_path)
+    if not checkpoint_file.exists():
+        # 파일이 없으면 패턴으로 찾아보기
+        parent_dir = checkpoint_file.parent
+        
+        # D:[Age] -> D:['Age'] 또는 D:["Age"] 패턴 찾기
+        base_name = checkpoint_file.stem
+        possible_patterns = [
+            base_name.replace("D:[", "D:['").replace("]", "']") + ".pt",
+            base_name.replace("D:[", 'D:["').replace("]", '"]') + ".pt",
+        ]
+        
+        for pattern in possible_patterns:
+            potential_path = parent_dir / pattern
+            logger.info(f"🔥 Trying pattern: {potential_path}")
+            if potential_path.exists():
+                args.checkpoint_dir = str(potential_path)
+                logger.info(f"🔥 Found actual file: {args.checkpoint_dir}")
+                break
+        else:
+            logger.error(f"❌ Could not find checkpoint file. Tried:")
+            logger.error(f"   Original: {original_checkpoint_path}")
+            for pattern in possible_patterns:
+                logger.error(f"   Pattern: {parent_dir / pattern}")
+            raise FileNotFoundError(f"Checkpoint file not found: {original_checkpoint_path}")
     
     # 시각화 설정
     enable_visualization = args.visualize and not args.no_visualize
     
     # 출력 디렉토리 설정: label_clustering 폴더로 변경
     if args.output_dir is None:
-        checkpoint_file = Path(args.checkpoint_dir)
-        config_folder = extract_checkpoint_config_for_folder(args.checkpoint_dir)
+        # 기본 설정 폴더 (D:[...] 제외) - 원본 경로 사용
+        config_folder = extract_checkpoint_config_for_folder(original_checkpoint_path)
         
         # 체크포인트 파일의 부모 디렉토리 경로를 가져와서 변환
-        checkpoint_parent_str = str(checkpoint_file.parent)
+        checkpoint_parent_str = str(Path(args.checkpoint_dir).parent)
         
         # checkpoints를 label_clustering으로 변경
         if '/checkpoints/' in checkpoint_parent_str:
@@ -1294,14 +1391,20 @@ def main():
             # fallback: 직접 경로 구성
             clustering_parent_str = '/storage/personal/eungyeop/experiments/label_clustering/gpt2_mean/heart/Full'
         
-        # 최종 출력 경로: .../label_clustering/.../config_folder/label_clustering_{n_clusters_per_label}/
-        args.output_dir = Path(clustering_parent_str) / config_folder / f'label_clustering_{args.n_clusters_per_label}'
+        # 🔥 clustering 폴더명에 D:[...] 정보 추가
+        if d_part:
+            clustering_folder = f'label_clustering_{args.n_clusters_per_label}_{d_part}'
+        else:
+            clustering_folder = f'label_clustering_{args.n_clusters_per_label}'
+        
+        # 최종 출력 경로: .../label_clustering/.../config_folder/label_clustering_{n_clusters_per_label}_D:[...]/
+        args.output_dir = Path(clustering_parent_str) / config_folder / clustering_folder
     
     logger.info(f"📁 Results will be saved to: {args.output_dir}")
     logger.info(f"🎨 Visualization: {'Enabled' if enable_visualization else 'Disabled'}")
 
-    # Pipeline 실행
-    pipeline = LabelBasedClusteringInference(args.checkpoint_dir)
+    # 🔥 Pipeline 실행 시 자동 추출된 삭제 변수 적용
+    pipeline = LabelBasedClusteringInference(args.checkpoint_dir, auto_del_feat=auto_del_feat)
     
     if args.train_only:
         # Train만 수행

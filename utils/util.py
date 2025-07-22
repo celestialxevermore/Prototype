@@ -408,13 +408,12 @@ def save_results_(args, results):
             "threshold": args.threshold,
         },
         "model_type": args.model_type,
-        #"aggr_type": args.aggr_type,
         "label": args.label,
-        #"enc_type": args.enc_type,
-        #"meta_type": args.meta_type,
         "embed_type": args.embed_type,
         "edge_type": args.edge_type,
         "attn_type" : args.attn_type,
+        "del_feature" : args.del_feat,
+        "del_exp": getattr(args, 'del_exp', 'unknown'),
         "results": results['Best_results']
     }
     
@@ -423,6 +422,71 @@ def save_results_(args, results):
     
     print(f"Results saved to {filepath}")
     visualize_results(args, results, exp_dir)
+
+
+def save_results_A(args, results):
+    """
+    Ablation study용 결과 저장 함수 (시나리오 정보 포함)
+    
+    Args:
+        args: 실험 설정
+        results: 결과 딕셔너리 (scenario_info 포함)
+    """
+    exp_dir = os.path.join(
+        f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
+        args.source_data,f"args_seed:{args.random_seed}",
+        args.model_type, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}"
+    )
+    os.makedirs(exp_dir, exist_ok=True)
+    
+    # 데이터셋 파일 경로 구성
+    dataset_file_path = os.path.join(
+        args.table_path,  # 이미 완전한 경로가 구성되어 있음
+        f"{args.source_data}.pkl"
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 🔥 파일명에 시나리오 정보 추가
+    scenario_id = results.get('scenario_info', {}).get('scenario_id', 'unknown')
+    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.n_heads}_scenario{scenario_id}_{timestamp}.json"
+    filepath = os.path.join(exp_dir, filename)
+
+    data = {
+        "Experimental Memo": args.des,
+        "dataset": args.source_data,
+        "dataset_file_path": dataset_file_path,
+        "timestamp": timestamp,
+        "hyperparameters": {
+            "seed": args.random_seed,
+            "batch_size": args.batch_size,
+            "train_epochs": args.train_epochs,
+            "full dataset learning_rate": args.source_lr,
+            "few dataset learning_rate": args.source_lr_few,
+            "llm_models": args.llm_model,
+            "dropout_rate": args.dropout_rate,
+            "hidden_dim": args.hidden_dim,
+            "num_layers": args.num_layers,
+            "num_heads": args.n_heads,
+            "few_shot": args.few_shot,
+            "threshold": args.threshold,
+        },
+        "model_type": args.model_type,
+        "label": args.label,
+        "embed_type": args.embed_type,
+        "edge_type": args.edge_type,
+        "attn_type" : args.attn_type,
+        "del_feature" : args.del_feat,
+        # 🔥 시나리오 정보 추가 (results에서 가져옴)
+        "scenario_info": results.get('scenario_info', {}),
+        "results": results['Best_results']
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+    print(f"Ablation study results saved to {filepath}")
+
+
 
 
 def save_results_st(args, results_s, results_t):
@@ -534,7 +598,7 @@ def save_ml_results(args, results):
     baseline_name = '_'.join(args.baseline)
     
     exp_dir = os.path.join(
-        f'experiments/ml_baselines_{args.base_dir}',
+        f'/storage/personal/eungyeop/experiments/experiments/ml_baselines_{args.base_dir}',
         args.source_data,
         f"args_seed:{args.random_seed}",
         baseline_name  # 모델 이름으로 서브디렉토리 생성

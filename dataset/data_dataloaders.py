@@ -117,51 +117,34 @@ def ml_prepare_tabular_dataloaders(args, dataset_name, random_seed):
     
     return (X_train, X_val, X_test, y_train, y_val, y_test), num_classes
 
-# def get_few_shot_tabular_samples(X_train, y_train, args):
-#     """이미 분할된 train set에서 few-shot 샘플링을 수행"""
-#     #np.random.seed(4)
-#     num_classes = len(np.unique(y_train))
-#     shot = args.few_shot
-#     samples_per_class = shot // num_classes
-#     remainder = shot % num_classes
-    
-#     support_X, support_y = [], []
-#     for cls in range(num_classes):
-#         cls_indices = np.where(y_train == cls)[0]
-#         sample_num = samples_per_class + (1 if remainder > 0 else 0)
-#         if remainder > 0:
-#             remainder -= 1
-        
-#         selected_indices = np.random.choice(
-#             cls_indices, 
-#             size=min(sample_num, len(cls_indices)), 
-#             replace=len(cls_indices) < sample_num
-#         )
-        
-#         support_X.append(X_train.iloc[selected_indices])
-#         support_y.extend([cls] * len(selected_indices))
-    
-#     X_train_few = pd.concat(support_X, ignore_index=True)
-#     y_train_few = np.array(support_y)
-    
-#     print(f"Few-shot 학습 데이터 크기: {len(X_train_few)}")
-#     print(f"클래스별 분포: {Counter(y_train_few)}")
-    
-#     return X_train_few, y_train_few
+
+
+'''
+    주석된 tabular 코드: 딥러닝과 동일한 "총 K개 분배" 방식
+
+    N=2, K=4 → 총 4개 샘플
+'''
+
 
 def get_few_shot_tabular_samples(X_train, y_train, args):
-    """이미 분할된 train set에서 few-shot 샘플링을 수행 (표준 K-shot)"""
+    """이미 분할된 train set에서 few-shot 샘플링을 수행"""
+    #np.random.seed(4)
     num_classes = len(np.unique(y_train))
-    shot_per_class = args.few_shot  # 각 클래스당 shot 개수
+    shot = args.few_shot
+    samples_per_class = shot // num_classes
+    remainder = shot % num_classes
     
     support_X, support_y = [], []
     for cls in range(num_classes):
         cls_indices = np.where(y_train == cls)[0]
+        sample_num = samples_per_class + (1 if remainder > 0 else 0)
+        if remainder > 0:
+            remainder -= 1
         
         selected_indices = np.random.choice(
             cls_indices, 
-            size=min(shot_per_class, len(cls_indices)), 
-            replace=len(cls_indices) < shot_per_class
+            size=min(sample_num, len(cls_indices)), 
+            replace=len(cls_indices) < sample_num
         )
         
         support_X.append(X_train.iloc[selected_indices])
@@ -170,11 +153,52 @@ def get_few_shot_tabular_samples(X_train, y_train, args):
     X_train_few = pd.concat(support_X, ignore_index=True)
     y_train_few = np.array(support_y)
     
-    total_samples = num_classes * shot_per_class
-    print(f"Few-shot 학습 데이터 크기: {len(X_train_few)} (={num_classes} classes × {shot_per_class} shots)")
+    print(f"Few-shot 학습 데이터 크기: {len(X_train_few)}")
     print(f"클래스별 분포: {Counter(y_train_few)}")
     
     return X_train_few, y_train_few
+
+
+
+'''
+    이 아래 코드가 원래 쓰던 버전인데, 이는 각 클래스당 K 개 샘플을 할당하고 있음.
+    반면에, 딥러닝 모델은 K가 주어지면, 각 클래스의 개수만큼 나눈 몫을 각 클래스에 할당하고 있음. 
+    결과적으로 내가 지금까지 불리한 조건에서 경쟁하고 있음. 따라서, 위에 구현된 버전으로 다시 학습. 
+    2025.07.19에 이 아래 코드 주석처리함. 
+    현재 tabular 코드: "클래스당 K개" 방식
+
+    N=2, K=4 → 총 8개 샘플
+
+    딥러닝 코드: "총 K개 분배" 방식
+
+    N=2, K=4 → 총 4개 샘플
+'''
+# def get_few_shot_tabular_samples(X_train, y_train, args):
+#     """이미 분할된 train set에서 few-shot 샘플링을 수행 (표준 K-shot)"""
+#     num_classes = len(np.unique(y_train))
+#     shot_per_class = args.few_shot  # 각 클래스당 shot 개수
+    
+#     support_X, support_y = [], []
+#     for cls in range(num_classes):
+#         cls_indices = np.where(y_train == cls)[0]
+        
+#         selected_indices = np.random.choice(
+#             cls_indices, 
+#             size=min(shot_per_class, len(cls_indices)), 
+#             replace=len(cls_indices) < shot_per_class
+#         )
+        
+#         support_X.append(X_train.iloc[selected_indices])
+#         support_y.extend([cls] * len(selected_indices))
+    
+#     X_train_few = pd.concat(support_X, ignore_index=True)
+#     y_train_few = np.array(support_y)
+    
+#     total_samples = num_classes * shot_per_class
+#     print(f"Few-shot 학습 데이터 크기: {len(X_train_few)} (={num_classes} classes × {shot_per_class} shots)")
+#     print(f"클래스별 분포: {Counter(y_train_few)}")
+    
+#     return X_train_few, y_train_few
 
 
     

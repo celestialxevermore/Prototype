@@ -1,7 +1,7 @@
 #!/bin/bash
 
 gpu_id=4
-source_datasets="heart"
+source_datasets="breast"
 random_seeds="42 44 46 48 50"
 embed_types="carte"
 edge_types="mlp"

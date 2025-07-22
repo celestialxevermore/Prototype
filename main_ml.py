@@ -17,7 +17,7 @@ p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="3"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -122,13 +122,13 @@ def main():
 
         elif baseline == "lr":
             # Logistic Regression
-            full_baseline_results[baseline], _ = logistic_regression_benchmark(
+            full_baseline_results[baseline] = logistic_regression_benchmark(
                 args,
                 X_train_full, X_val_full, X_test_full,
                 y_train_full, y_val_full, y_test_full,
                 is_binary=is_binary,
             )
-            few_baseline_results[baseline], _ = logistic_regression_benchmark(
+            few_baseline_results[baseline] = logistic_regression_benchmark(
                 args,
                 X_train_few, X_val_few, X_test_few,
                 y_train_few, y_val_few, y_test_few,
