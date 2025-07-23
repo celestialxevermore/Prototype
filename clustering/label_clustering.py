@@ -1,5 +1,5 @@
 """
-Label-based Clustering Pipeline: 각 label별로 분리하여 클러스터링 수행 + 시각화
+Label-based Clustering Pipeline: 각 label별로 분리하여 클러스터링 수행 + 시각화 + 변수 제거 기능
 """
 
 import os
@@ -38,16 +38,23 @@ class LabelBasedClusteringInference:
         Args:
             checkpoint_dir (str): 체크포인트 파일 경로
             device (str): 'cuda' 또는 'cpu'
+            auto_del_feat (list): 자동으로 추출된 삭제할 변수 리스트
         """
         self.checkpoint_dir = checkpoint_dir
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         
+        # 🔥 실제 체크포인트 경로 확인
+        logger.info(f"🔥 Attempting to load checkpoint from: {checkpoint_dir}")
+        
         # 체크포인트 로드
         self.checkpoint = torch.load(checkpoint_dir, map_location=self.device)
         self.args = self.checkpoint['args']
+        
+        # 🔥 자동 추출된 삭제 변수를 args에 적용
         if auto_del_feat is not None:
             self.args.del_feat = auto_del_feat
             logger.info(f"🔥 Applied auto-detected del_feat: {auto_del_feat}")
+        
         logger.info(f"Loaded checkpoint from {checkpoint_dir}")
         logger.info(f"Checkpoint epoch: {self.checkpoint['epoch']}, Val AUC: {self.checkpoint['val_auc']:.4f}")
         
@@ -231,7 +238,9 @@ class LabelBasedClusteringInference:
         return label_attention_data
     
     def _extract_attention_from_model(self, batch):
-        """모델에서 attention weights와 예측값을 추출"""
+        """
+        모델에서 attention weights와 예측값을 추출 (🔥 변수 제거 기능 추가)
+        """
         label_description_embeddings = batch['label_description_embeddings'].to(self.device)
         desc_embeddings = [] 
         name_value_embeddings = [] 
@@ -248,7 +257,12 @@ class LabelBasedClusteringInference:
             num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
             name_value_embeddings.append(num_prompt_embeddings)
             desc_embeddings.append(num_desc_embeddings)
-            
+
+        # 🔥 변수 제거 기능 추가
+        desc_embeddings, name_value_embeddings = self.model.remove_feature(
+            batch, desc_embeddings, name_value_embeddings
+        )
+        
         if not desc_embeddings or not name_value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
 
@@ -275,9 +289,16 @@ class LabelBasedClusteringInference:
         return pred, attention_weights
     
     def _extract_feature_names(self, batch):
-        """실제 feature names 추출"""
+        """🔥 실제 feature names 추출 (변수 제거 후의 이름들)"""
         # 원본 데이터에서 target_binary 컬럼 제외한 실제 feature 이름들 가져오기
         feature_columns = [col for col in self.original_data.columns if col != 'target_binary']
+        
+        # 🔥 del_feat가 설정되어 있다면 해당 변수들을 제외
+        if hasattr(self.args, 'del_feat') and self.args.del_feat:
+            filtered_feature_columns = [col for col in feature_columns if col not in self.args.del_feat]
+            logger.info(f"🔥 Original features: {len(feature_columns)}, After removal: {len(filtered_feature_columns)}")
+            logger.info(f"🔥 Removed features: {self.args.del_feat}")
+            feature_columns = filtered_feature_columns
         
         # 배치에서 실제 feature 수 확인
         feature_count = 0
@@ -781,7 +802,12 @@ class LabelBasedClusteringInference:
                         spine.set_linestyle('--')
         
         # 4. 전체 제목만 (상단 중앙에 깔끔하게)
-        fig.suptitle(f'Cross-Label Centroid Comparison (Layer {layer_idx})\n'
+        # 🔥 del_feat 정보 추가
+        del_feat_info = ""
+        if hasattr(self.args, 'del_feat') and self.args.del_feat:
+            del_feat_info = f" | Excluded: {', '.join(self.args.del_feat)}"
+        
+        fig.suptitle(f'Cross-Label Centroid Comparison (Layer {layer_idx}){del_feat_info}\n'
                     f'Attention Weight Scale: {global_vmin:.3f} - {global_vmax:.3f}', 
                     fontsize=16, fontweight='bold', y=0.98)
         
@@ -886,7 +912,12 @@ class LabelBasedClusteringInference:
         ax4 = axes[1, 1]
         ax4.axis('off')
         
-        summary_text = f"Label-wise Clustering Summary (Layer {layer_idx})\n\n"
+        # 🔥 del_feat 정보 추가
+        del_feat_info = ""
+        if hasattr(self.args, 'del_feat') and self.args.del_feat:
+            del_feat_info = f"\nExcluded Features: {', '.join(self.args.del_feat)}"
+        
+        summary_text = f"Label-wise Clustering Summary (Layer {layer_idx}){del_feat_info}\n\n"
         
         total_samples = sum(len(train_results[label]['sample_ids']) for label in labels)
         total_clusters = sum(train_results[label]['n_clusters'] for label in labels)
@@ -988,6 +1019,7 @@ class LabelBasedClusteringInference:
             'total_samples': 0,
             'n_clusters_per_label': n_clusters_per_label,
             'split': split_name,
+            'excluded_features': getattr(self.args, 'del_feat', []),  # 🔥 제외된 변수 정보 추가
             'label_cluster_summary': {}
         }
         
@@ -1067,6 +1099,7 @@ class LabelBasedClusteringInference:
         test_dir.mkdir(parents=True, exist_ok=True)
         
         test_summary = {
+            'excluded_features': getattr(self.args, 'del_feat', []),  # 🔥 제외된 변수 정보 추가
             'label_summary': {}
         }
         
@@ -1115,6 +1148,7 @@ class LabelBasedClusteringInference:
         full_pop_dir.mkdir(parents=True, exist_ok=True)
         
         full_pop_summary = {
+            'excluded_features': getattr(self.args, 'del_feat', []),  # 🔥 제외된 변수 정보 추가
             'train_by_label': {},
             'valid_by_label': {}
         }
@@ -1177,6 +1211,12 @@ class LabelBasedClusteringInference:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
         
+        # 🔥 삭제된 변수 정보 로깅
+        if hasattr(self.args, 'del_feat') and self.args.del_feat:
+            logger.info(f"🔥 Running pipeline with excluded features: {self.args.del_feat}")
+        else:
+            logger.info("🔥 Running pipeline with all features included")
+        
         # 1. Train 라벨별 클러스터링
         logger.info("=== Step 1: Label-wise Train Clustering ===")
         train_results = self.perform_label_wise_clustering(layer_idx, n_clusters_per_label, output_dir)
@@ -1223,6 +1263,8 @@ class LabelBasedClusteringInference:
         
         # 결과 요약
         logger.info("\n=== LABEL-WISE CLUSTERING SUMMARY ===")
+        if hasattr(self.args, 'del_feat') and self.args.del_feat:
+            logger.info(f"🔥 Excluded features: {self.args.del_feat}")
         for label_key in train_results.keys():
             train_count = len(train_results[label_key]['sample_ids'])
             valid_count = len(valid_results[label_key]['sample_ids']) if label_key in valid_results else 0
@@ -1323,7 +1365,7 @@ def extract_checkpoint_config_for_folder(checkpoint_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Label-wise Clustering Pipeline with Visualization')
+    parser = argparse.ArgumentParser(description='Label-wise Clustering Pipeline with Visualization and Feature Removal')
     parser.add_argument('--checkpoint_dir', type=str, required=True,
                        help='Path to model checkpoint')
     parser.add_argument('--layer_idx', type=int, default=2,
@@ -1340,7 +1382,8 @@ def main():
                        help='Disable visualization (overrides --visualize)')
     
     args = parser.parse_args()
-     # 🔥 원본 체크포인트 경로 저장 (쉘 해석 전)
+    
+    # 🔥 원본 체크포인트 경로 저장 (쉘 해석 전)
     original_checkpoint_path = args.checkpoint_dir
     logger.info(f"🔥 Original checkpoint path: {original_checkpoint_path}")
     auto_del_feat, d_part = extract_deleted_features_from_checkpoint(original_checkpoint_path)
@@ -1372,9 +1415,6 @@ def main():
             for pattern in possible_patterns:
                 logger.error(f"   Pattern: {parent_dir / pattern}")
             raise FileNotFoundError(f"Checkpoint file not found: {original_checkpoint_path}")
-    
-    # 시각화 설정
-    enable_visualization = args.visualize and not args.no_visualize
     
     # 출력 디렉토리 설정: label_clustering 폴더로 변경
     if args.output_dir is None:
