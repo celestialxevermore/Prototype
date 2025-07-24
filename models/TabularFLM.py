@@ -96,8 +96,9 @@ class AdaptiveGraphAttention(nn.Module):
         seq_len = new_seq - 1
 
         self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
-        self.adjacency = self._no_self_interaction(self.adjacency)
-        
+        if self.args.no_self_loop:
+            self.adjacency = self._no_self_interaction(self.adjacency)
+
         new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=self.adjacency.device)
         new_adjacency[:, 1:, 1:] = self.adjacency 
         new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
@@ -361,8 +362,10 @@ class Model(nn.Module):
         self.lambd = args.gmm_lambda
         self.eps = args.gmm_eps
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
+        
+        # CLS 토큰 생성 (초기화는 나중에)
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
-        nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
+        # 기본 초기화는 제거 - optuna에서 처리
 
         '''
             MLP(CONCAT[Name embedding, Value embedding])
@@ -404,6 +407,20 @@ class Model(nn.Module):
                 nn_init.kaiming_uniform_(m.weight, a = math.sqrt(5))
                 if m.bias is not None:
                     nn_init.zeros_(m.bias)
+
+    def init_cls_token(self, init_type='kaiming', std=0.02):
+        """CLS 토큰 초기화 함수 - optuna에서 호출"""
+        if init_type == 'normal':
+            nn_init.normal_(self.cls, mean=0, std=std)
+        elif init_type == 'zeros':
+            nn_init.zeros_(self.cls)
+        elif init_type == 'kaiming':
+            nn_init.kaiming_uniform_(self.cls, a=math.sqrt(5))
+        elif init_type == 'xavier':
+            nn_init.xavier_uniform_(self.cls)
+        else:
+            # 기본값
+            nn_init.kaiming_uniform_(self.cls, a=math.sqrt(5))
 
     def set_attention_save_dir(self, experiment_id, mode):
         """

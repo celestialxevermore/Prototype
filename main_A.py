@@ -1,5 +1,12 @@
 import torch
-#torch.use_deterministic_algorithms(False)
+'''
+    최대 성능을 위해 주석처리함. 
+    2025.07.24. 주석처리 된 코드를 재활성화하면, 
+    재현성이 확실히 보장됨.
+    torch.use_deterministic_algorithms(False) : 재현성
+    torch.use_deterministic_algorithms(True) : 성능
+'''
+torch.use_deterministic_algorithms(True)
 import os
 import random,time
 import argparse
@@ -17,7 +24,7 @@ from utils.util import setup_logger, format_time, fix_seed
 from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
 from sklearn.model_selection import StratifiedKFold
-from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
+from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
 from models.TabularFLM_A import Model
 import psutil
@@ -78,7 +85,7 @@ def get_args():
     parser.add_argument('--embed_type', default = 'carte', choices = ['carte', 'carte_desc','ours','ours2'])
     parser.add_argument('--attn_type', default='gat_v1', choices= ['gat_v1','att','gat_v2', 'gate'])
     parser.add_argument('--del_feat', nargs='+', default = [], help='Features to remove from the model. Usage: --del_feat feature1 feature2 feature3')
-    
+    parser.add_argument('--no_self_loop', action='store_true', help="activate the self loop of the Graph attention network")
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -419,11 +426,12 @@ def main():
     logger.info("=" * 60)
     
     scenarios = {
-        0: "Baseline (No feature removal)",  # 새로 추가
+        0: "Baseline (No feature removal)",
         1: "Remove top-3 important features",
-        2: "Remove top-3 important + 1 unimportant features",  # 수정
-        3: "Remove bottom-3 unimportant features",
-        4: "Keep only top-3 important features"
+        2: "Remove top-3 important + 1 most unimportant features",  # 수정
+        3: "Remove bottom-3 unimportant features", 
+        4: "Keep only top-3 important features",
+        5: "Keep only bottom-3 unimportant features"  # 새로 추가
     }
     
     all_scenario_results = {}

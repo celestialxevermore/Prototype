@@ -1,10 +1,8 @@
 import torch
-#torch.use_deterministic_algorithms(False)
 import os
-import random,time
+import random, time
 import argparse
 import pandas as pd
-import pdb
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
@@ -17,7 +15,7 @@ from utils.util import setup_logger, format_time, fix_seed
 from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
 from sklearn.model_selection import StratifiedKFold
-from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples, get_few_shot_graph_samples
+from dataset.data_dataloaders import prepare_tabular_dataloaders,prepare_few_shot_dataloaders, get_few_shot_tabular_samples
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
 from models.TabularFLM import Model
 import psutil
@@ -27,20 +25,23 @@ from datetime import datetime
 import networkx as nx               
 import matplotlib.pyplot as plt
 import numpy as np
+
+# Optuna 추가
+import optuna
+from optuna.trial import TrialState
+
 experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 p = psutil.Process()
-
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
-
 logger = setup_logger()
 
 def get_args():
-    parser = argparse.ArgumentParser(description='ProtoLLM For Tabular Task')
+    parser = argparse.ArgumentParser(description='ProtoLLM For Tabular Task with Optuna')
     parser.add_argument('--random_seed', type=int, default=42, help='random_seed')
     parser.add_argument('--train_epochs', type=int, default=300, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
@@ -61,7 +62,7 @@ def get_args():
     parser.add_argument('--llm_model', type=str, default = 'gpt2_mean', choices = ['gpt2_mean','gpt2_auto','sentence-bert','bio-bert','bio-clinical-bert','bio-llama', 'new', 'LLAMA_mean','LLAMA_auto'])
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
-    parser.add_argument('--base_dir', type=str, required=True)
+    parser.add_argument('--base_dir', type=str, default='/storage/personal/eungyeop/experiments/optuna')
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")    
     parser.add_argument('--model_type', type=str, default='TabularFLM', choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3', 'GAT_edge_4', 'GAT_edge_5', 'TabularFLM'])
@@ -71,12 +72,12 @@ def get_args():
     parser.add_argument('--aggr_type', type = str, choices = ['flatten', 'mean', 'attn'], default = 'attn')
     parser.add_argument('--threshold', type = float, default = 0.5)
     parser.add_argument('--frozen', type = bool, default = False)
-    #parser.add_argument('--use_edge_attr', action='store_true')
     parser.add_argument('--edge_type', default = 'mlp', choices= ['mlp','normal','no_use'])
     parser.add_argument('--embed_type', default = 'carte', choices = ['carte', 'carte_desc','ours','ours2'])
-    parser.add_argument('--attn_type', default='gat_v1', choices= ['gat_v1','att','gat_v2', 'gate'])
+    parser.add_argument('--attn_type', default='gat_v2', choices= ['gat_v1','att','gat_v2', 'gate'])
     parser.add_argument('--del_feat', nargs='+', default = [], help='Features to remove from the model. Usage: --del_feat feature1 feature2 feature3')
     parser.add_argument('--del_exp', default="You did not entered the exp type", choices=['exp1','exp2','exp3','exp4','exp5'])
+    parser.add_argument('--no_self_loop', action='store_true', help="activate the self loop of the Graph attention network")
     # GMM 관련 인자 추가
     parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
     parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
@@ -90,25 +91,14 @@ def get_args():
     ## 시각화 관련 인자 추가
     parser.add_argument('--viz_heatmap', action='store_true', help='Visualize heatmap')
     parser.add_argument('--viz_graph', action='store_true', help='Visualize graph')
-    args = parser.parse_args()
 
+    # Optuna 관련 인자 추가
+    parser.add_argument('--n_trials', type=int, default=100, help='Number of optimization trials')
+    parser.add_argument('--study_name', type=str, default='tabular_optimization', help='Optuna study name')
+    
+    args = parser.parse_args()
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args 
-
-def ad(adjacency):
-    
-    # 범위별 분포 분석
-    adj_flat = adjacency.flatten()
-    min_val = adj_flat.min().item()
-    max_val = adj_flat.max().item()
-    num_bins = 10
-    step = (max_val - min_val) / num_bins
-    
-    for i in range(num_bins):
-        lower = min_val + i * step
-        upper = min_val + (i + 1) * step
-        count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
-        print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
 
 def find_optimal_threshold(y_true, y_pred_proba):
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
@@ -116,11 +106,10 @@ def find_optimal_threshold(y_true, y_pred_proba):
     optimal_idx = np.argmax(f1_scores)
     return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
-def train_and_validate(args, model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10, mode="Full"):
-    
+def train_and_validate(args, model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10, mode="Full", trial=None):
     """
     Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
-    마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
+    Optuna pruning을 위해 trial 객체 추가.
     """
     train_losses = []
     val_losses = []
@@ -137,8 +126,6 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
     best_val_auc = 0.0
     no_improve = 0
     best_epoch = 0
-    
-    
     best_threshold = 0.5
     best_model_state = None
 
@@ -146,13 +133,11 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         # 1) Training
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
+        
         # 2) Evaluate on Train / Validation
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
-        # if args.viz_graph or args.viz_heatmap:
-        #     if epoch % 10 == 0 or epoch == epochs - 1:
-        #         visualize_model_structure(model, train_loader, device, args, mode, experiment_id, epoch, max_samples=5)
                 
         if is_binary:
             # Binary Classification
@@ -204,10 +189,18 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         train_accs.append(train_acc)
         val_accs.append(val_acc)
 
-        logger.info(f"[Epoch {epoch+1}/{epochs}] "
-                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                    f"Train AUC: {train_auc:.4f}, Val AUC: {val_auc:.4f}, "
-                    f"Train ACC: {train_acc:.4f}, Val ACC: {val_acc:.4f}")
+        # Optuna intermediate reporting for pruning
+        if trial is not None:
+            trial.report(val_auc, epoch)
+            # Check if trial should be pruned
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+
+        if epoch % 10 == 0:
+            logger.info(f"[{mode} Epoch {epoch+1}/{epochs}] "
+                        f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
+                        f"Train AUC: {train_auc:.4f}, Val AUC: {val_auc:.4f}, "
+                        f"Train ACC: {train_acc:.4f}, Val ACC: {val_acc:.4f}")
 
         if val_auc > best_val_auc:
             best_val_auc = val_auc
@@ -217,11 +210,10 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             if current_threshold is not None:
                 best_threshold = current_threshold
             
-            # 🔥 개선: validation AUC가 갱신될 때만 저장
-            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}/{args.random_seed}"
+            # 체크포인트 저장
+            checkpoint_dir = f"/storage/personal/eungyeop/experiments/optuna/checkpoints/{args.llm_model}/{args.source_data}/{mode}"
             os.makedirs(checkpoint_dir, exist_ok=True)
-            # 항상 같은 파일명으로 덮어쓰기
-            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_D:{args.del_feat}_S:{args.random_seed}_{experiment_id}.pt")
+            checkpoint_path = os.path.join(checkpoint_dir, f"trial_{trial.number if trial else 'test'}_{experiment_id}.pt")
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -236,193 +228,144 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
             break
 
-        # 학습 종료 후, Best 모델로 복원
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
-        else:
-            logger.warning("No best_model_state saved; model not updated?")
+    # 학습 종료 후, Best 모델로 복원
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
-    return (train_losses, val_losses,
-            train_aucs, val_aucs,
-            train_precisions, val_precisions,
-            train_recalls, val_recalls,
-            train_f1s, val_f1s,
-            train_accs, val_accs,
-            best_epoch, best_val_auc, best_threshold)
+    return best_val_auc
 
-def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None):
-    """
-    학습이 끝난 뒤, Test 로더에 대해 최종 성능을 측정.
-    threshold가 있으면 Binary 분류 시 threshold 적용.
-    """
-    evaluate_func = binary_evaluate if is_binary else multi_evaluate
-    test_loss, y_true_test, y_pred_test = evaluate_func(model, test_loader, criterion, device)
-
-    if is_binary:
-        test_auc = roc_auc_score(y_true_test, y_pred_test)
-        if threshold is None:
-            threshold = 0.5
-        y_pred_test_bin = (y_pred_test > threshold).astype(int)
-        test_precision = precision_score(y_true_test, y_pred_test_bin, zero_division=0)
-        test_recall = recall_score(y_true_test, y_pred_test_bin, zero_division=0)
-        test_f1 = f1_score(y_true_test, y_pred_test_bin, zero_division=0)
-        test_acc = accuracy_score(y_true_test, y_pred_test_bin)
-    else:
-        n_classes = y_pred_test.shape[1]
-        y_true_test_bin = label_binarize(y_true_test, classes=range(n_classes))
-        test_auc = roc_auc_score(y_true_test_bin, y_pred_test, multi_class='ovr', average='macro')
-        preds_argmax = y_pred_test.argmax(axis=1)
-        test_precision = precision_score(y_true_test, preds_argmax, average='macro', zero_division=0)
-        test_recall = recall_score(y_true_test, preds_argmax, average='macro', zero_division=0)
-        test_f1 = f1_score(y_true_test, preds_argmax, average='macro', zero_division=0)
-        test_acc = accuracy_score(y_true_test, preds_argmax)
-
-    logger.info(f"[Test] Loss: {test_loss:.4f}, AUC: {test_auc:.4f}, ACC: {test_acc:.4f}, "
-                f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
-
-    return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
-
-def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretrained_models"):
-    model_path = os.path.join(model_dir,dataset_name)
-    if os.path.exists(model_path):
-        return model_path
-    return None
+def objective(trial, base_args):
+    """Optuna objective function"""
+    # 하이퍼파라미터 제안
+    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5, step=0.1)
+    n_heads = trial.suggest_categorical('n_heads', [2, 4, 8])
+    num_layers = trial.suggest_categorical('num_layers', [2, 3, 4])
+    
+    # Learning rates 추가
+    source_lr = trial.suggest_float('source_lr', 1e-5, 1e-2, log=True)
+    source_lr_few = trial.suggest_float('source_lr_few', 1e-6, 1e-3, log=True)
+    
+    # CLS 초기화 추가
+    cls_init_type = trial.suggest_categorical('cls_init_type', ['normal', 'zeros', 'kaiming', 'xavier'])
+    cls_init_std = trial.suggest_float('cls_init_std', 0.01, 0.05, step=0.01)  # normal용
+    
+    # 시드별 결과를 저장할 리스트
+    seeds = [42, 44, 46, 48, 50]
+    val_aucs = []
+    
+    for seed in seeds:
+        # args 복사 및 하이퍼파라미터 적용
+        args = argparse.Namespace(**vars(base_args))
+        args.random_seed = seed
+        args.dropout_rate = dropout_rate
+        args.n_heads = n_heads
+        args.num_layers = num_layers
+        args.source_lr = source_lr          # ✅ Learning rate 적용
+        args.source_lr_few = source_lr_few  # ✅ Few-shot learning rate 적용
+        
+        fix_seed(args.random_seed)
+        device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+        
+        # 데이터 준비
+        results = prepare_embedding_dataloaders(args, args.source_data)
+        train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
+        num_classes = results['num_classes']
+        
+        args.num_classes = num_classes 
+        args.output_dim = num_classes if num_classes > 2 else 1
+        
+        if args.few_shot > 0:
+            train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
+            val_loader_few_s = val_loader_full_s
+            
+        is_binary = (num_classes == 2)
+        criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+        
+        # 모델 생성
+        model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, 
+                         args.num_layers, args.dropout_rate, args.llm_model, 
+                         experiment_id, mode="Few")
+        
+        # ✅ CLS 초기화 직접 적용 (argparser 수정 없음!)
+        if cls_init_type == 'normal':
+            nn.init.normal_(model_few.cls, mean=0, std=cls_init_std)
+        elif cls_init_type == 'zeros':
+            nn.init.zeros_(model_few.cls)
+        elif cls_init_type == 'kaiming':
+            nn.init.kaiming_uniform_(model_few.cls, a=math.sqrt(5))
+        elif cls_init_type == 'xavier':
+            nn.init.xavier_uniform_(model_few.cls)
+        
+        model_few = model_few.to(device)
+        optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr_few, weight_decay=1e-5)  # ✅ Few-shot LR 사용
+        
+        # 학습 및 평가
+        try:
+            val_auc = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, 
+                                       criterion, optimizer_few, device, args.train_epochs, 
+                                       is_binary, mode="Few", trial=trial)
+            val_aucs.append(val_auc)
+            
+        except optuna.exceptions.TrialPruned:
+            logger.info(f"Trial {trial.number} pruned at seed {seed}")
+            raise
+        
+        except Exception as e:
+            logger.error(f"Error in trial {trial.number} at seed {seed}: {e}")
+            val_aucs.append(0.0)
+    
+    # 시드별 평균 성능 반환
+    mean_val_auc = np.mean(val_aucs)
+    std_val_auc = np.std(val_aucs)
+    
+    logger.info(f"Trial {trial.number}: dropout={dropout_rate}, n_heads={n_heads}, "
+                f"num_layers={num_layers}, source_lr={source_lr:.6f}, source_lr_few={source_lr_few:.6f}, "
+                f"cls_init={cls_init_type} -> Mean AUC: {mean_val_auc:.4f} ± {std_val_auc:.4f}")
+    
+    return mean_val_auc
 
 def main():
-    start_time = time.time()
-    args  = get_args()
+    args = get_args()
     
-    fix_seed(args.random_seed)
-    device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+    # Optuna 저장 디렉토리 생성
+    os.makedirs(args.base_dir, exist_ok=True)
     
-    logger.info(f"Starting experiment with dataset: {args.source_data}")
-    logger.info(f"Device: {device}")
-
-    logger.info("Preparing Tabular datasets...")
-    # if args.embed_type in ['carte', 'carte_desc']:
-    #     args.use_edge_attr = True
-
-    results = prepare_embedding_dataloaders(args, args.source_data)
-    train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
-    num_classes = results['num_classes']
+    # Optuna 스터디 생성
+    storage_url = f"sqlite:///{args.base_dir}/{args.study_name}.db"
+    study = optuna.create_study(
+        direction='maximize',
+        study_name=args.study_name,
+        storage=storage_url,
+        load_if_exists=True,
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=10)
+    )
     
-    args.num_classes = num_classes 
-    args.output_dim = num_classes if num_classes > 2 else 1
-    logger.info(f"Dataset: {args.source_data}, Classes: {num_classes}, Output dim: {args.output_dim}")
+    logger.info(f"Starting Optuna optimization with {args.n_trials} trials")
+    logger.info(f"Study will be saved to: {storage_url}")
     
-    if args.few_shot > 0:
-        logger.info(f"Preparing few-shot samples (K={args.few_shot})...")
-        train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
-        val_loader_few_s = val_loader_full_s
-        test_loader_few_s = test_loader_full_s
-    logger.info(f"Datasets prepared, source dataset names : {args.source_data}")
-
-    is_binary = (num_classes == 2)
-    criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
+    # 최적화 실행
+    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials)
     
-    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model,experiment_id, mode="Full")
-    model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode = "Few")
-    model_full = model_full.to(device)
-    model_few = model_few.to(device)
-    optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
-
-
-    if args.few_shot == 4:
-        logger.info(f"[Source-Only: Full] Start Training..")
-
-        (train_losses_full, val_losses_full,
-        train_aucs_full, val_aucs_full,
-        train_precisions_full, val_precisions_full,
-        train_recalls_full, val_recalls_full,
-        train_f1s_full, val_f1s_full,
-        train_accs_full, val_accs_full,
-        best_epoch_full, best_val_auc_full, best_threshold_full
-        ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
-                            device, args.train_epochs, is_binary, mode="Full")
-
-        logger.info("[Full-shot] Final Testing with best threshold from Validation")
-        (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
-        test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
-                                                                threshold=best_threshold_full)
-
-    # 4-2) 최종 Test - Few
-    logger.info("[Few-shot] Start Training...")
-    (train_losses_few, val_losses_few,
-    train_aucs_few, val_aucs_few,
-    train_precisions_few, val_precisions_few,
-    train_recalls_few, val_recalls_few,
-    train_f1s_few, val_f1s_few,
-    train_accs_few, val_accs_few,
-    best_epoch_few, best_val_auc_few, best_threshold_few
-    ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary, mode="Few")
-
-    logger.info("[Few-shot] Final Testing with best threshold from Validation")
-    (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
-    test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
-                                                        threshold=best_threshold_few)
-
-
-
+    # 결과 출력
+    logger.info("Optimization completed!")
+    logger.info(f"Best trial: {study.best_trial.number}")
+    logger.info(f"Best value: {study.best_value:.4f}")
+    logger.info(f"Best params: {study.best_params}")
     
-    if args.few_shot == 4:
-        full_ours_results = wrap_up_results_(
-            train_losses=train_losses_full, 
-            val_losses=val_losses_full,
-            test_losses=[],  # 필요하면 test_loss 리스트 넣기
-            train_aucs=train_aucs_full,
-            val_aucs=val_aucs_full,
-            test_aucs=[test_auc_full], 
-            train_precisions=train_precisions_full,
-            val_precisions=val_precisions_full,
-            test_precisions=[test_precision_full],
-            train_recalls=train_recalls_full,
-            val_recalls=val_recalls_full,
-            test_recalls=[test_recall_full],
-            train_f1s=train_f1s_full,
-            val_f1s=val_f1s_full,
-            test_f1s=[test_f1_full],
-            all_y_true=[all_y_true_full],
-            all_y_pred=[all_y_pred_full],
-            best_epoch=best_epoch_full,
-            best_ours_auc=test_auc_full,
-            best_ours_acc=test_acc_full,
-            best_ours_precision=test_precision_full,
-            best_ours_recall=test_recall_full,
-            best_ours_f1=test_f1_full,
-            train_accs=train_accs_full,
-            val_accs=val_accs_full,
-            test_accs=[test_acc_full]
-            )
-    else: 
-        full_ours_results = None
-
-
-    few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
-    train_losses_few, val_losses_few, [],
-    train_aucs_few, val_aucs_few, [test_auc_few],
-    train_precisions_few, val_precisions_few, [test_precision_few],
-    train_recalls_few, val_recalls_few, [test_recall_few],
-    train_f1s_few, val_f1s_few, [test_f1_few],
-    [all_y_true_few], [all_y_pred_few],
-    best_epoch_few, test_auc_few, test_acc_few,
-    test_precision_few, test_recall_few, test_f1_few,
-    train_accs=train_accs_few,
-    val_accs=val_accs_few,
-    test_accs=[test_acc_few]
-)
-
-
-    results = prepare_results_(full_ours_results, few_ours_results)
-
     # 결과 저장
-    logger.info("Saving results...")
-    save_results_(args, results)
-    logger.info("Results saved")
-    end_time = time.time()
-    total_time = end_time - start_time
-    logger.info(f"Total experiment time: {format_time(total_time)}")
+    results_path = os.path.join(args.base_dir, f"optimization_results_{experiment_id}.txt")
+    with open(results_path, 'w') as f:
+        f.write(f"Optimization Results\n")
+        f.write(f"===================\n")
+        f.write(f"Best trial: {study.best_trial.number}\n")
+        f.write(f"Best value: {study.best_value:.4f}\n")
+        f.write(f"Best params: {study.best_params}\n")
+        f.write(f"\nTop 10 trials:\n")
+        for i, trial in enumerate(study.trials_dataframe().nlargest(10, 'value').iterrows()):
+            f.write(f"{i+1}. Trial {trial[1]['number']}: {trial[1]['value']:.4f} - {trial[1]['params_dropout_rate']}, {trial[1]['params_n_heads']}, {trial[1]['params_num_layers']}\n")
+    
+    logger.info(f"Results saved to: {results_path}")
+    logger.info(f"To view dashboard, run: optuna-dashboard {storage_url}")
 
 if __name__ == "__main__":
     main()

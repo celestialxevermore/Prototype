@@ -8,7 +8,8 @@ datasets="heart"
 few_shots="4 8 16 32 64"
 
 # random seeds
-seeds="2095 3192 3155 67 1045"
+#seeds="2095 3192 3155 67 1045"
+seeds="42 44 46 48 50"
 baselines="rf lr xgb mlp cat"
 
 # 실험 실행
@@ -25,7 +26,7 @@ for dataset in $datasets; do
             --batch_size 32 \
             --dropout_rate 0.3 \
             --threshold 0.5 \
-            --base_dir test202050721
+            --base_dir test20250724
         done
     done
 done

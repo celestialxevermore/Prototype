@@ -17,20 +17,29 @@ import numpy as np
 import logging
 
 def xgboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_binary=True, max_depth_list=[1,2,3,4,5], n_estimators_list=[100, 200, 300, 400, 500], oh_max_categories=10):
-    print("Input columns:", X_train.columns.tolist())
+    # feature 제거 후 현재 데이터에서 컬럼 타입을 다시 확인
     categorical_columns = X_train.select_dtypes(include=['object', 'category']).columns
     numeric_columns = X_train.select_dtypes(include=['int64', 'float64']).columns
-    print(f"Categorical: {categorical_columns.tolist()}, Numeric: {numeric_columns.tolist()}")
+    
+    print(f"[XGBoost] Input columns: {X_train.columns.tolist()}")
+    print(f"[XGBoost] After feature removal - Categorical: {categorical_columns.tolist()}, Numeric: {numeric_columns.tolist()}")
+    
+    # 데이터 복사본 생성 (원본 수정 방지)
+    X_train_copy = X_train.copy()
+    X_valid_copy = X_valid.copy()
+    X_test_copy = X_test.copy()
     
     # XGBoost는 내부 enable_categorical=True 사용
     for col in categorical_columns:
-        X_train[col] = X_train[col].astype('category')
-        X_valid[col] = X_valid[col].astype('category')
-        X_test[col] = X_test[col].astype('category')
+        X_train_copy[col] = X_train_copy[col].astype('category')
+        X_valid_copy[col] = X_valid_copy[col].astype('category')
+        X_test_copy[col] = X_test_copy[col].astype('category')
     
     # Determine number of classes
     num_classes = len(np.unique(y_train))
     is_binary = num_classes == 2
+    
+    print(f"[XGBoost] Number of classes: {num_classes}, Is binary: {is_binary}")
     
     # Set up parameters
     params = {
@@ -50,9 +59,11 @@ def xgboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, 
     
 
     # Create DMatrix objects with enable_categorical=True
-    dtrain = xgb.DMatrix(X_train, y_train, enable_categorical=True)
-    dvalid = xgb.DMatrix(X_valid, y_valid, enable_categorical=True)
-    dtest = xgb.DMatrix(X_test, y_test, enable_categorical=True)
+    dtrain = xgb.DMatrix(X_train_copy, y_train, enable_categorical=True)
+    dvalid = xgb.DMatrix(X_valid_copy, y_valid, enable_categorical=True)
+    dtest = xgb.DMatrix(X_test_copy, y_test, enable_categorical=True)
+    
+    print(f"[XGBoost] DMatrix created - Train shape: {X_train_copy.shape}, Valid shape: {X_valid_copy.shape}, Test shape: {X_test_copy.shape}")
     
     # Find the best max_depth and n_estimators
     best_auc = 0
@@ -66,13 +77,12 @@ def xgboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, 
             bst = xgb.train(params, dtrain, n_estimators, evals=evallist, evals_result=evals_result, verbose_eval=False)
             
             # Make predictions on validation set
-            
             y_valid_pred_proba = bst.predict(dvalid)
             valid_loss = log_loss(y_valid, y_valid_pred_proba) if is_binary else log_loss(y_valid, y_valid_pred_proba)
             valid_acc, valid_auc, valid_auprc, valid_f1, valid_recall, valid_precision = compute_overall_accuracy(y_valid_pred_proba, y_valid, num_classes, threshold=0.5, activation=False)
             
-            print(f"max_depth: {max_depth}, n_estimators: {n_estimators}, Validation Loss: {valid_loss:.4f}, Validation Acc: {valid_acc:.4f}, Validation AUC: {valid_auc:.4f}, Validation AUPRC: {valid_auprc:.4f}, Validation F1: {valid_f1:.4f}, Validation Recall: {valid_recall:.4f}, Validation Precision: {valid_precision:.4f}")
-            logging.info(f"max_depth: {max_depth}, n_estimators: {n_estimators}, Validation Loss: {valid_loss:.4f}, Validation Acc: {valid_acc:.4f}, Validation AUC: {valid_auc:.4f}, Validation AUPRC: {valid_auprc:.4f}, Validation F1: {valid_f1:.4f}, Validation Recall: {valid_recall:.4f}, Validation Precision: {valid_precision:.4f}")
+            print(f"[XGBoost] max_depth: {max_depth}, n_estimators: {n_estimators}, Validation Loss: {valid_loss:.4f}, Validation Acc: {valid_acc:.4f}, Validation AUC: {valid_auc:.4f}, Validation AUPRC: {valid_auprc:.4f}, Validation F1: {valid_f1:.4f}, Validation Recall: {valid_recall:.4f}, Validation Precision: {valid_precision:.4f}")
+            logging.info(f"[XGBoost] max_depth: {max_depth}, n_estimators: {n_estimators}, Validation Loss: {valid_loss:.4f}, Validation Acc: {valid_acc:.4f}, Validation AUC: {valid_auc:.4f}, Validation AUPRC: {valid_auprc:.4f}, Validation F1: {valid_f1:.4f}, Validation Recall: {valid_recall:.4f}, Validation Precision: {valid_precision:.4f}")
             
             if valid_loss < best_loss:
                 best_loss = valid_loss
@@ -83,9 +93,9 @@ def xgboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, 
     
     # Train the final model with the best parameters
     best_max_depth, best_n_estimators = best_params
-    print(f"Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation Loss: {best_loss:.4f}")
+    print(f"[XGBoost] Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation Loss: {best_loss:.4f}")
     # print(f"Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation AUC: {best_auc:.4f}")
-    logging.info(f"Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation Loss: {best_loss:.4f}")
+    logging.info(f"[XGBoost] Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation Loss: {best_loss:.4f}")
     # print(f"Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation AUC: {best_auc:.4f}")
     params['max_depth'] = best_max_depth
     evallist = [(dtrain, 'train'), (dtest, 'valid')]

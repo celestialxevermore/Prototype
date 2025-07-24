@@ -28,9 +28,12 @@ def random_forest_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_
     num_class = len(np.unique(y_train))
     is_binary = (num_class == 2)
 
-    # 범주형 열과 수치형 열 구분
+    # feature 제거 후 현재 데이터에서 범주형 열과 수치형 열을 다시 확인
     categorical_columns = X_train.select_dtypes(include=['object', 'category']).columns
     numeric_columns = X_train.select_dtypes(include=['int64', 'float64']).columns
+    
+    print(f"[RandomForest] After feature removal - Categorical columns: {categorical_columns.tolist()}")
+    print(f"[RandomForest] After feature removal - Numeric columns: {numeric_columns.tolist()}")
 
     # 수치형 데이터 처리
     X_train_numeric = X_train[numeric_columns].copy()
@@ -44,11 +47,23 @@ def random_forest_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_
         X_valid_numeric[col] = X_valid_numeric[col].fillna(median_val)
         X_test_numeric[col] = X_test_numeric[col].fillna(median_val)
 
-    # 범주형 데이터 처리
+    # 범주형 데이터 처리 (Categorical 타입 오류 해결)
     if len(categorical_columns) > 0:
-        X_train_cat = X_train[categorical_columns].fillna('missing').astype(str)
-        X_valid_cat = X_valid[categorical_columns].fillna('missing').astype(str)
-        X_test_cat = X_test[categorical_columns].fillna('missing').astype(str)
+        # Categorical 타입을 먼저 string으로 변환한 후 fillna 적용
+        X_train_cat = X_train[categorical_columns].copy()
+        X_valid_cat = X_valid[categorical_columns].copy()
+        X_test_cat = X_test[categorical_columns].copy()
+        
+        # 각 범주형 컬럼을 string으로 변환
+        for col in categorical_columns:
+            X_train_cat[col] = X_train_cat[col].astype(str)
+            X_valid_cat[col] = X_valid_cat[col].astype(str)
+            X_test_cat[col] = X_test_cat[col].astype(str)
+        
+        # 이제 안전하게 fillna 적용
+        X_train_cat = X_train_cat.fillna('missing')
+        X_valid_cat = X_valid_cat.fillna('missing')
+        X_test_cat = X_test_cat.fillna('missing')
 
         encoder = OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.float32)
         X_train_encoded = encoder.fit_transform(X_train_cat)
@@ -59,9 +74,13 @@ def random_forest_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_
         X_valid_final = np.hstack((X_valid_numeric, X_valid_encoded))
         X_test_final = np.hstack((X_test_numeric, X_test_encoded))
     else:
-        X_train_final = X_train_numeric
-        X_valid_final = X_valid_numeric
-        X_test_final = X_test_numeric
+        # 범주형 컬럼이 없는 경우
+        print("[RandomForest] No categorical columns found, using only numeric columns")
+        X_train_final = X_train_numeric.values
+        X_valid_final = X_valid_numeric.values
+        X_test_final = X_test_numeric.values
+
+    print(f"[RandomForest] Final data shape - Train: {X_train_final.shape}, Valid: {X_valid_final.shape}, Test: {X_test_final.shape}")
 
     best_loss = float('inf')
     best_params = None
@@ -120,7 +139,7 @@ def random_forest_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_
     logging.info(f"[RandomForest] Best params: n_estimators={best_n_est}, max_depth={best_depth}, min_samples_split={best_min_split}, Valid Loss={best_loss:.4f}")
     print(f"[RandomForest] Best params: n_estimators={best_n_est}, max_depth={best_depth}, min_samples_split={best_min_split}, Valid Loss={best_loss:.4f}")
 
-    # 최적 파라미터로 모델 재학습 (Train + Valid 전체를 묶어서 쓰고 싶다면 수정)
+    # 최적 파라미터로 모델 재학습
     model = RandomForestClassifier(
         n_estimators=best_n_est,
         max_depth=best_depth,

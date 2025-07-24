@@ -43,18 +43,27 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     X_valid = pd.DataFrame(X_valid).reset_index(drop=True)
     X_test = pd.DataFrame(X_test).reset_index(drop=True)
     
-    print("Initial data types:", X_train.dtypes)
-    print("Any NaN in X_train:", X_train.isna().sum().sum())
+    print(f"[MLP] Initial data types: {X_train.dtypes}")
+    print(f"[MLP] Any NaN in X_train: {X_train.isna().sum().sum()}")
+    print(f"[MLP] Input columns: {X_train.columns.tolist()}")
     
-    # 2. 수치형/범주형 컬럼 분리
+    # 2. feature 제거 후 현재 데이터에서 수치형/범주형 컬럼 분리
     numeric_cols = X_train.select_dtypes(include=['int64', 'float64']).columns
     categorical_cols = X_train.select_dtypes(exclude=['int64', 'float64']).columns
     
+    print(f"[MLP] After feature removal - Numeric columns: {numeric_cols.tolist()}")
+    print(f"[MLP] After feature removal - Categorical columns: {categorical_cols.tolist()}")
+    
     # 3. 범주형 데이터 처리
     if len(categorical_cols) > 0:
-        X_train_cat = pd.get_dummies(X_train[categorical_cols], drop_first=True)
-        X_valid_cat = pd.get_dummies(X_valid[categorical_cols], drop_first=True)
-        X_test_cat = pd.get_dummies(X_test[categorical_cols], drop_first=True)
+        # 범주형 컬럼을 string으로 변환 후 get_dummies 적용 (안전성 향상)
+        X_train_cat_str = X_train[categorical_cols].astype(str)
+        X_valid_cat_str = X_valid[categorical_cols].astype(str)
+        X_test_cat_str = X_test[categorical_cols].astype(str)
+        
+        X_train_cat = pd.get_dummies(X_train_cat_str, drop_first=True)
+        X_valid_cat = pd.get_dummies(X_valid_cat_str, drop_first=True)
+        X_test_cat = pd.get_dummies(X_test_cat_str, drop_first=True)
         
         # 모든 데이터셋에 동일한 컬럼 확보
         all_columns = X_train_cat.columns
@@ -65,7 +74,10 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
                 X_test_cat[col] = 0
         X_valid_cat = X_valid_cat[all_columns]
         X_test_cat = X_test_cat[all_columns]
+        
+        print(f"[MLP] Categorical features after encoding: {len(all_columns)} columns")
     else:
+        print("[MLP] No categorical columns found")
         X_train_cat = pd.DataFrame(index=X_train.index)
         X_valid_cat = pd.DataFrame(index=X_valid.index)
         X_test_cat = pd.DataFrame(index=X_test.index)
@@ -93,7 +105,10 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
             columns=numeric_cols,
             index=X_test.index
         )
+        
+        print(f"[MLP] Numeric features after scaling: {len(numeric_cols)} columns")
     else:
+        print("[MLP] No numeric columns found")
         X_train_num = pd.DataFrame(index=X_train.index)
         X_valid_num = pd.DataFrame(index=X_valid.index)
         X_test_num = pd.DataFrame(index=X_test.index)
@@ -108,7 +123,12 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     X_valid_processed = X_valid_processed.astype(np.float32)
     X_test_processed = X_test_processed.astype(np.float32)
     
-    print("Data type after conversion:", X_train_processed.dtypes.unique())
+    print(f"[MLP] Final processed data shape - Train: {X_train_processed.shape}, Valid: {X_valid_processed.shape}, Test: {X_test_processed.shape}")
+    print(f"[MLP] Data type after conversion: {X_train_processed.dtypes.unique()}")
+    
+    # feature가 모두 제거되어 빈 DataFrame인 경우 체크
+    if X_train_processed.shape[1] == 0:
+        raise ValueError("[MLP] Error: No features remaining after feature removal and processing!")
     
     # 6. 텐서 변환
     X_train_tensor = torch.from_numpy(X_train_processed.values).float().to(device)
@@ -125,10 +145,9 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
         y_test_tensor = torch.LongTensor(y_test).to(device)
     
     # shape 확인을 위한 디버깅 출력
-    print(f"X_test shape: {X_test_tensor.shape}")
-    print(f"y_test shape: {y_test_tensor.shape}")
-    
-    print(f"Final tensor shapes - X_train: {X_train_tensor.shape}, y_train: {y_train_tensor.shape}")
+    print(f"[MLP] Final tensor shapes - X_train: {X_train_tensor.shape}, y_train: {y_train_tensor.shape}")
+    print(f"[MLP] X_valid shape: {X_valid_tensor.shape}, y_valid shape: {y_valid_tensor.shape}")
+    print(f"[MLP] X_test shape: {X_test_tensor.shape}, y_test shape: {y_test_tensor.shape}")
     
     # 10. 데이터셋과 데이터로더 생성
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
@@ -142,6 +161,9 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     # 11. 모델 초기화
     input_dim = X_train_processed.shape[1]
     num_classes = 1 if is_binary else len(np.unique(y_train))
+    
+    print(f"[MLP] Model parameters - Input dim: {input_dim}, Hidden dim: {args.hidden_dim}, Output classes: {num_classes}, Is binary: {is_binary}")
+    
     model = MLPClassifier(input_dim, args.hidden_dim, num_classes, args.dropout_rate, is_binary).to(device)
     
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
@@ -156,6 +178,8 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     best_model = None
     patience = 10
     counter = 0
+    
+    print(f"[MLP] Starting training for {n_epochs} epochs with patience {patience}")
     
     # 학습
     for epoch in range(n_epochs):
@@ -188,7 +212,7 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
                 activation=False
             )
             
-            logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(train_loader):.4f}, "
+            logging.info(f"[MLP] Epoch {epoch+1}, Train Loss: {train_loss/len(train_loader):.4f}, "
                         f"Valid Loss: {valid_loss:.4f}, Valid F1: {valid_f1:.4f}")
             
             # Early stopping 조건 개선 (손실과 F1 점수 모두 고려)
@@ -201,7 +225,7 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
                 counter += 1
                 
             if counter >= patience:
-                logging.info("Early stopping triggered!")
+                logging.info("[MLP] Early stopping triggered!")
                 break
     
     # 최종 평가
@@ -226,6 +250,7 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
             activation=False
         )
     
+    print(f"[MLP] Final test results - Loss: {test_loss:.4f}, Acc: {test_acc:.4f}, AUC: {test_auc:.4f}, F1: {test_f1:.4f}")
     
     total_results = {
         'test_mlp_loss': test_loss.item(),

@@ -20,7 +20,7 @@ for random_seed in $random_seeds; do
                        CUDA_VISIBLE_DEVICES=$gpu_id python main_A.py \
                        --random_seed $random_seed \
                        --source_data $source_dataset \
-                       --base_dir 'test20250726' \
+                       --base_dir 'test20250726_scenario5_added' \
                        --embed_type $embed_type \
                        --edge_type $edge_type \
                        --attn_type $attn_type \

@@ -96,7 +96,8 @@ class AdaptiveGraphAttention(nn.Module):
         seq_len = new_seq - 1
 
         self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
-        self.adjacency = self._no_self_interaction(self.adjacency)
+        if self.args.no_self_loop:        
+            self.adjacency = self._no_self_interaction(self.adjacency)
         
         new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=self.adjacency.device)
         new_adjacency[:, 1:, 1:] = self.adjacency 

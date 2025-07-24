@@ -47,6 +47,7 @@ def get_args():
                        choices=['lr', 'xgb', 'mlp', 'cat', 'rf'],
                        help='List of baselines to use')
     parser.add_argument('--des', type=str, help='experimental memo')
+    parser.add_argument('--del_feat', nargs='+', default = [], help = 'List  of features to remove from dataset')
     
     args = parser.parse_args()
     return args
