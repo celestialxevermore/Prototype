@@ -22,15 +22,23 @@ def fix_seed(seed):
     
     random.seed(seed)
 
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    #os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    torch.use_deterministic_algorithms(True)
+    '''
+        최대 성능을 위해 주석처리함. 
+        2025.07.24. 주석처리 된 코드를 재활성화하면, 
+        재현성이 확실히 보장됨.
+    '''
+    # torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.deterministic = True
+    # torch.use_deterministic_algorithms(True)
 
+    torch.backends.cudnn.benchmark = True      # False → True
+    torch.backends.cudnn.deterministic = False # True → False
+    torch.use_deterministic_algorithms(False)  # True → False
 
 def save_pretrained_model(args, model, dataset_name):
     save_dir = os.path.join('pretrained_models',dataset_name)
