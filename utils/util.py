@@ -413,6 +413,7 @@ def save_results_(args, results):
         "edge_type": args.edge_type,
         "attn_type" : args.attn_type,
         "del_feature" : args.del_feat,
+        "no_self_loop" : args.no_self_loop,
         "del_exp": getattr(args, 'del_exp', 'unknown'),
         "results": results['Best_results']
     }
@@ -619,6 +620,7 @@ def save_ml_results(args, results):
         "dataset": args.source_data,
         "dataset_file_path": dataset_file_path,
         "timestamp": timestamp,
+        "del_feature" : args.del_feat,
         "hyperparameters": {
             "seed": args.random_seed,
             "batch_size": args.batch_size,

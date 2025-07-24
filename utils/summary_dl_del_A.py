@@ -67,6 +67,60 @@ def extract_important_features_from_json(data):
     
     return important_features, all_features
 
+def create_combined_summary_by_model(results_by_scenario, dataset, base_dir):
+    """각 model_config별로 모든 시나리오의 모든 메트릭을 하나의 표로 생성"""
+    
+    # model_config별로 그룹화
+    results_by_model = defaultdict(dict)
+    
+    for key, few_shot_data in results_by_scenario.items():
+        model_config, scenario_id, scenario_desc = key
+        results_by_model[model_config][(scenario_id, scenario_desc)] = few_shot_data
+    
+    # 각 model_config별로 TSV 파일 생성
+    for model_config, scenario_data in results_by_model.items():
+        # 시나리오별로 정렬
+        sorted_scenarios = sorted(scenario_data.items(), key=lambda x: x[0][0])  # scenario_id로 정렬
+        
+        summary_dir = os.path.join(base_dir, f"{dataset}_summary_scenarios", model_config)
+        create_directory(summary_dir)
+        
+        # 각 model_config별 전체 결과를 담을 TSV 파일
+        combined_file = os.path.join(summary_dir, 'all_scenarios_combined.tsv')
+        
+        with open(combined_file, 'w', newline='') as f:
+            writer = csv.writer(f, delimiter='\t')
+            
+            # 각 시나리오의 각 메트릭별로 행 생성
+            for (scenario_id, scenario_desc), few_shot_data in sorted_scenarios:
+                few_shot_keys = sorted([k for k in few_shot_data.keys() if isinstance(k, int)])
+                
+                # 5개 메트릭 각각에 대해 행 생성
+                for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
+                    row = []
+                    
+                    # Few-shot 결과들 (4, 8, 16, 32, 64)
+                    for few_shot in few_shot_keys:
+                        values = few_shot_data[few_shot]['few_shot'][metric]
+                        if values:
+                            mean, std = calculate_mean_std(values)
+                            row.append(f"{mean:.4f}({std:.4f})")
+                        else:
+                            row.append("")
+                    
+                    # Full dataset 결과
+                    if 'full' in few_shot_data:
+                        values = few_shot_data['full']['full'][metric]
+                        if values:
+                            mean, std = calculate_mean_std(values)
+                            row.append(f"{mean:.4f}({std:.4f})")
+                        else:
+                            row.append("")
+                    else:
+                        row.append("")
+                    
+                    writer.writerow(row)
+
 def process_json_files(directory_path, selected_datasets=None, selected_seeds=None):
     if selected_datasets:
         print(f"처리할 데이터셋: {selected_datasets}")
@@ -198,22 +252,16 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                                         mean, std = calculate_mean_std(values)
                                         writer.writerow([f"{mean:.4f}({std:.4f})"])
             
-            # 🔥 모든 few-shot을 한눈에 보는 요약 테이블도 생성
-            summary_output_file = os.path.join(model_dir, 'summary_all_fewshots.csv')
+            # 🔥 개별 시나리오별 요약 테이블 생성 (TSV, 숫자만)
+            summary_output_file = os.path.join(model_dir, 'summary_all_fewshots.tsv')
             with open(summary_output_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                
-                # 🔥 헤더 추가 (시나리오 정보 포함)
-                writer.writerow([f"Scenario {scenario_id}: {scenario_desc}"])
-                writer.writerow([''])
+                writer = csv.writer(f, delimiter='\t')
                 
                 few_shot_keys = sorted([k for k in few_shot_data.keys() if isinstance(k, int)])
-                header = [f'f{fs}' for fs in few_shot_keys] + ['full']
-                writer.writerow(['Metric'] + header)
                 
-                # 🔥 각 metric별로 행 생성
+                # 🔥 숫자만 나오는 표 생성 (헤더와 메트릭 이름 모두 제거)
                 for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
-                    row = [metric.upper()]
+                    row = []  # 메트릭 이름 제거
                     
                     # Few-shot 결과들
                     for few_shot in few_shot_keys:
@@ -222,7 +270,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                             mean, std = calculate_mean_std(values)
                             row.append(f"{mean:.4f}({std:.4f})")
                         else:
-                            row.append("N/A")
+                            row.append("")
                     
                     # Full dataset 결과
                     if 'full' in few_shot_data:
@@ -231,11 +279,14 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                             mean, std = calculate_mean_std(values)
                             row.append(f"{mean:.4f}({std:.4f})")
                         else:
-                            row.append("N/A")
+                            row.append("")
                     else:
-                        row.append("N/A")
+                        row.append("")
                     
                     writer.writerow(row)
+        
+        # 🔥 각 model_config별로 모든 시나리오를 하나로 합친 TSV 파일 생성
+        create_combined_summary_by_model(results_by_scenario, dataset, directory_path)
         
         print(f"데이터셋 {dataset} 처리 완료!")
         print(f"총 {len(results_by_scenario)}개 시나리오 조합 생성됨")
