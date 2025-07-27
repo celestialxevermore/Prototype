@@ -15,6 +15,10 @@ class TabularToEmbeddingDataset:
         self.data_source = "label_table" if args.label else "origin_table"
         self.dataset_and_class = {
             "heart": ['target_binary', ['no','yes']],
+            "heart_target_1" : ['target_binary', ['no','yes']],
+            "heart_target_2" : ['target_binary', ['no','yes']],
+            "heart_target_3" : ['target_binary', ['no','yes']],
+            "heart_target_4" : ['target_binary', ['no','yes']],
             "cleveland": ['target_binary', ['no','yes']],
             "credit-g" :['target_binary', ['no','yes']],
             "hungarian": ['target_binary', ['no','yes']],
@@ -164,7 +168,7 @@ if __name__ == "__main__":
                        help='Type of scaler to use for numerical features.')
     parser.add_argument('--llm_model', type = str, default='gpt2_mean', choices=['gpt2_mean','gpt2_auto','sentence-bert', 'bio-bert', 'bio-clinical-bert', 'LLAMA_mean', 'LLAMA_auto'],
                         help='Name of the language model to use')
-    parser.add_argument('--embed_type', default = 'ours', choices = ['carte', 'carte_desc','ours','ours2'])
+    parser.add_argument('--embed_type', default = 'carte', choices = ['carte', 'carte_desc','ours','ours2'])
     args = parser.parse_args()
     
     # 재현성을 위한 설정
@@ -192,9 +196,13 @@ if __name__ == "__main__":
         #'car',
         #'bank',
         #"breast"
-        "heart",
-        "diabetes",
-        "adult"
+        #"heart",
+        #"heart_target_1",
+        #"heart_target_2",
+        #"heart_target_3",
+        "heart_target_4",
+        #"diabetes",
+        #"adult"
     ]
     
     for dataset_name in datasets_to_process:
