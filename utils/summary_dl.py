@@ -16,6 +16,77 @@ def calculate_mean_std(values):
     std = np.std(values, ddof=0)
     return mean, std
 
+def create_combined_summary_by_model(results_by_config, full_results, dataset, base_dir):
+    """각 model_config별로 모든 설정의 모든 메트릭을 하나의 TSV 표로 생성"""
+    
+    # model_config별로 그룹화
+    results_by_model = defaultdict(dict)
+    full_results_by_model = defaultdict(dict)
+    
+    for key, data in results_by_config.items():
+        model_config, few_shot, batch_size = key
+        results_by_model[model_config][(few_shot, batch_size)] = data
+    
+    for key, data in full_results.items():
+        model_config, batch_size = key
+        full_results_by_model[model_config][batch_size] = data
+    
+    # 각 model_config별로 TSV 파일 생성
+    for model_config in results_by_model.keys():
+        config_data = results_by_model[model_config]
+        full_data = full_results_by_model.get(model_config, {})
+        
+        # few_shot과 batch_size별로 정렬
+        sorted_configs = sorted(config_data.items(), key=lambda x: (x[0][0], x[0][1]))  # few_shot, batch_size 순으로 정렬
+        
+        summary_dir = os.path.join(base_dir, f"{dataset}_summary", model_config)
+        create_directory(summary_dir)
+        
+        # 전체 결과를 담을 TSV 파일
+        combined_file = os.path.join(summary_dir, 'all_configs_combined.tsv')
+        
+        with open(combined_file, 'w', newline='') as f:
+            writer = csv.writer(f, delimiter='\t')
+            
+            # 헤더 작성 (설정별 컬럼명)
+            header = []
+            for (few_shot, batch_size), _ in sorted_configs:
+                header.append(f"f{few_shot}_b{batch_size}")
+            
+            # Full dataset 컬럼 추가 (batch_size별로)
+            unique_batch_sizes = sorted(set([bs for (fs, bs), _ in sorted_configs]))
+            for batch_size in unique_batch_sizes:
+                header.append(f"full_b{batch_size}")
+            
+            writer.writerow(header)
+            
+            # 각 메트릭별로 행 생성 (5개 메트릭)
+            for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
+                row = []
+                
+                # Few-shot 결과들
+                for (few_shot, batch_size), data in sorted_configs:
+                    values = data['few_shot'][metric]
+                    if values:
+                        mean, std = calculate_mean_std(values)
+                        row.append(f"{mean:.4f}({std:.4f})")
+                    else:
+                        row.append("")
+                
+                # Full dataset 결과들
+                for batch_size in unique_batch_sizes:
+                    if batch_size in full_data and metric in full_data[batch_size]:
+                        values = full_data[batch_size][metric]
+                        if values:
+                            mean, std = calculate_mean_std(values)
+                            row.append(f"{mean:.4f}({std:.4f})")
+                        else:
+                            row.append("")
+                    else:
+                        row.append("")
+                
+                writer.writerow(row)
+
 def process_json_files(directory_path, selected_datasets=None, selected_seeds=None):
     if selected_datasets:
         print(f"처리할 데이터셋: {selected_datasets}")
@@ -41,7 +112,8 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
             for seed in selected_seeds:
                 seed_path = os.path.join(dataset_path, f"args_seed:{seed}")
                 if os.path.exists(seed_path):
-                    seed_json_pattern = os.path.join(seed_path, "TabularFLM/A:*_L:*_E:*_M:*/f*.json")
+                    # 패턴을 실제 폴더 구조에 맞게 수정
+                    seed_json_pattern = os.path.join(seed_path, "TabularFLM/*/f*.json")
                     seed_json_files = glob.glob(seed_json_pattern, recursive=True)
                     if seed_json_files:
                         json_files.extend(seed_json_files)
@@ -49,8 +121,8 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                 else:
                     print(f"시드 {seed}의 경로가 존재하지 않음: {seed_path}")
         else:
-            # 모든 시드 처리 (기존 방식)
-            json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/A:*_L:*_E:*_M:*/f*.json")
+            # 모든 시드 처리 (기존 방식) - 패턴 수정
+            json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/*/f*.json")
             json_files = glob.glob(json_pattern, recursive=True)
         
         if not json_files:
@@ -107,7 +179,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
             except Exception as e:
                 print(f"파일 처리 오류 {json_file}: {str(e)}")
         
-        # 결과 저장
+        # 기존 개별 CSV 파일 저장
         for config_key in results_by_config.keys():
             model_config, few_shot, batch_size = config_key
             
@@ -140,6 +212,12 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                         if values:
                             mean, std = calculate_mean_std(values)
                             writer.writerow([f"{mean:.4f}({std:.4f})"])
+        
+        # 🔥 새로 추가: 각 model_config별로 모든 설정을 하나로 합친 TSV 파일 생성
+        create_combined_summary_by_model(results_by_config, full_results, dataset, directory_path)
+        
+        print(f"데이터셋 {dataset} 처리 완료!")
+        print(f"총 {len(results_by_config)}개 설정 조합 처리됨")
 
 def main():
     parser = argparse.ArgumentParser(description='Summarize DL results')

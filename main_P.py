@@ -18,7 +18,7 @@ from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM import Model
+from models.TabularFLM_P import Model, prototype_learning  # 같은 파일에서 둘 다 import
 import psutil
 from utils.visualization import visualize_model_structure
 from torch_geometric.data import Batch
@@ -90,25 +90,16 @@ def get_args():
     ## 시각화 관련 인자 추가
     parser.add_argument('--viz_heatmap', action='store_true', help='Visualize heatmap')
     parser.add_argument('--viz_graph', action='store_true', help='Visualize graph')
+    
+    # 프로토타입 학습 관련 인자 추가
+    parser.add_argument('--prototype_momentum', type=float, default=0.9, help='Momentum for prototype updates')
+    parser.add_argument('--few_shot_alpha', type=float, default=0.3, help='Weight for classification loss in few-shot phase')
+    parser.add_argument('--few_shot_beta', type=float, default=0.7, help='Weight for prototype regularization in few-shot phase')
+    
     args = parser.parse_args()
 
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args 
-
-def ad(adjacency):
-    
-    # 범위별 분포 분석
-    adj_flat = adjacency.flatten()
-    min_val = adj_flat.min().item()
-    max_val = adj_flat.max().item()
-    num_bins = 10
-    step = (max_val - min_val) / num_bins
-    
-    for i in range(num_bins):
-        lower = min_val + i * step
-        upper = min_val + (i + 1) * step
-        count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
-        print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
 
 def find_optimal_threshold(y_true, y_pred_proba):
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
@@ -150,10 +141,7 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
-        # if args.viz_graph or args.viz_heatmap:
-        #     if epoch % 10 == 0 or epoch == epochs - 1:
-        #         visualize_model_structure(model, train_loader, device, args, mode, experiment_id, epoch, max_samples=5)
-                
+
         if is_binary:
             # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)
@@ -236,11 +224,11 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
             break
 
-        # 학습 종료 후, Best 모델로 복원
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
-        else:
-            logger.warning("No best_model_state saved; model not updated?")
+    # 학습 종료 후, Best 모델로 복원
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    else:
+        logger.warning("No best_model_state saved; model not updated?")
 
     return (train_losses, val_losses,
             train_aucs, val_aucs,
@@ -288,6 +276,35 @@ def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretr
         return model_path
     return None
 
+
+def save_prototypes(self, save_dir):
+    """Save prototypes after Phase 1 with unique naming"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    no_self_loop_str = "NoSelfLoop" if getattr(self.args, 'no_self_loop', False) else "WithSelfLoop"
+    
+    filename = (f"prototypes_{self.args.source_data}_"
+               f"Attn:{self.args.attn_type}_"
+               f"{no_self_loop_str}_"
+               f"Seed:{self.args.random_seed}.pt")
+    
+    save_path = os.path.join(save_dir, filename)
+    self.Prototype.save_prototypes(save_path)
+    logger.info(f"Source Prototypes saved to {save_path}")
+    return save_path
+
+
+def get_prototype_path(args, prototype_save_dir):
+    """프로토타입 파일 경로를 생성하는 공통 함수"""
+    no_self_loop_str = "NoSelfLoop" if getattr(args, 'no_self_loop', False) else "WithSelfLoop"
+    
+    filename = (f"prototypes_{args.source_data}_"
+               f"Attn:{args.attn_type}_"
+               f"{no_self_loop_str}_"
+               f"Seed:{args.random_seed}.pt")
+    
+    return os.path.join(prototype_save_dir, filename)
+
 def main():
     start_time = time.time()
     args  = get_args()
@@ -295,13 +312,10 @@ def main():
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
     
-    logger.info(f"Starting experiment with dataset: {args.source_data}")
+    logger.info(f"Starting TPN-based prototype learning experiment with dataset: {args.source_data}")
     logger.info(f"Device: {device}")
 
     logger.info("Preparing Tabular datasets...")
-    # if args.embed_type in ['carte', 'carte_desc']:
-    #     args.use_edge_attr = True
-
     results = prepare_embedding_dataloaders(args, args.source_data)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
@@ -319,17 +333,21 @@ def main():
 
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
-    
+
     model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model,experiment_id, mode="Full")
     model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode = "Few")
+
+    model_full = prototype_learning(model_full, args)
+    model_few = prototype_learning(model_few, args)
+    
     model_full = model_full.to(device)
     model_few = model_few.to(device)
     optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
+    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr_few, weight_decay=1e-5)  # few-shot에는 더 작은 lr 사용
 
-
+    # Phase 1: Full-shot Training with Prototype Learning (4-shot일 때만)
     if args.few_shot == 4:
-        logger.info(f"[Source-Only: Full] Start Training..")
+        logger.info(f"[Phase 1: Full-shot] Start Training with Prototype Learning...")
 
         (train_losses_full, val_losses_full,
         train_aucs_full, val_aucs_full,
@@ -340,14 +358,48 @@ def main():
         best_epoch_full, best_val_auc_full, best_threshold_full
         ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
                             device, args.train_epochs, is_binary, mode="Full")
-        pdb.set_trace()
-        logger.info("[Full-shot] Final Testing with best threshold from Validation")
+
+        prototype_save_dir = f"/storage/personal/eungyeop/experiments/prototypes/{args.llm_model}/{args.source_data}/{args.random_seed}"
+        prototype_path = model_full.save_prototypes(prototype_save_dir)
+        logger.info(f"Phase 1 completed. Prototypes saved to: {prototype_path}")
+
+        logger.info("[Phase 1: Full-shot] Final Testing with best threshold from Validation")
         (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
         test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
                                                                 threshold=best_threshold_full)
+    else:
+        # 4-shot이 아닌 경우: 4-shot에서 생성된 prototype 파일을 사용
+        logger.info(f"Using prototype file created by 4-shot experiment...")
+        full_ours_results = None  # 4-shot이 아니므로 full training 결과 없음
 
-    # 4-2) 최종 Test - Few
-    logger.info("[Few-shot] Start Training...")
+    # 모든 few-shot 실험(4, 8, 16, 32, 64)은 동일한 prototype 파일 경로 사용
+    prototype_save_dir = f"/storage/personal/eungyeop/experiments/prototypes/{args.llm_model}/{args.source_data}/{args.random_seed}"
+    prototype_path = get_prototype_path(args, prototype_save_dir)
+    
+    # Phase 2: Few-shot Training with Prototype Regularization
+    logger.info(f"[Phase 2: Few-shot {args.few_shot}] Start Training with Prototype Regularization...")
+    
+    # 프로토타입 파일 존재 확인
+    if not os.path.exists(prototype_path):
+        logger.error(f"Prototype file not found: {prototype_path}")
+        logger.error(f"You need to run 4-shot experiment first to generate prototype files!")
+        logger.error(f"Please run the following command first:")
+        no_self_loop_flag = "--no_self_loop" if getattr(args, 'no_self_loop', False) else ""
+        logger.error(f"python main_P.py --few_shot 4 --random_seed {args.random_seed} --source_data {args.source_data} --attn_type {args.attn_type} {no_self_loop_flag}")
+        
+        logger.info("Available prototype files:")
+        if os.path.exists(prototype_save_dir):
+            for file in os.listdir(prototype_save_dir):
+                if file.endswith('.pt'):
+                    logger.info(f"  - {file}")
+        else:
+            logger.error(f"Prototype directory does not exist: {prototype_save_dir}")
+        raise FileNotFoundError(f"Required prototype file not found. Run 4-shot experiment first!")
+    
+    logger.info(f"Loading prototype from: {prototype_path}")
+    # 4-shot에서 학습된 프로토타입을 Phase 2 모델에 로드
+    model_few.load_source_prototypes(prototype_path)
+    
     (train_losses_few, val_losses_few,
     train_aucs_few, val_aucs_few,
     train_precisions_few, val_precisions_few,
@@ -358,14 +410,12 @@ def main():
     ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
                         device, args.train_epochs, is_binary, mode="Few")
 
-    logger.info("[Few-shot] Final Testing with best threshold from Validation")
+    logger.info("[Phase 2: Few-shot] Final Testing with best threshold from Validation")
     (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
     test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
                                                         threshold=best_threshold_few)
 
-
-
-    
+    # 기존과 동일한 결과 처리
     if args.few_shot == 4:
         full_ours_results = wrap_up_results_(
             train_losses=train_losses_full, 
@@ -398,7 +448,6 @@ def main():
     else: 
         full_ours_results = None
 
-
     few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
     train_losses_few, val_losses_few, [],
     train_aucs_few, val_aucs_few, [test_auc_few],
@@ -412,7 +461,6 @@ def main():
     val_accs=val_accs_few,
     test_accs=[test_acc_few]
 )
-
 
     results = prepare_results_(full_ours_results, few_ours_results)
 

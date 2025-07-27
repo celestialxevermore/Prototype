@@ -18,7 +18,7 @@ from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM import Model
+from models.TabularFLM_PP import Model, prototype_learning  # 같은 파일에서 둘 다 import
 import psutil
 from utils.visualization import visualize_model_structure
 from torch_geometric.data import Batch
@@ -26,6 +26,10 @@ from datetime import datetime
 import networkx as nx               
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import Counter
+import warnings
+from torch.utils.data import DataLoader
+
 experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 p = psutil.Process()
@@ -90,25 +94,22 @@ def get_args():
     ## 시각화 관련 인자 추가
     parser.add_argument('--viz_heatmap', action='store_true', help='Visualize heatmap')
     parser.add_argument('--viz_graph', action='store_true', help='Visualize graph')
+    
+    # 프로토타입 학습 관련 인자 추가
+    parser.add_argument('--prototype_momentum', type=float, default=0.99, help='Momentum for prototype updates')
+    parser.add_argument('--few_shot_alpha', type=float, default=0.3, help='Weight for classification loss in few-shot phase')
+    parser.add_argument('--few_shot_beta', type=float, default=0.7, help='Weight for prototype regularization in few-shot phase')
+    
+    # Episode-based Few-shot Learning 관련 인자 추가
+    parser.add_argument('--use_episodic', action='store_true', help='Use episode-based few-shot learning')
+    parser.add_argument('--episodes_per_epoch', type=int, default=50, help='Number of episodes per epoch')
+    parser.add_argument('--num_query_per_class', type=int, default=5, help='Number of query samples per class in each episode')
+    parser.add_argument('--val_episodes', type=int, default=50, help='Number of validation episodes')
+    
     args = parser.parse_args()
 
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args 
-
-def ad(adjacency):
-    
-    # 범위별 분포 분석
-    adj_flat = adjacency.flatten()
-    min_val = adj_flat.min().item()
-    max_val = adj_flat.max().item()
-    num_bins = 10
-    step = (max_val - min_val) / num_bins
-    
-    for i in range(num_bins):
-        lower = min_val + i * step
-        upper = min_val + (i + 1) * step
-        count = ((adj_flat >= lower) & (adj_flat < upper)).sum().item()
-        print(f"범위 [{lower:.4f}, {upper:.4f}): {int(count)} 개")
 
 def find_optimal_threshold(y_true, y_pred_proba):
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_pred_proba)
@@ -116,12 +117,255 @@ def find_optimal_threshold(y_true, y_pred_proba):
     optimal_idx = np.argmax(f1_scores)
     return thresholds[optimal_idx] if optimal_idx < len(thresholds) else thresholds[-1]
 
-def train_and_validate(args, model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10, mode="Full"):
+def sample_episode(train_loader, args, episode_idx=None, num_query_per_class=None):
+    """매번 새로운 Support + Query set 샘플링"""
+    if episode_idx is not None:
+        # 매 episode마다 다른 seed 사용 (재현성 유지 + 다양성 확보)
+        random.seed(args.random_seed + episode_idx)
+        np.random.seed(args.random_seed + episode_idx)
     
-    """
-    Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
-    마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
-    """
+    if num_query_per_class is None:
+        num_query_per_class = args.num_query_per_class
+    
+    dataset = train_loader.dataset
+    labels = [data['y'].item() for data in dataset]
+    num_classes = len(set(labels))
+    
+    support_data = []
+    query_data = []
+    
+    for cls in range(num_classes):
+        cls_data = [data for data in dataset if data['y'].item() == cls]
+        
+        total_needed = args.few_shot + num_query_per_class
+        if len(cls_data) < total_needed:
+            warnings.warn(f"Class {cls} has fewer samples ({len(cls_data)}) than required ({total_needed}). Using replacement sampling.")
+            selected = random.choices(cls_data, k=total_needed)
+        else:
+            selected = random.sample(cls_data, k=total_needed)
+        
+        support_data.extend(selected[:args.few_shot])
+        query_data.extend(selected[args.few_shot:])
+    
+    support_loader = DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
+    query_loader = DataLoader(query_data, batch_size=args.batch_size, shuffle=False)
+    
+    logger.debug(f"Episode {episode_idx}: Support={len(support_data)}, Query={len(query_data)}")
+    
+    return support_loader, query_loader
+
+def get_few_shot_embedding_samples_episodic(train_loader, args, episode_idx=None):
+    """Episode-based sampling wrapper (기존 함수 재활용)"""
+    if episode_idx is not None:
+        # 매 episode마다 다른 seed 사용
+        original_seed = args.random_seed
+        args.random_seed = args.random_seed + episode_idx
+        
+    result = get_few_shot_embedding_samples(train_loader, args)
+    
+    if episode_idx is not None:
+        # seed 복원
+        args.random_seed = original_seed
+        
+    return result
+
+def create_fixed_validation_episodes(val_loader, args):
+    """고정된 validation episodes 생성 (재현성)"""
+    logger.info(f"Creating {args.val_episodes} fixed validation episodes...")
+    
+    val_episodes = []
+    for episode_idx in range(args.val_episodes):
+        support_loader, query_loader = sample_episode(
+            val_loader, args, episode_idx=episode_idx * 1000  # validation용 다른 seed 범위
+        )
+        val_episodes.append((support_loader, query_loader))
+    
+    logger.info(f"Created {len(val_episodes)} validation episodes")
+    return val_episodes
+
+def evaluate_episode(model, support_loader, query_loader, criterion, device, is_binary):
+    """단일 episode 평가"""
+    model.eval()
+    evaluate_func = binary_evaluate if is_binary else multi_evaluate
+    
+    with torch.no_grad():
+        # Query set에 대한 performance 측정
+        _, y_true, y_pred = evaluate_func(model, query_loader, criterion, device)
+        
+        if is_binary:
+            auc = roc_auc_score(y_true, y_pred)
+            threshold = find_optimal_threshold(y_true, y_pred)
+            y_pred_bin = (y_pred > threshold).astype(int)
+            acc = accuracy_score(y_true, y_pred_bin)
+            precision = precision_score(y_true, y_pred_bin, zero_division=0)
+            recall = recall_score(y_true, y_pred_bin, zero_division=0)
+            f1 = f1_score(y_true, y_pred_bin, zero_division=0)
+        else:
+            n_classes = y_pred.shape[1]
+            y_true_bin = label_binarize(y_true, classes=range(n_classes))
+            auc = roc_auc_score(y_true_bin, y_pred, multi_class='ovr', average='macro')
+            y_pred_argmax = y_pred.argmax(axis=1)
+            acc = accuracy_score(y_true, y_pred_argmax)
+            precision = precision_score(y_true, y_pred_argmax, average='macro', zero_division=0)
+            recall = recall_score(y_true, y_pred_argmax, average='macro', zero_division=0)
+            f1 = f1_score(y_true, y_pred_argmax, average='macro', zero_division=0)
+            threshold = None
+    
+    return auc, acc, precision, recall, f1, threshold
+
+def evaluate_fixed_episodes(model, val_episodes, criterion, device, is_binary):
+    """고정된 episodes로 평가"""
+    aucs = []
+    accs = []
+    precisions = []
+    recalls = []
+    f1s = []
+    thresholds = []
+    
+    for support_loader, query_loader in val_episodes:
+        auc, acc, precision, recall, f1, threshold = evaluate_episode(
+            model, support_loader, query_loader, criterion, device, is_binary
+        )
+        aucs.append(auc)
+        accs.append(acc)
+        precisions.append(precision)
+        recalls.append(recall)
+        f1s.append(f1)
+        if threshold is not None:
+            thresholds.append(threshold)
+    
+    avg_threshold = np.mean(thresholds) if thresholds else 0.5
+    
+    return (np.mean(aucs), np.mean(accs), np.mean(precisions), np.mean(recalls), np.mean(f1s),
+            np.std(aucs), np.std(accs), avg_threshold)
+
+def train_and_validate_episodic(args, model, train_loader, val_loader, val_episodes, criterion, optimizer, device, epochs, is_binary, patience=10, mode="Few"):
+    """Episode-based training + validation"""
+    
+    train_losses = []
+    val_losses = []  # Episode-based에서는 비어있음
+    train_aucs, val_aucs = [], []
+    train_precisions, val_precisions = [], []
+    train_recalls, val_recalls = [], []
+    train_f1s, val_f1s = [], []
+    train_accs, val_accs = [], []
+
+    train_func = binary_train if is_binary else multi_train
+    evaluate_func = binary_evaluate if is_binary else multi_evaluate
+
+    best_val_auc = 0.0
+    no_improve = 0
+    best_epoch = 0
+    best_threshold = 0.5
+    best_model_state = None
+
+    for epoch in range(epochs):
+        logger.info(f"[Epoch {epoch+1}/{epochs}] Starting Episode-based Training...")
+        
+        epoch_losses = []
+        
+        # Episode-based Training
+        for episode_idx in range(args.episodes_per_epoch):
+            # 매번 새로운 Support Set 샘플링
+            support_loader = get_few_shot_embedding_samples_episodic(
+                train_loader, args, episode_idx=epoch * args.episodes_per_epoch + episode_idx
+            )
+            
+            # 이 episode로 학습
+            episode_loss = train_func(model, support_loader, criterion, optimizer, device)
+            epoch_losses.append(episode_loss)
+        
+        avg_train_loss = np.mean(epoch_losses)
+        train_losses.append(avg_train_loss)
+        
+        # Episode-based Validation
+        logger.info(f"[Epoch {epoch+1}/{epochs}] Starting Episode-based Validation...")
+        (val_auc, val_acc, val_precision, val_recall, val_f1, 
+         val_auc_std, val_acc_std, current_threshold) = evaluate_fixed_episodes(
+            model, val_episodes, criterion, device, is_binary
+        )
+        
+        # Train AUC 계산 (마지막 episode의 support set으로)
+        model.eval()
+        with torch.no_grad():
+            _, y_true_train, y_pred_train = evaluate_func(model, support_loader, criterion, device)
+            if is_binary:
+                train_auc = roc_auc_score(y_true_train, y_pred_train)
+                train_threshold = find_optimal_threshold(y_true_train, y_pred_train)
+                train_pred_bin = (y_pred_train > train_threshold).astype(int)
+                train_acc = accuracy_score(y_true_train, train_pred_bin)
+                train_precision = precision_score(y_true_train, train_pred_bin, zero_division=0)
+                train_recall = recall_score(y_true_train, train_pred_bin, zero_division=0)
+                train_f1 = f1_score(y_true_train, train_pred_bin, zero_division=0)
+            else:
+                n_classes = y_pred_train.shape[1]
+                y_true_train_bin = label_binarize(y_true_train, classes=range(n_classes))
+                train_auc = roc_auc_score(y_true_train_bin, y_pred_train, multi_class='ovr', average='macro')
+                train_pred_argmax = y_pred_train.argmax(axis=1)
+                train_acc = accuracy_score(y_true_train, train_pred_argmax)
+                train_precision = precision_score(y_true_train, train_pred_argmax, average='macro', zero_division=0)
+                train_recall = recall_score(y_true_train, train_pred_argmax, average='macro', zero_division=0)
+                train_f1 = f1_score(y_true_train, train_pred_argmax, average='macro', zero_division=0)
+                current_threshold = 0.5
+        model.train()
+        
+        # 실제 값들로 채움
+        train_aucs.append(train_auc)
+        val_aucs.append(val_auc)
+        val_losses.append(0.0)  # Episode-based에서는 validation loss 계산 안함
+        train_precisions.append(train_precision)
+        val_precisions.append(val_precision)
+        train_recalls.append(train_recall)
+        val_recalls.append(val_recall)
+        train_f1s.append(train_f1)
+        val_f1s.append(val_f1)
+        train_accs.append(train_acc)
+        val_accs.append(val_acc)
+
+        logger.info(f"[Epoch {epoch+1}/{epochs}] "
+                    f"Train Loss: {avg_train_loss:.4f}, "
+                    f"Val AUC: {val_auc:.4f}±{val_auc_std:.4f}, "
+                    f"Val ACC: {val_acc:.4f}±{val_acc_std:.4f}")
+
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            best_epoch = epoch
+            no_improve = 0
+            best_model_state = model.state_dict()
+            best_threshold = current_threshold
+            
+            # Checkpoint 저장
+            checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}/{args.random_seed}"
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_D:{args.del_feat}_S:{args.random_seed}_{experiment_id}.pt")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'epoch': epoch,
+                'val_auc': val_auc,
+                'threshold': best_threshold,
+                'args': args
+            }, checkpoint_path)
+        else:
+            no_improve += 1
+
+        if no_improve >= patience:
+            logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+            break
+
+    # Best 모델 복원
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
+    return (train_losses, val_losses,
+            train_aucs, val_aucs,
+            train_precisions, val_precisions,
+            train_recalls, val_recalls,
+            train_f1s, val_f1s,
+            train_accs, val_accs,
+            best_epoch, best_val_auc, best_threshold)
+
+def train_and_validate(args, model, train_loader, val_loader, criterion, optimizer, device, epochs, is_binary, patience=10, mode="Full"):
+    """기존 방식 (Full-shot용)"""
     train_losses = []
     val_losses = []
     train_aucs, val_aucs = [], []
@@ -130,32 +374,29 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
     train_f1s, val_f1s = [], []
     train_accs, val_accs = [], []
 
-    # Binary / Multi 구분에 따라 함수 선택
     train_func = binary_train if is_binary else multi_train
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
     best_val_auc = 0.0
     no_improve = 0
     best_epoch = 0
-    
-    
     best_threshold = 0.5
     best_model_state = None
 
     for epoch in range(epochs):
         # 1) Training
+        logger.info(f"[Epoch {epoch+1}/{epochs}] Starting Training...")
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
+        
         # 2) Evaluate on Train / Validation
         _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
+        
+        logger.info(f"[Epoch {epoch+1}/{epochs}] Starting Validation Evaluation...")
         val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
         val_losses.append(val_loss)
-        # if args.viz_graph or args.viz_heatmap:
-        #     if epoch % 10 == 0 or epoch == epochs - 1:
-        #         visualize_model_structure(model, train_loader, device, args, mode, experiment_id, epoch, max_samples=5)
-                
+
         if is_binary:
-            # Binary Classification
             train_auc = roc_auc_score(y_true_train, y_pred_train)
             val_auc = roc_auc_score(y_true_val, y_pred_val)
             current_threshold = find_optimal_threshold(y_true_val, y_pred_val)
@@ -173,7 +414,6 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             val_acc = accuracy_score(y_true_val, y_pred_val_bin)
 
         else:
-            # Multi-class Classification
             n_classes = y_pred_train.shape[1]
             y_true_train_bin = label_binarize(y_true_train, classes=range(n_classes))
             y_true_val_bin = label_binarize(y_true_val, classes=range(n_classes))
@@ -192,7 +432,6 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             val_acc   = accuracy_score(y_true_val, preds_val_argmax)
             current_threshold = None
 
-        # 로그 기록
         train_aucs.append(train_auc)
         val_aucs.append(val_auc)
         train_precisions.append(train_precision)
@@ -217,10 +456,8 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             if current_threshold is not None:
                 best_threshold = current_threshold
             
-            # 🔥 개선: validation AUC가 갱신될 때만 저장
             checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{args.source_data}/{mode}/{args.random_seed}"
             os.makedirs(checkpoint_dir, exist_ok=True)
-            # 항상 같은 파일명으로 덮어쓰기
             checkpoint_path = os.path.join(checkpoint_dir, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_D:{args.del_feat}_S:{args.random_seed}_{experiment_id}.pt")
             torch.save({
                 'model_state_dict': model.state_dict(),
@@ -236,11 +473,8 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             logger.info(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
             break
 
-        # 학습 종료 후, Best 모델로 복원
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
-        else:
-            logger.warning("No best_model_state saved; model not updated?")
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
     return (train_losses, val_losses,
             train_aucs, val_aucs,
@@ -251,10 +485,7 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
             best_epoch, best_val_auc, best_threshold)
 
 def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None):
-    """
-    학습이 끝난 뒤, Test 로더에 대해 최종 성능을 측정.
-    threshold가 있으면 Binary 분류 시 threshold 적용.
-    """
+    """최종 테스트 평가"""
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
     test_loss, y_true_test, y_pred_test = evaluate_func(model, test_loader, criterion, device)
 
@@ -282,11 +513,16 @@ def final_test_evaluate(model, test_loader, criterion, device, is_binary, thresh
 
     return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
 
-def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretrained_models"):
-    model_path = os.path.join(model_dir,dataset_name)
-    if os.path.exists(model_path):
-        return model_path
-    return None
+def get_prototype_path(args, prototype_save_dir):
+    """프로토타입 파일 경로를 생성하는 공통 함수"""
+    no_self_loop_str = "NoSelfLoop" if getattr(args, 'no_self_loop', False) else "WithSelfLoop"
+    
+    filename = (f"prototypes_{args.source_data}_"
+               f"Attn:{args.attn_type}_"
+               f"{no_self_loop_str}_"
+               f"Seed:{args.random_seed}.pt")
+    
+    return os.path.join(prototype_save_dir, filename)
 
 def main():
     start_time = time.time()
@@ -295,13 +531,12 @@ def main():
     fix_seed(args.random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
     
-    logger.info(f"Starting experiment with dataset: {args.source_data}")
+    logger.info(f"Starting TPN-based prototype learning experiment with dataset: {args.source_data}")
     logger.info(f"Device: {device}")
+    if args.use_episodic:
+        logger.info(f"Using Episode-based Few-shot Learning: {args.episodes_per_epoch} episodes/epoch, {args.val_episodes} val episodes")
 
     logger.info("Preparing Tabular datasets...")
-    # if args.embed_type in ['carte', 'carte_desc']:
-    #     args.use_edge_attr = True
-
     results = prepare_embedding_dataloaders(args, args.source_data)
     train_loader_full_s, val_loader_full_s, test_loader_full_s = results['loaders']
     num_classes = results['num_classes']
@@ -312,24 +547,34 @@ def main():
     
     if args.few_shot > 0:
         logger.info(f"Preparing few-shot samples (K={args.few_shot})...")
-        train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
+        if not args.use_episodic:
+            # 기존 방식: 고정된 Support Set
+            train_loader_few_s = get_few_shot_embedding_samples(train_loader_full_s, args)
+        else:
+            # Episode-based: train_loader_full_s를 그대로 사용 (episode마다 샘플링)
+            train_loader_few_s = train_loader_full_s
+            
         val_loader_few_s = val_loader_full_s
         test_loader_few_s = test_loader_full_s
     logger.info(f"Datasets prepared, source dataset names : {args.source_data}")
 
     is_binary = (num_classes == 2)
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
-    
+
     model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model,experiment_id, mode="Full")
     model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim, args.num_layers, args.dropout_rate, args.llm_model, experiment_id, mode = "Few")
+
+    model_full = prototype_learning(model_full, args)
+    model_few = prototype_learning(model_few, args)
+    
     model_full = model_full.to(device)
     model_few = model_few.to(device)
     optimizer_full = optim.Adam(model_full.parameters(), lr=args.source_lr, weight_decay=1e-5)
-    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr, weight_decay=1e-5)
+    optimizer_few = optim.Adam(model_few.parameters(), lr=args.source_lr_few, weight_decay=1e-5)
 
-
+    # Phase 1: Full-shot Training with Prototype Learning (4-shot일 때만)
     if args.few_shot == 4:
-        logger.info(f"[Source-Only: Full] Start Training..")
+        logger.info(f"[Phase 1: Full-shot] Start Training with Prototype Learning...")
 
         (train_losses_full, val_losses_full,
         train_aucs_full, val_aucs_full,
@@ -340,37 +585,86 @@ def main():
         best_epoch_full, best_val_auc_full, best_threshold_full
         ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
                             device, args.train_epochs, is_binary, mode="Full")
-        pdb.set_trace()
-        logger.info("[Full-shot] Final Testing with best threshold from Validation")
+
+        prototype_save_dir = f"/storage/personal/eungyeop/experiments/prototypes/{args.llm_model}/{args.source_data}/{args.random_seed}"
+        prototype_path = model_full.save_prototypes(prototype_save_dir)
+        logger.info(f"Phase 1 completed. Prototypes saved to: {prototype_path}")
+
+        logger.info("[Phase 1: Full-shot] Final Testing with best threshold from Validation")
         (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
         test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
                                                                 threshold=best_threshold_full)
+    else:
+        # 4-shot이 아닌 경우: 4-shot에서 생성된 prototype 파일을 사용
+        logger.info(f"Using prototype file created by 4-shot experiment...")
+        full_ours_results = None
 
-    # 4-2) 최종 Test - Few
-    logger.info("[Few-shot] Start Training...")
-    (train_losses_few, val_losses_few,
-    train_aucs_few, val_aucs_few,
-    train_precisions_few, val_precisions_few,
-    train_recalls_few, val_recalls_few,
-    train_f1s_few, val_f1s_few,
-    train_accs_few, val_accs_few,
-    best_epoch_few, best_val_auc_few, best_threshold_few
-    ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
-                        device, args.train_epochs, is_binary, mode="Few")
+    # 모든 few-shot 실험(4, 8, 16, 32, 64)은 동일한 prototype 파일 경로 사용
+    prototype_save_dir = f"/storage/personal/eungyeop/experiments/prototypes/{args.llm_model}/{args.source_data}/{args.random_seed}"
+    prototype_path = get_prototype_path(args, prototype_save_dir)
+    
+    # Phase 2: Few-shot Training with Prototype Regularization
+    logger.info(f"[Phase 2: Few-shot {args.few_shot}] Start Training with Prototype Regularization...")
+    
+    # 프로토타입 파일 존재 확인
+    if not os.path.exists(prototype_path):
+        logger.error(f"Prototype file not found: {prototype_path}")
+        logger.error(f"You need to run 4-shot experiment first to generate prototype files!")
+        logger.error(f"Please run the following command first:")
+        no_self_loop_flag = "--no_self_loop" if getattr(args, 'no_self_loop', False) else ""
+        logger.error(f"python main_P.py --few_shot 4 --random_seed {args.random_seed} --source_data {args.source_data} --attn_type {args.attn_type} {no_self_loop_flag}")
+        
+        logger.info("Available prototype files:")
+        if os.path.exists(prototype_save_dir):
+            for file in os.listdir(prototype_save_dir):
+                if file.endswith('.pt'):
+                    logger.info(f"  - {file}")
+        else:
+            logger.error(f"Prototype directory does not exist: {prototype_save_dir}")
+        raise FileNotFoundError(f"Required prototype file not found. Run 4-shot experiment first!")
+    
+    logger.info(f"Loading prototype from: {prototype_path}")
+    # 4-shot에서 학습된 프로토타입을 Phase 2 모델에 로드
+    model_few.load_source_prototypes(prototype_path)
+    
+    # Episode-based 또는 기존 방식 선택
+    if args.use_episodic:
+        # Episode-based Few-shot Learning
+        logger.info("Creating fixed validation episodes...")
+        val_episodes = create_fixed_validation_episodes(val_loader_few_s, args)
+        
+        (train_losses_few, val_losses_few,
+        train_aucs_few, val_aucs_few,
+        train_precisions_few, val_precisions_few,
+        train_recalls_few, val_recalls_few,
+        train_f1s_few, val_f1s_few,
+        train_accs_few, val_accs_few,
+        best_epoch_few, best_val_auc_few, best_threshold_few
+        ) = train_and_validate_episodic(args, model_few, train_loader_few_s, val_loader_few_s, val_episodes, 
+                                      criterion, optimizer_few, device, args.train_epochs, is_binary, mode="Few")
+    else:
+        # 기존 방식 (고정된 Support Set)
+        (train_losses_few, val_losses_few,
+        train_aucs_few, val_aucs_few,
+        train_precisions_few, val_precisions_few,
+        train_recalls_few, val_recalls_few,
+        train_f1s_few, val_f1s_few,
+        train_accs_few, val_accs_few,
+        best_epoch_few, best_val_auc_few, best_threshold_few
+        ) = train_and_validate(args, model_few, train_loader_few_s, val_loader_few_s, criterion, optimizer_few, 
+                            device, args.train_epochs, is_binary, mode="Few")
 
-    logger.info("[Few-shot] Final Testing with best threshold from Validation")
+    logger.info("[Phase 2: Few-shot] Final Testing with best threshold from Validation")
     (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
     test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(model_few, test_loader_few_s, criterion, device, is_binary, 
                                                         threshold=best_threshold_few)
 
-
-
-    
+    # 기존과 동일한 결과 처리
     if args.few_shot == 4:
         full_ours_results = wrap_up_results_(
             train_losses=train_losses_full, 
             val_losses=val_losses_full,
-            test_losses=[],  # 필요하면 test_loss 리스트 넣기
+            test_losses=[],
             train_aucs=train_aucs_full,
             val_aucs=val_aucs_full,
             test_aucs=[test_auc_full], 
@@ -398,8 +692,7 @@ def main():
     else: 
         full_ours_results = None
 
-
-    few_ours_results = wrap_up_results_(  # wrap_up_results에서 wrap_up_results_로 변경
+    few_ours_results = wrap_up_results_(
     train_losses_few, val_losses_few, [],
     train_aucs_few, val_aucs_few, [test_auc_few],
     train_precisions_few, val_precisions_few, [test_precision_few],
@@ -412,7 +705,6 @@ def main():
     val_accs=val_accs_few,
     test_accs=[test_acc_few]
 )
-
 
     results = prepare_results_(full_ours_results, few_ours_results)
 

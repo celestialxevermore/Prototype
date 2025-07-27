@@ -475,9 +475,9 @@ def get_few_shot_embedding_samples(train_loader, args):
        support_data.extend(selected)
    
    total_samples = num_classes * shot_per_class
-   print(f"Few-shot training data size: {len(support_data)} (={num_classes} classes × {shot_per_class} shots)")
+   #print(f"Few-shot training data size: {len(support_data)} (={num_classes} classes × {shot_per_class} shots)")
    class_dist = Counter([data['y'].item() for data in support_data])
-   print(f"Class distribution in few-shot data: {dict(class_dist)}")
+   #print(f"Class distribution in few-shot data: {dict(class_dist)}")
    
    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 

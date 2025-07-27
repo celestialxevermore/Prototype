@@ -14,6 +14,168 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class Prototype:
+    def __init__(self, num_classes, input_dim, momentum=0.99, device='cuda'):
+        self.num_classes = num_classes
+        self.input_dim = input_dim
+        self.momentum = momentum
+        self.device = device 
+
+        self.prototypes = torch.empty(num_classes, input_dim, device=device)
+        nn.init.xavier_normal_(self.prototypes, gain=0.1)
+        self.prototype_counts = torch.zeros(num_classes).to(device)
+        self.initialized = torch.zeros(num_classes, dtype=torch.bool).to(device)
+        self.source_prototypes = None 
+        
+    def update(self, embeddings, labels):
+        unique_labels = torch.unique(labels)
+        for class_id in unique_labels:
+            class_mask = (labels == class_id)
+            class_embeddings = embeddings[class_mask]
+
+            if len(class_embeddings) == 0:
+                continue 
+                
+            batch_prototype = class_embeddings.mean(dim=0)
+
+            if not self.initialized[class_id]:
+                self.prototypes[class_id] = batch_prototype
+                self.initialized[class_id] = True
+            else:
+                self.prototypes[class_id] = (
+                    self.momentum * self.prototypes[class_id] + (1 - self.momentum) * batch_prototype 
+                )
+            self.prototype_counts[class_id] += len(class_embeddings)
+            
+    def compute_prototype_assignment_loss(self, embeddings, labels, temperature=2.0):
+        distances = torch.cdist(embeddings, self.prototypes)
+        similarities = -distances / temperature
+        labels = labels.to(self.device)
+        assignment_loss = F.cross_entropy(similarities, labels) 
+        return assignment_loss
+        
+    def save_prototypes(self, save_path):
+        prototype_dict = {
+            "prototypes": self.prototypes.cpu(),
+            "prototype_counts": self.prototype_counts.cpu(),
+            "initialized": self.initialized.cpu(),
+            "num_classes": self.num_classes,
+            "input_dim": self.input_dim
+        }
+        torch.save(prototype_dict, save_path)
+        logger.info(f"Source Prototypes saved to {save_path}")
+        
+    def load_prototypes(self, load_path):
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"Prototype file not found: {load_path}")
+        prototype_dict = torch.load(load_path, map_location=self.device)
+        self.source_prototypes = prototype_dict['prototypes'].to(self.device)
+        logger.info(f"Source prototypes loaded from {load_path}")
+        
+    def compute_prototype_distance_loss(self, embeddings, labels):
+        if self.source_prototypes is None:
+            raise ValueError("source prototypes not loaded!")
+        
+        labels = labels.to(self.device)
+        source_distances = torch.cdist(embeddings, self.source_prototypes)
+        source_predictions = F.softmax(-source_distances, dim=1)
+        loss = F.cross_entropy(source_predictions, labels)
+        return loss
+
+
+class PrototypeModel(nn.Module):
+    """
+    Wrapper class that adds prototype learning to existing model
+    """
+    def __init__(self, base_model, args):
+        super().__init__()
+        self.base_model = base_model
+        self.args = args
+        
+        # Initialize prototype manager
+        self.Prototype = Prototype(
+            num_classes=args.num_classes, 
+            input_dim=args.input_dim, 
+            momentum=getattr(args, 'prototype_momentum', 0.99), 
+            device=base_model.device
+        )
+        
+        # Training phase and loss weights
+        self.training_phase = base_model.mode
+        self.few_shot_alpha = 0.3
+        self.few_shot_beta = 0.7
+        
+    def forward(self, batch, y):
+        target = y.to(self.base_model.device)
+        if self.base_model.num_classes == 2:
+            target = target.view(-1, 1).float()
+            labels_for_prototype = y.squeeze().long() 
+        else:
+            target = target.squeeze().long()
+            labels_for_prototype = target
+            
+        # Use the base model's compute_cls_embedding method instead of duplicating
+        cls_embeddings = self.base_model.compute_cls_embedding(batch)
+        pred = self.base_model.predictor(cls_embeddings)
+        classification_loss = self.base_model.criterion(pred, target)
+        
+        if self.training_phase == "Full":
+            # Phase 1: Full-shot training with prototype learning
+            with torch.no_grad():
+                self.Prototype.update(cls_embeddings, labels_for_prototype)
+            prototype_loss = self.Prototype.compute_prototype_assignment_loss(
+                cls_embeddings, labels_for_prototype
+            )
+            total_loss = classification_loss + 0.1 * prototype_loss 
+            return total_loss 
+            
+        elif self.training_phase == "Few":
+            # Phase 2: Few-shot training with prototype regularization
+            try:
+                distance_loss = self.Prototype.compute_prototype_distance_loss(
+                    cls_embeddings, labels_for_prototype
+                )
+                total_loss = self.few_shot_alpha * classification_loss + self.few_shot_beta * distance_loss
+                return total_loss 
+            except ValueError as e:
+                logger.warning(f"Prototype distance loss failed: {e}. Using Classification loss only")
+                return classification_loss
+        else:
+            return classification_loss
+            
+    def save_prototypes(self, save_dir):
+        """Save prototypes after Phase 1 with unique naming"""
+        os.makedirs(save_dir, exist_ok=True)
+        
+        no_self_loop_str = "NoSelfLoop" if getattr(self.args, 'no_self_loop', False) else "WithSelfLoop"
+        
+        filename = (f"prototypes_{self.args.source_data}_"
+                   f"Attn:{self.args.attn_type}_"
+                   f"{no_self_loop_str}_"
+                   f"Seed:{self.args.random_seed}.pt")
+        
+        save_path = os.path.join(save_dir, filename)
+        self.Prototype.save_prototypes(save_path)
+        logger.info(f"Source Prototypes saved to {save_path}")
+        return save_path
+    
+    def load_source_prototypes(self, prototype_path):
+        """Load source prototypes for Phase 2"""
+        self.Prototype.load_prototypes(prototype_path)
+        
+    def predict(self, batch):
+        """For compatibility with evaluation functions"""
+        return self.base_model.predict(batch)
+
+
+def prototype_learning(model, args):
+    """
+    Convert existing model to prototype learning model
+    """
+    return PrototypeModel(model, args)
+
+
 class AdaptiveGraphAttention(nn.Module):
     def __init__(
         self,
@@ -328,6 +490,7 @@ class AdaptiveGraphAttention(nn.Module):
         
         return output, attn_weights
 
+
 class Model(nn.Module):
     def __init__(
             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model, experiment_id, mode):
@@ -351,16 +514,6 @@ class Model(nn.Module):
         self.experiment_id = experiment_id
         self.mode = mode
         self.num_classes = args.num_classes
-        
-        # GMM 관련 속성 추가
-        self.use_gmm = args.use_gmm 
-        self.use_gmm2 = args.use_gmm2
-        self.num_prototypes = args.num_prototypes
-        self.stage_num = args.gmm_stage_num
-        self.momentum = args.gmm_momentum 
-        self.beta = args.gmm_beta 
-        self.lambd = args.gmm_lambda
-        self.eps = args.gmm_eps
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
@@ -572,6 +725,57 @@ class Model(nn.Module):
         
         return filtered_desc_embeddings, filtered_name_value_embeddings
 
+    def compute_cls_embedding(self, batch):
+        """
+        CLS embedding을 계산하는 공통 메서드
+        PrototypeModel과 Model에서 공통으로 사용
+        
+        Args:
+            batch: 입력 배치 데이터
+            
+        Returns:
+            torch.Tensor: CLS embedding [batch_size, input_dim]
+        """
+        label_description_embeddings = batch['label_description_embeddings'].to(self.device)
+        desc_embeddings = [] 
+        name_value_embeddings = [] 
+
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
+            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
+            name_value_embeddings.append(cat_name_value_embeddings)
+            desc_embeddings.append(cat_desc_embeddings)
+            
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
+            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
+            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
+            name_value_embeddings.append(num_prompt_embeddings)
+            desc_embeddings.append(num_desc_embeddings)
+        
+        desc_embeddings, name_value_embeddings = self.remove_feature(
+            batch, desc_embeddings, name_value_embeddings
+        )
+        
+        if not desc_embeddings or not name_value_embeddings:
+            raise ValueError("No categorical or numerical features found in batch")
+
+        desc_embeddings = torch.cat(desc_embeddings, dim=1)
+        name_value_embeddings = torch.cat(name_value_embeddings, dim=1)
+        
+        # Add CLS token
+        cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
+        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
+        x = name_value_embeddings
+        
+        # Pass through attention layers
+        for i, layer in enumerate(self.layers):
+            norm_x = self.layer_norms[i](x)
+            attn_output, attn_weights = layer(desc_embeddings, norm_x)
+            x = x + attn_output
+    
+        # Return CLS embedding
+        cls_embedding = x[:, 0, :]
+        return cls_embedding
 
     def forward(self, batch, y):        
         target = y.to(self.device)
@@ -587,55 +791,9 @@ class Model(nn.Module):
         return loss
 
     def predict(self, batch):
-        
-        label_description_embeddings = batch['label_description_embeddings'].to(self.device)
-        desc_embeddings = [] 
-        name_value_embeddings = [] 
-
-
-        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-            cat_name_value_embeddings = batch['cat_name_value_embeddings'].to(self.device)
-            cat_desc_embeddings = batch['cat_desc_embeddings'].to(self.device)
-            
-            name_value_embeddings.append(cat_name_value_embeddings)
-            desc_embeddings.append(cat_desc_embeddings)
-            
-        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-            num_prompt_embeddings = batch['num_prompt_embeddings'].to(self.device)
-            num_desc_embeddings = batch['num_desc_embeddings'].to(self.device)
-            name_value_embeddings.append(num_prompt_embeddings)
-            desc_embeddings.append(num_desc_embeddings)
-        
-        
-        desc_embeddings, name_value_embeddings = self.remove_feature(
-            batch, desc_embeddings, name_value_embeddings
-        )
-        
-        
-        if not desc_embeddings or not name_value_embeddings:
-            raise ValueError("No categorical or numerical features found in batch")
-
-        desc_embeddings = torch.cat(desc_embeddings, dim = 1)
-        name_value_embeddings = torch.cat(name_value_embeddings, dim = 1)
-        
-        '''
-            1. [CLS] Token
-        '''
-        attention_weights = [] 
-        cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
-        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
-        x = name_value_embeddings
-        
-        '''
-            2. Graph Attention Layers
-        '''
-        for i, layer in enumerate(self.layers):
-            norm_x = self.layer_norms[i](x)
-            attn_output, attn_weights = layer(desc_embeddings, norm_x)
-            attention_weights.append(attn_weights)
-            x = x + attn_output
-    
-        pred = x[:, 0, :]
-        pred = self.predictor(pred)
-
+        """
+        CLS embedding 계산 로직을 compute_cls_embedding으로 위임
+        """
+        cls_embedding = self.compute_cls_embedding(batch)
+        pred = self.predictor(cls_embedding)
         return pred

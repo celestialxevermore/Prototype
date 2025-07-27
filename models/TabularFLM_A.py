@@ -354,7 +354,8 @@ class Model(nn.Module):
         
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
-        nn.init.kaiming_uniform_(self.cls, a = math.sqrt(5))
+        #Optuna 결과를 반영한 수정 코드 nn.init_kaiming_uniform_(self.cls, a = math.sqrt(5))
+        nn.init.normal_(self.cls, mean=0.0, std=0.01)
 
         '''
             MLP(CONCAT[Name embedding, Value embedding])

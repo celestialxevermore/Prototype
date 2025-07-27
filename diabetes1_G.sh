@@ -1,6 +1,4 @@
-#!/bin/bash
-
-gpu_id=4
+gpu_id=0
 source_datasets="adult"
 random_seeds="42 44 46 48 50"
 embed_types="carte"
@@ -17,10 +15,10 @@ for random_seed in $random_seeds; do
                        
                        # Self-loop 유지 버전
                        echo "Running experiment - WITH self-loop"
-                       CUDA_VISIBLE_DEVICES=$gpu_id python main_PP.py \
+                       CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
                        --random_seed $random_seed \
                        --source_data $source_dataset \
-                       --base_dir 'test20250726_with_self_loop_prototypePPPP' \
+                       --base_dir 'test20250726_with_self_loop_main_G' \
                        --embed_type $embed_type \
                        --edge_type $edge_type \
                        --attn_type $attn_type \
@@ -30,10 +28,10 @@ for random_seed in $random_seeds; do
 
                        # Self-loop 제거 버전  
                        echo "Running experiment - WITHOUT self-loop"
-                       CUDA_VISIBLE_DEVICES=$gpu_id python main_PP.py \
+                       CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
                        --random_seed $random_seed \
                        --source_data $source_dataset \
-                       --base_dir 'test20250726_no_self_loop_prototypePPPP' \
+                       --base_dir 'test20250726_no_self_loop_main_G' \
                        --embed_type $embed_type \
                        --edge_type $edge_type \
                        --attn_type $attn_type \
@@ -53,10 +51,9 @@ done
 
 
 
-
 # gpu_id=4
-# source_datasets="heart"
-# random_seeds="2095 3192 3155 67 1045"
+# source_datasets="diabetes"
+# random_seeds="4078 73 96 218 4142"
 # embed_types="carte"
 # edge_types="mlp"
 # attn_types="gat_v1"

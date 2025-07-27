@@ -17,10 +17,10 @@ for random_seed in $random_seeds; do
                        
                        # Self-loop 유지 버전
                        echo "Running experiment - WITH self-loop"
-                       CUDA_VISIBLE_DEVICES=$gpu_id python main_PP.py \
+                       CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
                        --random_seed $random_seed \
                        --source_data $source_dataset \
-                       --base_dir 'test20250726_with_self_loop_prototypePPPP' \
+                       --base_dir 'test20250726_with_self_loop_main_G' \
                        --embed_type $embed_type \
                        --edge_type $edge_type \
                        --attn_type $attn_type \
@@ -30,10 +30,10 @@ for random_seed in $random_seeds; do
 
                        # Self-loop 제거 버전  
                        echo "Running experiment - WITHOUT self-loop"
-                       CUDA_VISIBLE_DEVICES=$gpu_id python main_PP.py \
+                       CUDA_VISIBLE_DEVICES=$gpu_id python main_G.py \
                        --random_seed $random_seed \
                        --source_data $source_dataset \
-                       --base_dir 'test20250726_no_self_loop_prototypePPPP' \
+                       --base_dir 'test20250726_no_self_loop_main_G' \
                        --embed_type $embed_type \
                        --edge_type $edge_type \
                        --attn_type $attn_type \
