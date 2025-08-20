@@ -51,7 +51,7 @@ def get_args():
     parser.add_argument('--n_heads', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_data', type=str, default='heart', 
-                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast','magic_telescope','forest_covertype_sampled', 'higgs_sampled'])
+                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast','magic_telescope','forest_covertype_sampled', 'higgs_sampled'])
     parser.add_argument('--target_data', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -340,7 +340,7 @@ def main():
         best_epoch_full, best_val_auc_full, best_threshold_full
         ) = train_and_validate(args, model_full, train_loader_full_s, val_loader_full_s, criterion, optimizer_full, 
                             device, args.train_epochs, is_binary, mode="Full")
-        pdb.set_trace()
+        #pdb.set_trace()
         logger.info("[Full-shot] Final Testing with best threshold from Validation")
         (test_loss_full, test_auc_full, test_precision_full, test_recall_full, test_f1_full,
         test_acc_full, all_y_true_full, all_y_pred_full) = final_test_evaluate(model_full, test_loader_full_s, criterion, device, is_binary, 
