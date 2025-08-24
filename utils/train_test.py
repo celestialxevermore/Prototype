@@ -69,3 +69,15 @@ def multi_evaluate(model, loader, criterion, device):
     
     test_loss /= len(loader.dataset)
     return test_loss, np.array(y_true), np.array(y_pred)
+
+def _binary_log_loss(y_true, y_prob, eps=1e-7):
+    p = np.clip(np.asarray(y_prob), eps, 1 - eps)
+    y = np.asarray(y_true).astype(np.float32)
+    return float(-np.mean(y * np.log(p) + (1-y) * np.log(1-p)))
+
+def _multiclass_log_loss(y_true, y_prob, eps=1e-7):
+    P = np.asarray(y_prob)
+    P = np.clip(P, eps, 1 - eps)
+    P = P / P.sum(axis = 1, keepdims=True)
+    y = np.asarray(y_true).astype(int)
+    return float(-np.mean(np.log(P[np.arange(len(y)), y])))

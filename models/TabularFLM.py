@@ -404,8 +404,7 @@ class BasisGATLayer(AdaptiveGraphAttention):
         q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        
-        # 어텐션 가중치 계산 (연구원님의 모든 로직 포함)
+
         #attn_weights = None # Initialize
         q_expanded = q.unsqueeze(3).expand(-1, -1, -1, new_seq, -1)
         k_expanded = k.unsqueeze(2).expand(-1, -1, new_seq, -1, -1)
