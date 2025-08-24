@@ -122,7 +122,9 @@ def wrap_up_results_(train_losses, val_losses, test_losses,
                     all_y_true, all_y_pred, 
                     best_epoch, best_ours_auc, best_ours_acc, 
                     best_ours_precision, best_ours_recall, best_ours_f1,
-                    train_accs, val_accs, test_accs) -> dict:
+                    train_accs, val_accs, test_accs,
+                    train_auprcs=None, val_auprcs=None, test_auprcs=None,
+                    best_ours_auprc=None) -> dict:
     """
     학습, 검증 및 평가 결과를 정리하는 함수.
 
@@ -160,6 +162,9 @@ def wrap_up_results_(train_losses, val_losses, test_losses,
         'train_f1s': train_f1s,
         'val_f1s': val_f1s,
         'test_f1s': test_f1s,
+        'train_auprcs': train_auprcs or [],
+        'val_auprcs': val_auprcs or [],
+        'test_auprcs': test_auprcs or [],
         'all_y_true': all_y_true, 
         'all_y_pred': all_y_pred,
         'best_epoch': best_epoch,
@@ -168,6 +173,7 @@ def wrap_up_results_(train_losses, val_losses, test_losses,
         'best_ours_precision': best_ours_precision,
         'best_ours_recall': best_ours_recall,
         'best_ours_f1': best_ours_f1,
+        'best_ours_auprc': best_ours_auprc,
         'train_accs': train_accs,
         'val_accs': val_accs,
         'test_accs': test_accs
@@ -179,16 +185,17 @@ def wrap_up_results_(train_losses, val_losses, test_losses,
 def prepare_results_(full_ours_results, few_ours_results):
     if full_ours_results is None:
         results = {
-            'Best_results': {
-                "Ours": "The results of source are already given. Check the initial results.",
-                "Ours_few": {
-                    "Ours_best_few_auc": few_ours_results['best_ours_auc'],
-                    "Ours_best_few_acc": few_ours_results['best_ours_acc'],
-                    "Ours_best_few_precision": few_ours_results.get('best_ours_precision'),
-                    "Ours_best_few_recall": few_ours_results.get('best_ours_recall'),
-                    "Ours_best_few_f1": few_ours_results.get('best_ours_f1'),
-                }
-            },
+                    'Best_results': {
+            "Ours": "The results of source are already given. Check the initial results.",
+            "Ours_few": {
+                "Ours_best_few_auc": few_ours_results['best_ours_auc'],
+                "Ours_best_few_acc": few_ours_results['best_ours_acc'],
+                "Ours_best_few_precision": few_ours_results.get('best_ours_precision'),
+                "Ours_best_few_recall": few_ours_results.get('best_ours_recall'),
+                "Ours_best_few_f1": few_ours_results.get('best_ours_f1'),
+                "Ours_best_few_auprc": few_ours_results.get('best_ours_auprc'),
+            }
+        },
             "Full_results": {
                 "Ours": "The results of source are already given. Check the initial results.",
                 "Ours_few": {
@@ -221,6 +228,7 @@ def prepare_results_(full_ours_results, few_ours_results):
                     "Ours_best_few_precision": few_ours_results.get('best_ours_precision'),
                     "Ours_best_few_recall": few_ours_results.get('best_ours_recall'),
                     "Ours_best_few_f1": few_ours_results.get('best_ours_f1'),
+                    "Ours_best_few_auprc": few_ours_results.get('best_ours_auprc'),
                 }
             },
             "Full_results": {
@@ -423,7 +431,9 @@ def save_results_(args, results):
         "del_feature" : args.del_feat,
         "no_self_loop" : args.no_self_loop,
         "del_exp": getattr(args, 'del_exp', 'unknown'),
-        "results": results['Best_results']
+        "results": results['Best_results'], 
+        "source_data" : args.source_data,
+        "target_data" : args.target_data,
     }
     
     with open(filepath, 'w') as f:

@@ -14,6 +14,51 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class CoordinatorMLP(nn.Module):
+    """
+        GAT encoder의 CLS embedding을 입력 받아,
+        K개의 basis function(Attention head)에 대한 좌표(가중치)를 생성한다.
+    """
+    def __init__(self, input_dim: int, hidden_dim : int, k_basis : int, dropout : float = 0.1):
+        """
+            Args:
+                input_dim (int) CLS dimension 
+                hidden_dim (int) MLP
+                k_basis (int) : 생성할 좌표의 개수 (Basis function / Expert head의 개수)
+                dropout (float) : dropout rate
+        """
+        super().__init__()
+        self.k_basis = k_basis 
+        self.input_dim = input_dim 
+        self.hidden_dim = hidden_dim 
+        self.dropout = dropout 
+        self.coordinate_mlp = nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_dim, self.k_basis),
+            nn.Softmax(dim = -1)
+        )
+        self._init_weights() 
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn_init.kaiming_uniform_(m.weight, a = math.sqrt(5))
+                if m.bias is not None:
+                    nn_init.zeros_(m.bias)
+    def forward(self, cls_emb : torch.Tensor) -> torch.Tensor:
+        """
+            Args:
+                cls (torch.Tensor) : [batch_size, input_dim]
+            Returns:
+                torch.Tensor : [batch_size, k_basis]
+        """    
+        coordinates = self.coordinate_mlp(cls_emb)
+        
+        return coordinates
+
+
 class AdaptiveGraphAttention(nn.Module):
     def __init__(
         self,
@@ -328,6 +373,81 @@ class AdaptiveGraphAttention(nn.Module):
         
         return output, attn_weights
 
+class BasisGATLayer(AdaptiveGraphAttention):
+
+    def __init__(self, args, input_dim: int, hidden_dim: int, n_heads: int, dropout: float = 0.1):
+        # 부모 클래스(AdaptiveGraphAttention)의 __init__을 그대로 호출합니다.
+        super().__init__(args, input_dim, hidden_dim, n_heads, dropout)
+        
+        # [핵심 변경점]
+        # 헤드별 출력을 독립적으로 사용하기 위해 최종 프로젝션을 제거합니다.
+        if hasattr(self, 'out_proj'):
+            del self.out_proj
+
+    def forward(self, desc_embeddings, name_value_embeddings):
+        batch_size, new_seq, _ = name_value_embeddings.shape
+        seq_len = new_seq - 1
+
+        # Adjacency Matrix 설정
+        self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
+        if self.args.no_self_loop:
+            self.adjacency = self._no_self_interaction(self.adjacency)
+
+        new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=self.adjacency.device)
+        new_adjacency[:, 1:, 1:] = self.adjacency
+        new_adjacency[:, 0, 1:] = 1.0  # CLS -> Var
+        new_adjacency[:, 1:, 0] = 0.0  # Var -> CLS (비대칭 어텐션)
+        
+        self.new_adjacency = new_adjacency
+
+
+        q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        # 어텐션 가중치 계산 (연구원님의 모든 로직 포함)
+        #attn_weights = None # Initialize
+        q_expanded = q.unsqueeze(3).expand(-1, -1, -1, new_seq, -1)
+        k_expanded = k.unsqueeze(2).expand(-1, -1, new_seq, -1, -1)
+
+        node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+        node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+        var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim=-1)
+        cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+        edge_dim = var_edge_attr.size(-1)
+        edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+        edge_attr[:, 1:, 1:] = var_edge_attr
+        edge_attr[:, 0, 1:] = cls_edge_attr
+        edge_attr[:, 1:, 0] = cls_edge_attr
+        
+        edge_attr = self.edge_update(edge_attr)
+        edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+        edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+        edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+
+        qke_expanded = torch.cat([q_expanded, k_expanded, edge_attr], dim=-1)
+
+        if self.args.attn_type == 'gat_v2':
+            activated_features = F.leaky_relu(qke_expanded)
+            attn_weights = self.attn_proj(activated_features).squeeze(-1)
+        else: # gat_v1
+            attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+
+        
+        # 마스킹 및 Softmax
+        mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
+        attn_weights = attn_weights + mask 
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+
+        context = torch.matmul(attn_weights, v)  # context shape: [batch, n_heads, new_seq, head_dim]
+
+        # [핵심] 헤드별 결과물을 분리된 상태로 유지하여 반환
+        basis_outputs = context.transpose(1, 2)  # shape: [batch, new_seq, n_heads, head_dim]
+        return basis_outputs, attn_weights
+
+
+
 class Model(nn.Module):
     def __init__(
             self, args, input_dim, hidden_dim, output_dim, num_layers, dropout_rate, llm_model, experiment_id, mode):
@@ -343,32 +463,23 @@ class Model(nn.Module):
         self.output_dim = output_dim 
         self.num_layers = num_layers
         self.source_data = args.source_data
-        num_layers = args.num_layers
-        dropout_rate = args.dropout_rate
-        llm_model = args.llm_model
+        self.num_layers = args.num_layers
+        self.dropout_rate = args.dropout_rate
+        self.llm_model = args.llm_model
         self.meta_type = args.meta_type
-        self.enc_type = args.enc_type
         self.experiment_id = experiment_id
         self.mode = mode
         self.num_classes = args.num_classes
-        
-        # GMM 관련 속성 추가
-        self.use_gmm = args.use_gmm 
-        self.use_gmm2 = args.use_gmm2
-        self.num_prototypes = args.num_prototypes
-        self.stage_num = args.gmm_stage_num
-        self.momentum = args.gmm_momentum 
-        self.beta = args.gmm_beta 
-        self.lambd = args.gmm_lambda
-        self.eps = args.gmm_eps
         self.criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
+        self.dropout = nn.Dropout(args.dropout_rate)
         '''
             MLP(CONCAT[Name embedding, Value embedding])
             - In order to infuse the information of name and value simultaneously. 
         '''
-        self.layers = nn.ModuleList([
+
+        self.shared_layers = nn.ModuleList([
             AdaptiveGraphAttention(
                 args = args,
                 input_dim = self.input_dim, 
@@ -376,25 +487,22 @@ class Model(nn.Module):
                 n_heads = args.n_heads,
                 dropout = args.dropout_rate,
                 threshold = self.threshold
-            ) for _ in range(args.num_layers)
+            ) for _ in range(args.num_layers - 1)
         ])
-        self.layer_norms = nn.ModuleList([
-            nn.LayerNorm(self.input_dim) for _ in range(args.num_layers)
+        
+
+        self.shared_layer_norms = nn.ModuleList([
+            nn.LayerNorm(self.input_dim) for _ in range(args.num_layers - 1)
         ])
-        self.dropout = nn.Dropout(args.dropout_rate)
-        self.predictor = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
 
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
-
-                nn.Linear(hidden_dim, output_dim)
-            ).to(self.device)
+        self.coordinator = CoordinatorMLP(input_dim, hidden_dim, args.k_basis, args.dropout_rate)
+        # BasisGAT -> BasisGATLayer로 수정
+        self.basis_layer = BasisGATLayer(args, input_dim, hidden_dim, args.k_basis, args.dropout_rate)
+        self.basis_layer_norm = nn.LayerNorm(input_dim) 
+        self.expert_predictors = nn.ModuleList([ 
+            nn.Linear(input_dim // args.k_basis, output_dim) for _ in range(args.k_basis)
+        ])
+        
         self.criterion = nn.BCEWithLogitsLoss() if self.num_classes ==2 else nn.CrossEntropyLoss()
         self._init_weights()
         
@@ -623,19 +731,31 @@ class Model(nn.Module):
         '''
         attention_weights = [] 
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
-        name_value_embeddings = torch.cat([cls_token, name_value_embeddings], dim=1)
-        x = name_value_embeddings
+        x = torch.cat([cls_token, name_value_embeddings], dim=1)
         
         '''
-            2. Graph Attention Layers
+            2. Shared Graph Attention Layers
         '''
-        for i, layer in enumerate(self.layers):
-            norm_x = self.layer_norms[i](x)
+        for i, layer in enumerate(self.shared_layers):
+            norm_x = self.shared_layer_norms[i](x)
             attn_output, attn_weights = layer(desc_embeddings, norm_x)
             attention_weights.append(attn_weights)
             x = x + attn_output
     
-        pred = x[:, 0, :]
-        pred = self.predictor(pred)
+        shared_cls = x[:, 0, :]
+        coordinates = self.coordinator(shared_cls)
+
+        norm_x = self.basis_layer_norm(x)
+        basis_outputs, _ = self.basis_layer(desc_embeddings, norm_x)
+
+        expert_outputs = basis_outputs[:, 0, :, :]
+
+        expert_predictions = [] 
+        for i in range(self.args.k_basis):
+            pred = self.expert_predictors[i](expert_outputs[:, i, :])
+            expert_predictions.append(pred)
+        expert_predictions = torch.stack(expert_predictions, dim = 1)
+
+        pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim=1)
 
         return pred

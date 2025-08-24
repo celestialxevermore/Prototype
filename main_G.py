@@ -49,6 +49,7 @@ def get_args():
     parser.add_argument('--num_layers', type = int, default = 3)
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
     parser.add_argument('--n_heads', type = int, default = 4)
+    parser.add_argument('--k_basis', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_data', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast','magic_telescope','forest_covertype_sampled', 'higgs_sampled'])
@@ -77,16 +78,6 @@ def get_args():
     parser.add_argument('--del_feat', nargs='+', default = [], help='Features to remove from the model. Usage: --del_feat feature1 feature2 feature3')
     parser.add_argument('--del_exp', default="You did not entered the exp type", choices=['exp1','exp2','exp3','exp4','exp5'])
     parser.add_argument('--no_self_loop', action='store_true', help="activate the self loop of the Graph attention network")
-    # GMM 관련 인자 추가
-    parser.add_argument('--use_gmm', action='store_true', help='Use GMM1 module')
-    parser.add_argument('--use_gmm2', action='store_true', help='Use GMM2 module')
-    parser.add_argument('--num_prototypes', type=int, default=32, help='Number of prototypes(phenotypes) in GMM')
-    parser.add_argument('--gmm_stage_num', type=int, default=10, help='EM step iterations in GMM')
-    parser.add_argument('--gmm_momentum', type=float, default=0.9, help='Momentum for prototype updates')
-    parser.add_argument('--gmm_beta', type=float, default=1.0, help='Weight for reconstructed embedding')
-    parser.add_argument('--gmm_lambda', type=float, default=2.0, help='Temperature parameter for responsibility')
-    parser.add_argument('--gmm_eps', type=float, default=1e-6, help='Small value for numerical stability')
-    parser.add_argument('--hard', action='store_true', help='Temperature parameter for Gumbel-Softmax')
     ## 시각화 관련 인자 추가
     parser.add_argument('--viz_heatmap', action='store_true', help='Visualize heatmap')
     parser.add_argument('--viz_graph', action='store_true', help='Visualize graph')

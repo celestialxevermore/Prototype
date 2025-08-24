@@ -22,6 +22,7 @@ class TabularToEmbeddingDataset:
             "cleveland": ['target_binary', ['no','yes']],
             "credit-g" :['target_binary', ['no','yes']],
             "hungarian": ['target_binary', ['no','yes']],
+            "blood" : ['target_binary', ['no', 'yes']],
             "switzerland": ['target_binary', ['no','yes']],
             "heart_statlog": ['target_binary', ['no','yes']],
             "adult": ['target_binary', ['no','yes']],
@@ -34,6 +35,7 @@ class TabularToEmbeddingDataset:
             "car": ['target_multiclass', ['unacceptable', 'acceptable', 'very good', 'good']],
             'forest_covertype_sampled': ['target_multiclass', [1,2,3,4,5,6,7]],
             "communities": ['target_multiclass', ['medium', 'high', 'low']],
+
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)
 
@@ -82,6 +84,9 @@ class TabularToEmbeddingDataset:
             elif data_name == 'credit-g' and 'class' in DATASETS.columns:
                 DATASETS['target_binary'] = DATASETS['class']
                 DATASETS = DATASETS.drop('class', axis = 1)
+            elif data_name == 'blood' and 'Class' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['Class']
+                DATASETS = DATASETS.drop('Class', axis = 1)
 
             
             class_mapping = {label: idx for idx, label in enumerate(class_values)}
@@ -188,6 +193,7 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
+        'blood',
         #'credit-g',
         #"communities",
         #"forest_covertype_sampled",
@@ -200,7 +206,7 @@ if __name__ == "__main__":
         #"heart_target_1",
         #"heart_target_2",
         #"heart_target_3",
-        "heart_target_4",
+        #"heart_target_4",
         #"diabetes",
         #"adult"
     ]
