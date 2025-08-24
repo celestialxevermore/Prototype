@@ -18,7 +18,7 @@ images/*.png
 *.cost
 *.delay
 *.group
-
+*.npz
 # Pretrained models
 pretrained_models/
 *.pt
@@ -27,6 +27,7 @@ pretrained_models/
 *.ckpt
 *.model
 *.h5
+
 
 # Experiment results
 experiments/
