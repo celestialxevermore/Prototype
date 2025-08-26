@@ -432,6 +432,8 @@ def save_results_(args, results):
         "no_self_loop" : args.no_self_loop,
         "del_exp": getattr(args, 'del_exp', 'unknown'),
         "results": results['Best_results'], 
+        #"shared_connectivity" : args.shared_connectivity,
+        #"basis_connectivity" : args.basis_connectivity,
         "source_data" : args.source_data,
         "target_data" : args.target_data,
     }
