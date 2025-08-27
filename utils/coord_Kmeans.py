@@ -4,7 +4,7 @@ import torch
 import logging
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-
+import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 @torch.no_grad()
@@ -44,6 +44,10 @@ def _silhouette(C, labels, max_eval=50000):
         C_eval = C
         labels_eval = labels
     return silhouette_score(C_eval, labels_eval, metric='euclidean')
+
+
+
+
 
 @torch.no_grad()
 def compute_coordinate_centroids_auto(
@@ -87,3 +91,32 @@ def compute_coordinate_centroids_auto(
 
     logger.info(f"[coord] best_k={best_k} silhouette={best_score:.4f}")
     return torch.from_numpy(best_centers), int(best_k), scores
+def _normalize_simplex(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    x = torch.clamp(x, min=eps)
+    return x / x.sum(dim=-1, keepdim=True)
+    
+@torch.no_grad()
+def build_centroid_target(c: torch.Tensor,
+                          centroids: torch.Tensor,
+                          tau: float = 0.3,
+                          mode: str = "soft") -> torch.Tensor:
+    """
+    c: [B, K]  (device: whatever the model is on)
+    centroids: [K*, K]
+    return q: [B, K*]
+    """
+    device = c.device
+    c = c.to(device=device, dtype=torch.float32)
+    centroids = centroids.to(device=device, dtype=torch.float32)
+
+    # 거리 기반 할당
+    dists = torch.cdist(c, centroids, p=2)  # [B, K*]
+
+    if mode == "hard":
+        idx = torch.argmin(dists, dim=1)               # [B]
+        q = torch.zeros_like(dists)                    # [B, K*]
+        q.scatter_(1, idx.unsqueeze(1), 1.0)
+        return q
+    else:
+        # soft assignment
+        return F.softmax(-dists / max(tau, 1e-6), dim=1)

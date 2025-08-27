@@ -6,98 +6,263 @@ edge_types="mlp"
 attn_types="gat_v1"
 few_shots="4 8 16 32 64"
 
+gpu_id=4
+random_seeds="42 44 46 48 50"
+embed_types="carte"
+edge_types="mlp"
+attn_types="gat_v1"
+few_shots="4 8 16 32 64"
 
-
-
-# 시나리오 1: heart_target_1,2,3 -> heart
-echo "=== 시나리오 1: heart_target_1,2,3 -> heart ==="
+# 시나리오 1: diabetes,credit-g,breast -> heart
+echo "=== 시나리오 1: diabetes,credit-g,breast -> heart ==="
 for random_seed in $random_seeds; do
     for few_shot in $few_shots; do
         for embed_type in $embed_types; do
             for attn_type in $attn_types; do
                 for edge_type in $edge_types; do
-                    echo "Running experiment - heart_target_1,2,3 -> heart"
+                    echo "Running experiment - diabetes,credit-g,breast -> heart (S_baseline_B_baseline)"
                     CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
                     --random_seed $random_seed \
-                    --source_data heart_target_1 heart_target_2 heart_target_3 \
+                    --source_data diabetes credit-g breast \
                     --target_data heart \
-                    --base_dir '/storage/personal/eungyeop/experiments' \
-                    --embed_type $embed_type \
-                    --edge_type $edge_type \
-                    --attn_type $attn_type \
-
-                done
-            done
-        done
-    done
-done
-
-# 시나리오 1: heart_target_1,2,3 -> heart
-echo "=== 시나리오 1: heart_target_1,2,3 -> heart ==="
-for random_seed in $random_seeds; do
-    for few_shot in $few_shots; do
-        for embed_type in $embed_types; do
-            for attn_type in $attn_types; do
-                for edge_type in $edge_types; do
-                    echo "Running experiment - heart_target_1,2,3,4 -> heart"
-                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
-                    --random_seed $random_seed \
-                    --source_data heart_target_1 heart_target_2 heart_target_3 heart_target_4 \
-                    --target_data heart \
-                    --base_dir 'test20250825' \
-                    --embed_type $embed_type \
-                    --edge_type $edge_type \
-                    --attn_type $attn_type \
-
-                done
-            done
-        done
-    done
-done
-
-
-# 시나리오 2: diabetes,credit-g,blood,heart_target_1 -> heart
-echo "=== 시나리오 2: diabetes,credit-g,blood,heart_target_1 -> heart ==="
-for random_seed in $random_seeds; do
-    for few_shot in $few_shots; do
-        for embed_type in $embed_types; do
-            for attn_type in $attn_types; do
-                for edge_type in $edge_types; do
-                    echo "Running experiment - diabetes,credit-g,blood -> heart"
-                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
-                    --random_seed $random_seed \
-                    --source_data diabetes credit-g blood \
-                    --target_data heart \
-                    --base_dir '/storage/personal/eungyeop/experiments' \
+                    --base_dir 'test20250825/S_baseline_B_baseline' \
                     --embed_type $embed_type \
                     --edge_type $edge_type \
                     --attn_type $attn_type \
                     --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity baseline
 
+                    echo "Running experiment - diabetes,credit-g,breast -> heart (S_cls2var_B_baseline)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data diabetes credit-g breast \
+                    --target_data heart \
+                    --base_dir 'test20250825/S_cls2var_B_baseline' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity baseline
+
+                    echo "Running experiment - diabetes,credit-g,breast -> heart (S_baseline_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data diabetes credit-g breast \
+                    --target_data heart \
+                    --base_dir 'test20250825/S_baseline_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity full
+
+                    echo "Running experiment - diabetes,credit-g,breast -> heart (S_cls2var_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data diabetes credit-g breast \
+                    --target_data heart \
+                    --base_dir 'test20250825/S_cls2var_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity full
                 done
             done
         done
     done
 done
 
-# 시나리오 2: diabetes,credit-g,blood,heart_target_1 -> heart
-echo "=== 시나리오 2: diabetes,credit-g,blood,heart_target_1 -> heart ==="
+# 시나리오 2: diabetes,credit-g,breast,heart_target_1 -> heart
+echo "=== 시나리오 2: diabetes,credit-g,breast,heart_target_1 -> heart ==="
 for random_seed in $random_seeds; do
     for few_shot in $few_shots; do
         for embed_type in $embed_types; do
             for attn_type in $attn_types; do
                 for edge_type in $edge_types; do
-                    echo "Running experiment - diabetes,credit-g,blood,heart_target_1 -> heart"
+                    echo "Running experiment - diabetes,credit-g,breast,heart_target_1 -> heart (S_baseline_B_baseline)"
                     CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
                     --random_seed $random_seed \
-                    --source_data diabetes credit-g blood heart_target_1 \
+                    --source_data diabetes credit-g breast heart_target_1 \
                     --target_data heart \
-                    --base_dir '/storage/personal/eungyeop/experiments' \
+                    --base_dir 'test20250825/S_baseline_B_baseline' \
                     --embed_type $embed_type \
                     --edge_type $edge_type \
                     --attn_type $attn_type \
                     --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity baseline
 
+                    echo "Running experiment - diabetes,credit-g,breast,heart_target_1 -> heart (S_cls2var_B_baseline)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data diabetes credit-g breast heart_target_1 \
+                    --target_data heart \
+                    --base_dir 'test20250825/S_cls2var_B_baseline' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity baseline
+
+                    echo "Running experiment - diabetes,credit-g,breast,heart_target_1 -> heart (S_baseline_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data diabetes credit-g breast heart_target_1 \
+                    --target_data heart \
+                    --base_dir 'test20250825/S_baseline_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity full
+
+                    echo "Running experiment - diabetes,credit-g,breast,heart_target_1 -> heart (S_cls2var_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data diabetes credit-g breast heart_target_1 \
+                    --target_data heart \
+                    --base_dir 'test20250825/S_cls2var_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity full
+                done
+            done
+        done
+    done
+done
+
+# 시나리오 3: breast,credit-g,heart -> diabetes
+echo "=== 시나리오 3: breast,credit-g,heart -> diabetes ==="
+for random_seed in $random_seeds; do
+    for few_shot in $few_shots; do
+        for embed_type in $embed_types; do
+            for attn_type in $attn_types; do
+                for edge_type in $edge_types; do
+                    echo "Running experiment - breast,credit-g,heart -> diabetes (S_baseline_B_baseline)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_baseline_B_baseline' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity baseline
+
+                    echo "Running experiment - breast,credit-g,heart -> diabetes (S_cls2var_B_baseline)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_cls2var_B_baseline' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity baseline
+
+                    echo "Running experiment - breast,credit-g,heart -> diabetes (S_baseline_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_baseline_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity full
+
+                    echo "Running experiment - breast,credit-g,heart -> diabetes (S_cls2var_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_cls2var_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity full
+                done
+            done
+        done
+    done
+done
+
+# 시나리오 4: breast,credit-g,heart,heart_target_1 -> diabetes
+echo "=== 시나리오 4: breast,credit-g,heart,heart_target_1 -> diabetes ==="
+for random_seed in $random_seeds; do
+    for few_shot in $few_shots; do
+        for embed_type in $embed_types; do
+            for attn_type in $attn_types; do
+                for edge_type in $edge_types; do
+                    echo "Running experiment - breast,credit-g,heart,heart_target_1 -> diabetes (S_baseline_B_baseline)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart heart_target_1 \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_baseline_B_baseline' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity baseline
+
+                    echo "Running experiment - breast,credit-g,heart,heart_target_1 -> diabetes (S_cls2var_B_baseline)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart heart_target_1 \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_cls2var_B_baseline' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity baseline
+
+                    echo "Running experiment - breast,credit-g,heart,heart_target_1 -> diabetes (S_baseline_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart heart_target_1 \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_baseline_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity baseline \
+                    --basis_connectivity full
+
+                    echo "Running experiment - breast,credit-g,heart,heart_target_1 -> diabetes (S_cls2var_B_full)"
+                    CUDA_VISIBLE_DEVICES=$gpu_id python main_S.py \
+                    --random_seed $random_seed \
+                    --source_data breast credit-g heart heart_target_1 \
+                    --target_data diabetes \
+                    --base_dir 'test20250825/S_cls2var_B_full' \
+                    --embed_type $embed_type \
+                    --edge_type $edge_type \
+                    --attn_type $attn_type \
+                    --few_shot $few_shot \
+                    --shared_connectivity cls2var \
+                    --basis_connectivity full
                 done
             done
         done

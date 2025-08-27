@@ -882,3 +882,71 @@ def check_class_imbalance(y_train, y_test, test_loader=None):
             break  # 첫 번째 배치만 출력
 
     print("\nClass imbalance Analysis Done.")
+
+import math
+from torch.optim.lr_scheduler import LambdaLR
+
+def make_warmup_cosine_epochs(optimizer, total_epochs, warmup_epochs=0, min_lr_mult=0.1):
+    """
+    Epoch-wise warmup + cosine annealing.
+    - total_epochs: 총 학습 epoch 수
+    - warmup_epochs: 앞부분 warmup epoch 수
+    - min_lr_mult: 마지막 LR = base_lr * min_lr_mult
+    """
+    warmup_epochs = max(0, int(warmup_epochs))
+    total_epochs  = max(1, int(total_epochs))
+    min_f = float(min_lr_mult)
+
+    def lr_lambda(epoch):
+        # 워밍업: 선형 증가
+        if warmup_epochs > 0 and epoch < warmup_epochs:
+            return max(1e-8, float(epoch + 1) / float(warmup_epochs))
+        # 코사인: warmup 이후 ~ total_epochs
+        remain = max(1, total_epochs - warmup_epochs)
+        # t: 0→1 진행률
+        t = min(1.0, max(0.0, (epoch - warmup_epochs + 1) / float(remain)))
+        return min_f + (1.0 - min_f) * 0.5 * (1.0 + math.cos(math.pi * t))
+
+    return LambdaLR(optimizer, lr_lambda)
+
+def make_warmup_cosine_steps(optimizer, total_steps, warmup_steps=0, min_lr_mult=0.1):
+    """
+    Step-wise warmup + cosine annealing.
+    - total_steps: 총 스텝 수
+    - warmup_steps: 앞부분 warmup step 수
+    - min_lr_mult: 마지막 LR = base_lr * min_lr_mult
+    """
+    warmup_steps = max(0, int(warmup_steps))
+    total_steps  = max(1, int(total_steps))
+    min_f = float(min_lr_mult)
+
+    def lr_lambda(step):
+        if warmup_steps > 0 and step < warmup_steps:
+            return max(1e-8, float(step + 1) / float(warmup_steps))
+        remain = max(1, total_steps - warmup_steps)
+        t = min(1.0, max(0.0, (step - warmup_steps + 1) / float(remain)))
+        return min_f + (1.0 - min_f) * 0.5 * (1.0 + math.cos(math.pi * t))
+
+    return LambdaLR(optimizer, lr_lambda)
+
+def current_lr(optimizer):
+    """첫 param_group의 현재 LR을 반환."""
+    try:
+        return optimizer.param_groups[0]['lr']
+    except Exception:
+        return None
+def build_epoch_scheduler(optimizer, total_epochs: int, warmup_ratio: float, min_lr_mult: float):
+    """
+    Cosine annealing with linear warmup (epoch-wise).
+    - total_epochs: 전체 학습 epoch 수
+    - warmup_ratio: 0~1 (ex: 0.06 -> 전체의 6%를 warmup)
+    - min_lr_mult: 마지막 LR = base_lr * min_lr_mult
+    """
+    # int 올림으로 최소 1 epoch 워밍업 보장
+    warmup_epochs = max(1, int(math.ceil(total_epochs * warmup_ratio)))
+    return make_warmup_cosine_epochs(
+        optimizer,
+        total_epochs=total_epochs,
+        warmup_epochs=warmup_epochs,
+        min_lr_mult=min_lr_mult
+    )

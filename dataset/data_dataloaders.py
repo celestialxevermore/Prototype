@@ -24,6 +24,43 @@ import os, pickle
 import random
 import warnings
 
+class _DummySet:
+    def __init__(self, n): self.n = n
+    def __len__(self): return self.n 
+class StepLoader:
+    """
+    여러 DataLoader에서 '스텝마다' 한 소스를 뽑아 배치 제공.
+    mode='random' | 'round'
+    len(self)  = 모든 소스 배치 수 합
+    dataset.len = 모든 소스 샘플 수 합 (평균 손실 계산용)
+    """
+    def __init__(self, loaders, mode='random', seed=42):
+        self.loaders = loaders
+        self.mode = mode
+        self.rng = np.random.default_rng(seed)
+        self.blens = [len(dl) for dl in loaders]
+        self.steps = int(np.sum(self.blens))
+        self.ns = [len(dl.dataset) for dl in loaders]
+        self.dataset = _DSum(int(np.sum(self.ns)))
+
+    def __len__(self):
+        return self.steps
+
+    def __iter__(self):
+        iters = [iter(dl) for dl in self.loaders]
+        pos = [0 for _ in self.loaders]
+        k = len(self.loaders)
+        for s in range(self.steps):
+            idx = s % k if self.mode == 'round' else int(self.rng.integers(0, k))
+            if pos[idx] >= self.blens[idx]:
+                iters[idx] = iter(self.loaders[idx])
+                pos[idx] = 0
+            batch = next(iters[idx])
+            pos[idx] += 1
+            yield batch
+
+
+
 logger = logging.getLogger(__name__)
 def preprocessing_heart_datasets(DATASETS: pd.DataFrame, data_name: str):
     """
@@ -204,25 +241,6 @@ def get_few_shot_tabular_samples(X_train, y_train, args):
 #     return X_train_few, y_train_few
 
 
-
-def collate_fn(batch):
-    # batch에서 X와 y를 분리
-    X = pd.DataFrame([item[0] for item in batch])  # Series들을 DataFrame으로 변환
-    y = torch.stack([item[1] for item in batch])
-    return X, y
-
-class TabularDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = X  # DataFrame 그대로 저장
-        self.y = torch.tensor(y.values, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        # DataFrame row를 Series로 반환
-        return self.X.iloc[idx], self.y[idx]
-
 def prepare_tabular_dataloaders(args, dataset_name, random_seed):
     """데이터셋을 로드하고 train/val/test로 분할한 뒤 DataLoader로 변환"""
     
@@ -320,11 +338,6 @@ def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_load
         'val': val_loader,
         'test': test_loader
     }
-
-
-
-
-
 
 
 def prepare_embedding_dataloaders(args, dataset_name):
@@ -485,11 +498,6 @@ def get_few_shot_embedding_samples(train_loader, args):
    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 
 
-
-
-
-
-
 def load_tabular_and_split(args, DATASETS, dataset_name, few_shot=False):
     """
     기존 DATASETS(딕셔너리 형태: DATASETS[dataset_name] = (DataFrame, ...))에서
@@ -610,106 +618,3 @@ def load_tabular_and_split(args, DATASETS, dataset_name, few_shot=False):
 
     pdb.set_trace()
     return train_loader, val_loader, test_loader, num_classes
-
-
-
-
-
-
-
-
-
-
-
-
-
-'''
-
-    Newly added code : 2024.12.18.
-
-'''
-
-
-'''
-    for few shot settings
-'''
-
-def prepare_fewshot_source_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
-    np.random.seed(random_state)
-    num_classes = len(np.unique(y_train_full))
-    
-    shot = args.dataset_shot
-    samples_per_class = shot // num_classes
-    remainder = shot % num_classes
-
-    support_X, support_y = [], []
-    for cls in range(num_classes):
-        cls_indices = np.where(y_train_full == cls)[0]
-        sample_num = samples_per_class + (1 if remainder > 0 else 0)
-        if remainder > 0:
-            remainder -= 1
-        
-        if len(cls_indices) < sample_num:
-            selected_indices = np.random.choice(cls_indices, sample_num, replace=True)
-        else:
-            selected_indices = np.random.choice(cls_indices, sample_num, replace=False)
-        
-        support_X.append(X_train_full.iloc[selected_indices])
-        support_y.extend([cls] * sample_num)
-
-    X_train_few = pd.concat(support_X, ignore_index=True)
-    y_train_few = np.array(support_y)
-
-    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
-    maker.fit(X_train_few, y_train_few)
-    train_graphs = maker.transform(X_train_few, y_train_few)
-    test_graphs = maker.transform(X_test, y_test)
-
-    for graph, label in zip(train_graphs + test_graphs, list(y_train_few) + list(y_test)):
-        graph.y = torch.tensor([label], dtype=torch.long)
-
-    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
-
-    return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
-
-
-
-def prepare_fewshot_target_dataset(args, X_train_full, y_train_full, X_test, y_test, random_state=42):
-    np.random.seed(random_state)
-    num_classes = len(np.unique(y_train_full))
-    
-    shot = args.dataset_shot
-    samples_per_class = shot // num_classes
-    remainder = shot % num_classes
-
-    support_X, support_y = [], []
-    for cls in range(num_classes):
-        cls_indices = np.where(y_train_full == cls)[0]
-        sample_num = samples_per_class + (1 if remainder > 0 else 0)
-        if remainder > 0:
-            remainder -= 1
-        
-        if len(cls_indices) < sample_num:
-            selected_indices = np.random.choice(cls_indices, sample_num, replace=True)
-        else:
-            selected_indices = np.random.choice(cls_indices, sample_num, replace=False)
-        
-        support_X.append(X_train_full.iloc[selected_indices])
-        support_y.extend([cls] * sample_num)
-
-    X_train_few = pd.concat(support_X, ignore_index=True)
-    y_train_few = np.array(support_y)
-
-    maker = Table2GraphTransformer(include_edge_attr=True, lm_model="gpt2", n_components=768, n_jobs=1)
-    maker.fit(X_train_few, y_train_few)
-    train_graphs = maker.transform(X_train_few, y_train_few)
-    test_graphs = maker.transform(X_test, y_test)
-
-    for graph, label in zip(train_graphs + test_graphs, list(y_train_few) + list(y_test)):
-        graph.y = torch.tensor([label], dtype=torch.long)
-
-    train_loader = DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_graphs, batch_size=args.batch_size, shuffle=False)
-
-    return (X_train_few, X_test, y_train_few, y_test), train_loader, test_loader, num_classes
