@@ -217,75 +217,84 @@ class HeadAttentionInference:
         logger.info(f"Dataloaders prepared for dataset: {self.args.source_data}")
     
     def extract_head_attention_and_coordinates(self, data_loader):
-        """각 head별 attention maps와 coordinates 추출"""
-        # 🔥 k_basis만 사용 (shared layers 제외)
-        total_heads = self.args.k_basis  # 8개만
-        
+        """각 head별 attention maps와 coordinates 추출 (+ 첫 배치 sanity log)"""
+        total_heads = self.args.k_basis  # basis head 수
+
         head_attention_data = {
             'coordinates': [],
             'labels': [],
             'sample_ids': [],
             'feature_names': None
         }
-        
-        # 🔥 k_basis 개수만큼만 head 키 생성
         for i in range(total_heads):
             head_attention_data[f'head_{i}'] = []
-        
-        logger.info(f" Using {total_heads} basis heads (k_basis={self.args.k_basis})")
-        
+
+        logger.info(f"Using {total_heads} basis heads (k_basis={self.args.k_basis})")
+
         sample_count = 0
-        
+        did_sanity_log = False
+
         with torch.no_grad():
             for batch_idx, batch in enumerate(data_loader):
                 batch_on_device = {
                     k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
-                
-                # 모델 forward pass로 head별 attention과 coordinates 추출
+
                 pred, head_attention_weights, coordinates = self._extract_head_attention_from_model(batch_on_device)
-                
-                # Feature names 추출 (첫 번째 배치에서만)
+
+                # feature names (첫 배치에서만)
                 if head_attention_data['feature_names'] is None:
                     feature_names = self.model.extract_feature_names(batch_on_device)
-                    head_attention_data['feature_names'] = ["CLS"] + feature_names
-                
+                    head_attention_data['feature_names'] = list(feature_names)  # CLS 미포함 이름
+
                 batch_size = head_attention_weights[0].shape[0]
-                
-                for sample_idx in range(batch_size):
-                    # 🔥 BasisGAT의 head만 저장 (shared layers 제외)
+
+                # --- 첫 배치 sanity log: 행렬 크기와 CLS 포함 여부 추정 ---
+                if not did_sanity_log:
+                    try:
+                        seq = head_attention_weights[0].shape[-1]
+                        n_feat = len(head_attention_data['feature_names'])
+                        incl_cls = (seq == n_feat + 1)
+                        logger.info(
+                            f"[sanity] basis head attn shape per head = (B={batch_size}, seq={seq}, seq={seq}); "
+                            f"feature_names={n_feat}, includes_CLS? {'yes' if incl_cls else 'no'}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[sanity] could not infer CLS presence: {e}")
+                    did_sanity_log = True
+                # -----------------------------------------------------------
+
+                for b in range(batch_size):
+                    # head별 attention 저장 (basis heads만)
                     for head_idx in range(self.args.k_basis):
-                        # basis layer의 attention weights만 사용
-                        basis_head_idx = head_idx
-                        attention_map = head_attention_weights[basis_head_idx][sample_idx]  # [seq_len, seq_len]
-                        attention_numpy = attention_map.detach().cpu().numpy()
-                        head_attention_data[f'head_{head_idx}'].append(attention_numpy)
-                    
-                    # Coordinates 저장
-                    sample_coordinates = coordinates[sample_idx].detach().cpu().numpy()
-                    head_attention_data['coordinates'].append(sample_coordinates)
-                    
-                    # 라벨과 샘플 ID 저장
+                        attn_map = head_attention_weights[head_idx][b]  # [seq, seq]
+                        head_attention_data[f'head_{head_idx}'].append(attn_map.detach().cpu().numpy())
+
+                    # coordinates
+                    head_attention_data['coordinates'].append(coordinates[b].detach().cpu().numpy())
+
+                    # label / id
                     if 'y' in batch:
-                        label = batch['y'][sample_idx].item()
+                        label = batch['y'][b].item()
                     else:
                         label = -1
                     head_attention_data['labels'].append(label)
-                    
+
                     if 'sample_ids' in batch:
-                        sample_id = batch['sample_ids'][sample_idx]
+                        sid = batch['sample_ids'][b]
                     else:
-                        sample_id = sample_count
-                    head_attention_data['sample_ids'].append(sample_id)
-                    
+                        sid = sample_count
+                    head_attention_data['sample_ids'].append(sid)
+
                     sample_count += 1
-                
+
                 if batch_idx % 10 == 0:
                     logger.info(f"Processed {sample_count} samples...")
-        
+
         logger.info(f"Extracted basis head attention maps and coordinates for {sample_count} samples")
         return head_attention_data
+
     
     def _extract_head_attention_from_model(self, batch):
         """모델에서 head별 attention weights와 coordinates 추출"""
@@ -393,100 +402,120 @@ class HeadAttentionInference:
         
         logger.info(f"Head attention visualization completed for {sample_count} samples")
 
-    def _create_sample_head_visualization(self, sample_idx, head_attention_weights, coordinates, 
-                                        feature_names, batch_sample_idx, output_dir):
-        """한 샘플의 모든 head attention과 coordinates를 하나의 figure로 시각화"""
-        total_heads = len(head_attention_weights)  # 이제 k_basis만큼 (8개)
-        
-        # 🔥 8개 head에 맞는 레이아웃 (2x4)
+    def _create_sample_head_visualization(self, sample_idx, head_attention_weights, coordinates,
+                                      feature_names, batch_sample_idx, output_dir):
+        """한 샘플의 모든 head attention과 coordinates를 하나의 figure로 시각화
+        - CLS 포함 여부를 attention 행렬 shape로 자동 감지하여 라벨을 정합
+        - 필요 시 한 행(예: CLS)만 보여주는 옵션 제공
+        """
+        total_heads = len(head_attention_weights)  # k_basis
+
+        # ---- 옵션: 특정 쿼리(예: CLS=0) 한 행만 시각화하고 싶을 때 ----
+        only_query_row = False
+        query_idx = 0  # CLS 가정
+        # -------------------------------------------------------------
+
+        # 8개 head 레이아웃(2x4) 기준
         rows, cols = 2, 4
-        
-        # Figure 생성: Head attention heatmaps + Coordinates
-        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 5*rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows))
         axes = axes.flatten()
-        
-        # �� BasisGAT의 8개 head만 시각화
+
+        # 각 head 히트맵
         for head_idx in range(total_heads):
             ax = axes[head_idx]
-            
-            # BasisGAT layer의 attention weights
-            attn_weights = head_attention_weights[head_idx][batch_sample_idx]  # [seq, seq]
-            
-            # Heatmap 시각화
-            im = ax.imshow(attn_weights.cpu().numpy(), cmap='viridis', interpolation='nearest')
+            attn = head_attention_weights[head_idx][batch_sample_idx]  # [seq, seq], torch.Tensor
+            attn_np = attn.detach().cpu().numpy()
+            seq = attn_np.shape[0]
+
+            n_feat = len(feature_names)  # feature_names는 CLS 미포함을 가정
+            # CLS 포함 여부 자동 감지
+            if seq == n_feat + 1:
+                all_node_names = ["CLS"] + list(feature_names)
+            elif seq == n_feat:
+                all_node_names = list(feature_names)  # CLS 미포함
+            else:
+                logger.warning(
+                    f"[Head {head_idx}] Unexpected attention shape: seq={seq}, features={n_feat}. "
+                    "Will crop to match."
+                )
+                use = min(seq, n_feat + 1)  # 가장 안전한 상한
+                attn_np = attn_np[:use, :use]
+                # 가능하면 CLS 포함 라벨로 맞추되, 길이에 맞게 자르기
+                all_node_names = (["CLS"] + list(feature_names))[:use]
+
+            # 시각화(전체 행렬 or 특정 쿼리 행만)
+            if only_query_row and 0 <= query_idx < attn_np.shape[0]:
+                row = attn_np[query_idx, :]
+                im = ax.imshow(row[None, :], cmap='viridis', aspect='auto', interpolation='nearest')
+                ax.set_yticks([0])
+                ax.set_yticklabels([all_node_names[query_idx]])
+                ax.set_xticks(np.arange(len(all_node_names)))
+                ax.set_xticklabels(all_node_names, rotation=90, fontsize=6)
+            else:
+                im = ax.imshow(attn_np, cmap='viridis', interpolation='nearest')
+                ax.set_xticks(np.arange(len(all_node_names)))
+                ax.set_yticks(np.arange(len(all_node_names)))
+                ax.set_xticklabels(all_node_names, rotation=90, fontsize=6)
+                ax.set_yticklabels(all_node_names, fontsize=6)
+
+                # 값 표기(작은 그림에서 너무 빽빽하면 주석 처리 가능)
+                try:
+                    vmin, vmax = float(attn_np.min()), float(attn_np.max())
+                    thr = (vmin + vmax) / 2.0
+                    for i in range(attn_np.shape[0]):
+                        for j in range(attn_np.shape[1]):
+                            v = attn_np[i, j]
+                            if v != 0.0:  # 완전 0은 생략
+                                ax.text(j, i, f"{v:.2f}",
+                                        ha="center", va="center",
+                                        color=("white" if v > thr else "black"),
+                                        fontsize=5, fontweight='bold')
+                except Exception:
+                    pass
+
             ax.set_title(f'Basis Head {head_idx}', fontsize=10, fontweight='bold')
-            
-            # 축 라벨 설정
-            all_node_names = ["CLS"] + feature_names
-            ax.set_xticks(np.arange(len(all_node_names)))
-            ax.set_yticks(np.arange(len(all_node_names)))
-            ax.set_xticklabels(all_node_names, rotation=90, fontsize=6)
-            ax.set_yticklabels(all_node_names, fontsize=6)
-            
-            # 값 표시 (간단하게)
-            attn_np = attn_weights.cpu().numpy()
-            for i in range(len(all_node_names)):
-                for j in range(len(all_node_names)):
-                    value = attn_np[i, j]
-                    threshold = (attn_np.min() + attn_np.max()) / 2
-                    text_color = "white" if value > threshold else "black"
-                    ax.text(j, i, f"{value:.2f}", ha="center", va="center", 
-                           color=text_color, fontsize=5, weight='bold')
-        else:
-            ax.set_visible(False)
-        
-        # 🔥 Coordinates bar chart (k_basis 개수만큼만)
-        # 별도 subplot으로 생성
-        fig_coord, ax_coord = plt.subplots(1, 1, figsize=(8, 4))
-        
-        # 🔥 coordinates 접근 방식 수정
-        # coordinates는 이미 [k_basis] 형태로 저장되어 있음
-        if isinstance(coordinates, torch.Tensor):
-            if coordinates.dim() == 2:  # [batch_size, k_basis]
-                sample_coordinates = coordinates[batch_sample_idx].cpu().numpy()
-            else:  # [k_basis] - 이미 해당 샘플의 coordinates
-                sample_coordinates = coordinates.cpu().numpy()
-        else:
-            # numpy array인 경우
-            if coordinates.ndim == 2:  # [batch_size, k_basis]
-                sample_coordinates = coordinates[batch_sample_idx]
-            else:  # [k_basis] - 이미 해당 샘플의 coordinates
-                sample_coordinates = coordinates
-        
-        # 🔥 k_basis 개수만큼만 bar chart 생성
-        k_basis = len(sample_coordinates)  # 실제 coordinates 길이
-        head_labels = [f'Head {i}' for i in range(k_basis)]
-        bars = ax_coord.bar(range(k_basis), sample_coordinates, 
-                           color=plt.cm.Set3(np.linspace(0, 1, k_basis)))
-        
-        ax_coord.set_title('Head Weights (Coordinates)', fontsize=12, fontweight='bold')
-        ax_coord.set_xlabel('Head Index', fontsize=10)
-        ax_coord.set_ylabel('Weight', fontsize=10)
-        ax_coord.set_xticks(range(k_basis))
-        ax_coord.set_xticklabels(head_labels, fontsize=9)
-        
-        # 값 표시
-        for i, (bar, coord) in enumerate(zip(bars, sample_coordinates)):
-            ax_coord.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                         f'{coord:.3f}', ha='center', va='bottom', fontsize=9)
-        
-        # 전체 제목
-        fig.suptitle(f'Sample {sample_idx} - Head Attention Analysis ({total_heads} heads)', 
+
+        # 남는 subplot 숨김
+        for k in range(total_heads, len(axes)):
+            axes[k].set_visible(False)
+
+        fig.suptitle(f'Sample {sample_idx} - Head Attention Analysis ({total_heads} heads)',
                     fontsize=14, y=0.95)
         plt.tight_layout()
-        
-        # 저장
-        output_path = output_dir / f'sample_{sample_idx}_head_attention.png'
-        fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        out_path = Path(output_dir) / f'sample_{sample_idx}_head_attention.png'
+        fig.savefig(out_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
-        
-        # Coordinates도 별도 저장
-        coord_output_path = output_dir / f'sample_{sample_idx}_coordinates.png'
-        fig_coord.savefig(coord_output_path, dpi=300, bbox_inches='tight')
-        plt.close(fig_coord)
-        
-        logger.info(f"Sample {sample_idx} head attention visualization saved: {output_path}")
-        logger.info(f"Sample {sample_idx} coordinates visualization saved: {coord_output_path}")
+        logger.info(f"Sample {sample_idx} head attention visualization saved: {out_path}")
+
+        # ---- Coordinates bar chart (별도 figure) ----
+        fig_c, ax_c = plt.subplots(1, 1, figsize=(8, 4))
+
+        # coordinates shape: [k_basis] 또는 [B, k_basis]
+        if isinstance(coordinates, torch.Tensor):
+            if coordinates.dim() == 2:
+                sample_coords = coordinates[batch_sample_idx].detach().cpu().numpy()
+            else:
+                sample_coords = coordinates.detach().cpu().numpy()
+        else:
+            sample_coords = coordinates[batch_sample_idx] if coordinates.ndim == 2 else coordinates
+
+        k_basis = len(sample_coords)
+        bars = ax_c.bar(range(k_basis), sample_coords, color=plt.cm.Set3(np.linspace(0, 1, k_basis)))
+        ax_c.set_title('Head Weights (Coordinates)', fontsize=12, fontweight='bold')
+        ax_c.set_xlabel('Head Index', fontsize=10)
+        ax_c.set_ylabel('Weight', fontsize=10)
+        ax_c.set_xticks(range(k_basis))
+        ax_c.set_xticklabels([f'Head {i}' for i in range(k_basis)], fontsize=9)
+        for i, (b, v) in enumerate(zip(bars, sample_coords)):
+            ax_c.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.01, f'{v:.3f}',
+                    ha='center', va='bottom', fontsize=9)
+
+        plt.tight_layout()
+        coord_path = Path(output_dir) / f'sample_{sample_idx}_coordinates.png'
+        fig_c.savefig(coord_path, dpi=300, bbox_inches='tight')
+        plt.close(fig_c)
+        logger.info(f"Sample {sample_idx} coordinates visualization saved: {coord_path}")
+
 
     def analyze_coordinates(self, head_attention_data, output_dir):
         """Coordinates 분석 (K-means 클러스터링 + t-SNE)"""
@@ -500,7 +529,7 @@ class HeadAttentionInference:
         logger.info(f"Analyzing coordinates for {len(coordinates)} samples")
         
         # 1. K-means 클러스터링
-        n_clusters = min(5, len(coordinates) // 10)  # 적절한 클러스터 수 결정
+        n_clusters = min(5, len(coordinates) // 20)  # 적절한 클러스터 수 결정
         if n_clusters < 2:
             n_clusters = 2
         
@@ -1076,7 +1105,7 @@ def run_multisource_clustering_from_single_checkpoint(args):
     # Multi Source 클러스터링 분석 실행 (attention weights와 feature names 전달)
     analyze_multisource_coordinates(
         all_coordinates, all_labels, all_sources, all_sample_ids, 
-        args.output_dir, all_attention_weights, all_feature_names
+        args.output_dir, all_attention_weights, all_feature_names, args.n_clusters
     )
 
 def extract_coordinates_and_attention_from_dataloader(model, data_loader, source_name, source_type, source_idx):
@@ -1286,7 +1315,7 @@ def run_single_source_analysis(args):
     
     logger.info(f"Head analysis completed! Results saved to {args.output_dir}")
 
-def analyze_multisource_coordinates(coordinates, labels, sources, sample_ids, output_dir, attention_weights=None, feature_names=None):
+def analyze_multisource_coordinates(coordinates, labels, sources, sample_ids, output_dir, attention_weights=None, feature_names=None, args_n_clusters=None):
     """Multi Source coordinates 분석"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1298,7 +1327,7 @@ def analyze_multisource_coordinates(coordinates, labels, sources, sample_ids, ou
     coordinates_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. K-means 클러스터링 (coordinate 기반)
-    n_clusters = min(5, len(coordinates) // 20)
+    n_clusters = args_n_clusters if args_n_clusters is not None else min(5, len(coordinates) // 20)
     if n_clusters < 2:
         n_clusters = 2
     
