@@ -193,7 +193,8 @@ if __name__ == "__main__":
     
     converter = TabularToEmbeddingDataset(args)
     datasets_to_process = [
-        'blood',
+        #'blood',
+        #'cleveland'
         #'credit-g',
         #"communities",
         #"forest_covertype_sampled",
@@ -209,6 +210,7 @@ if __name__ == "__main__":
         #"heart_target_4",
         #"diabetes",
         #"adult"
+        'hungarian'
     ]
     
     for dataset_name in datasets_to_process:

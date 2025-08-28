@@ -18,7 +18,7 @@ for random_seed in $random_seeds; do
                     --random_seed $random_seed \
                     --source_data heart_target_1 heart_target_2 heart_target_3 heart_target_4 \
                     --target_data heart \
-                    --base_dir 'test20250829' \
+                    --base_dir 'test20250829_new' \
                     --embed_type $embed_type \
                     --edge_type $edge_type \
                     --attn_type $attn_type \

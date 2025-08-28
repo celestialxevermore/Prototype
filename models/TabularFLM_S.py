@@ -46,73 +46,6 @@ class CoordinatorMLP(nn.Module):
         return F.softmax(logits / max(self.temperature, 1e-6), dim=-1)
 
 
-class SubgraphAttention(nn.Module):
-    def __init__(self, input_dim: int, dropout: float = 0.1, sim_threshold: float = 0.5, no_self_loop: bool = True):
-        super().__init__() 
-        self.input_dim = input_dim 
-        self.dropout = dropout 
-        self.sim_threshold = sim_threshold 
-        self.no_self_loop = no_self_loop 
-
-        self.q_proj = nn.Linear(input_dim, input_dim)
-        self.k_proj = nn.Linear(input_dim, input_dim)
-        self.v_proj = nn.Linear(input_dim, input_dim)
-        self.out_proj = nn.Linear(input_dim, input_dim)
-
-        self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
-        nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
-
-        self._init_weights() 
-    def _init_weights(self):
-        for m in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            nn_init.xavier_uniform_(m.weight, gain=1/math.sqrt(2))
-            if m.bias is not None:
-                nn_init.zeros_(m.bias)
-
-    def forward(self, desc_embeddings, name_value_embeddings):
-        batch_size, new_seq, _ = name_value_embeddings.shape 
-        seq_len = new_seq - 1 
-        q = self.q_proj(name_value_embeddings)
-        k = self.k_proj(name_value_embeddings)
-        v = self.v_proj(name_value_embeddings)
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.input_dim)
-        if self.no_self_loop:
-            mask = torch.ones_like(attn_weights)
-            mask[:, 1:, 1:] = 1.0 - torch.eye(seq_len, device=name_value_embeddings.device)
-            attn_weights = attn_weights * mask 
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        subgraph_mask = (attn_weights > self.sim_threshold).float() 
-        subgraph_embeddings = [] 
-        self.debug_info = {
-            'attn_weights' : attn_weights, 
-            'subgraph_mask' : subgraph_mask,
-            'threshold' : self.sim_threshold,
-        }
-        for b in range(batch_size):
-            batch_embeddings = [] 
-            used = set() 
-            for i in range(1, new_seq):
-                if (i-1) in used: 
-                    continue 
-                connected_indices = torch.where(subgraph_mask[b, i, 1:] > 0)[0] 
-                # 문법 오류 수정
-                if len(connected_indices) == 0:
-                    subgraph_nodes = [i]
-                else:
-                    subgraph_nodes = [i] + (connected_indices + 1).tolist()
-                subgraph_nodes = sorted(list(set(subgraph_nodes)))
-                for node in subgraph_nodes:
-                    used.add(node - 1)
-                subgraph_emb = name_value_embeddings[b, subgraph_nodes, :]
-                cls_token = self.cls.squeeze(0)
-                subgraph_with_cls = torch.cat([cls_token, subgraph_emb], dim=0)
-                batch_embeddings.append(subgraph_with_cls)
-            subgraph_embeddings.append(batch_embeddings)  # 누락된 부분 추가
-        
-
-        return subgraph_embeddings
-        
-
 class AdaptiveGraphAttention(nn.Module):
     def __init__(
         self,
@@ -474,10 +407,6 @@ class Model(nn.Module):
         nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
         self.dropout = nn.Dropout(args.dropout_rate)
 
-
-        self.subgraph_attention = SubgraphAttention(input_dim, dropout_rate, self.sim_threshold, no_self_loop=False)
-
-
         # Shared GAT blocks
         self.shared_layers = nn.ModuleList([
             AdaptiveGraphAttention(
@@ -744,13 +673,6 @@ class Model(nn.Module):
         attention_weights = []
         cls_token = self.cls.expand(name_value_embeddings.size(0), -1, -1)
         x = torch.cat([cls_token, name_value_embeddings], dim=1)
-
-        ####
-
-            # Subgraph Attention Debug
-        ####
-        subgraph_embeddings = self.subgraph_attention(desc_embeddings, x)
-
 
         # 2) Shared blocks
         for i, layer in enumerate(self.shared_layers):

@@ -436,7 +436,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     model_sig = f"{args.model_type}_attn-{args.attn_type}_k{args.k_basis}_h{args.n_heads}_hid{args.hidden_dim}"
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     os.makedirs(ckpt_dir, exist_ok=True)  # ✅ 필수
-    ckpt_path = os.path.join(ckpt_dir, "best.pt")
+    ckpt_path = os.path.join(ckpt_dir, f"best_{experiment_id}.pt")
 
     # ✅ total_epochs 만큼만 루프 (0이면 자동으로 스킵)
     for epoch in range(total_epochs):
