@@ -18,7 +18,7 @@ from utils.util import prepare_results_, save_results_, wrap_up_results_
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders
-from models.TabularFLM import Model
+from models.TabularFLM_Basic import Model
 import psutil
 from utils.visualization import visualize_model_structure
 from torch_geometric.data import Batch
@@ -48,11 +48,14 @@ def get_args():
     parser.add_argument('--output_dim', type = int, default = 1)
     parser.add_argument('--num_layers', type = int, default = 3)
     parser.add_argument('--dropout_rate', type = float, default = 0.1)
-    parser.add_argument('--n_heads', type = int, default = 4)
+    parser.add_argument('--n_heads', type = int, default = 8)
     parser.add_argument('--k_basis', type = int, default = 4)
     parser.add_argument('--model', type = str, default = 'NORM_GNN')
     parser.add_argument('--source_data', type=str, default='heart', 
-                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart','heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial','cleveland', 'heart_statlog','hungarian','switzerland','breast','magic_telescope','forest_covertype_sampled', 'higgs_sampled'])
+                        choices=['Cardiovascular_Disease_Dataset', 'Heart_disease_statlog','heart_statlog', 'heart1', 'Medicaldataset','adult','bank','blood','car','communities','credit-g','diabetes','heart',
+                                 'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
+                                 'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope', 'heart_disease',
+                                 'forest_covertype_sampled','higgs_sampled'])
     parser.add_argument('--target_data', type = str, default = 'hungarian')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)

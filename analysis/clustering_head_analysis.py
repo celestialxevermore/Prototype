@@ -554,25 +554,32 @@ class AttentionInference:
         cls_token = self.model.cls.expand(name_value_embeddings.size(0), -1, -1)
         x = torch.cat([cls_token, name_value_embeddings], dim=1)
         
-        # Shared blocks
-        for i, layer in enumerate(self.model.shared_layers):
-            norm_x = self.model.shared_layer_norms[i](x)
-            attn_output, attn_w = layer(desc_embeddings, norm_x)
+        # Basis layers (이전의 shared_layers 대신)
+        M0 = None
+        for i, layer in enumerate(self.model.basis_layers):
+            norm_x = self.model.basis_layer_norms[i](x)
+            E_vars = norm_x[:, 1:, :]
+            
+            if self.model.mask_share_across_layers and (i > 0):
+                M = M0
+            else:
+                E_rel = self.model.rel_proj(E_vars)
+                M = self.model.relation_scorer(E_rel)
+                if self.model.mask_share_across_layers and i == 0:
+                    M0 = M
+            
+            basis_outputs, attn_w = layer(desc_embeddings, norm_x, mask_M=M)
             attention_weights.append(attn_w)
-            x = x + attn_output
+            x = x + basis_outputs.reshape(x.size(0), x.size(1), self.model.input_dim)
         
-        shared_cls = x[:, 0, :]
-        coordinates = self.model.coordinator(shared_cls)
-        
-        # Basis layer
-        norm_x = self.model.basis_layer_norm(x)
-        basis_outputs, basis_attn = self.model.basis_layer(desc_embeddings, norm_x)
-        attention_weights.append(basis_attn)
+        # Coordinator 좌표 계산
+        cls_for_coord = basis_outputs[:, 0, :, :].contiguous().view(name_value_embeddings.size(0), self.model.input_dim)
+        coordinates = self.model.coordinator(cls_for_coord)
         
         # 예측값 계산
         expert_outputs = basis_outputs[:, 0, :, :]
         expert_predictions = []
-        for i in range(self.args.k_basis):
+        for i in range(self.model.args.k_basis):
             pred_i = self.model.expert_predictors[i](expert_outputs[:, i, :])
             expert_predictions.append(pred_i)
         expert_predictions = torch.stack(expert_predictions, dim=1)
@@ -618,9 +625,17 @@ class AttentionInference:
                 logger.info(f"📊 Processing source: {source_name}")
                 source_sample_count = 0
                 
+                # 각 소스별로 max_samples를 균등 분배
+                samples_per_source = max_samples // len(self.source_loaders)
+                remaining_samples = max_samples % len(self.source_loaders)
+                
+                # 첫 번째 소스에 남은 샘플 할당
+                if source_name == list(self.source_loaders.keys())[0]:
+                    samples_per_source += remaining_samples
+                
                 with torch.no_grad():
                     for batch_idx, batch in enumerate(source_loader):
-                        if source_sample_count >= max_samples:
+                        if source_sample_count >= samples_per_source:  # 수정된 부분
                             break
                             
                         batch_on_device = {
@@ -635,7 +650,7 @@ class AttentionInference:
                         batch_size = attention_weights[-1].shape[0]  # basis layer attention
                         
                         for sample_idx in range(batch_size):
-                            if source_sample_count >= max_samples:
+                            if source_sample_count >= samples_per_source:  # 수정된 부분
                                 break
                             
                             save_dir = source_folders[source_name]
@@ -659,7 +674,7 @@ class AttentionInference:
                             
                             source_sample_count += 1
                             
-                        if source_sample_count >= max_samples:
+                        if source_sample_count >= samples_per_source:  # 수정된 부분
                             break
                 
                 total_source_samples += source_sample_count
@@ -965,17 +980,12 @@ class AttentionInference:
     def visualize_graph_structure(self, data_loader, output_dir, max_samples=10):
         """
         그래프 구조를 시각화 (max_samples 개수만큼만)
-        
-        Args:
-            data_loader: 데이터로더
-            output_dir (str): 저장할 디렉토리
-            max_samples (int): 그래프 시각화할 최대 샘플 수
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
         sample_count = 0
-        epoch = self.checkpoint['epoch']  # 체크포인트에서 에포크 정보 가져오기
+        epoch = self.checkpoint['epoch']
         
         # 샘플별 디렉토리 생성
         sample_dirs = {}
@@ -987,7 +997,8 @@ class AttentionInference:
             graph_dir = sample_dir / 'graph'
             graph_dir.mkdir(parents=True, exist_ok=True)
             
-            for layer_idx in range(len(self.model.shared_layers)):
+            # basis_layers 사용 (이전의 shared_layers 대신)
+            for layer_idx in range(len(self.model.basis_layers)):
                 layer_dir = graph_dir / f'layer_{layer_idx}'
                 layer_dir.mkdir(parents=True, exist_ok=True)
             
@@ -1008,7 +1019,7 @@ class AttentionInference:
                 pred, attention_weights, coordinates = self._extract_attention_from_model(batch_on_device)
                 
                 # Feature names 추출
-                feature_names = self.extract_feature_names(batch_on_device)
+                feature_names = self.model.extract_feature_names(batch_on_device)
                 
                 # 배치 크기 확인
                 batch_size = attention_weights[0].shape[0]
@@ -1018,19 +1029,19 @@ class AttentionInference:
                         break
                     
                     # 모델의 각 레이어에서 attention weights와 adjacency 가져오기
-                    for layer_idx in range(len(self.model.shared_layers)):
+                    for layer_idx in range(len(self.model.basis_layers)):
                         # Attention 가중치(헤드 평균)
-                        attn_weights = self.model.shared_layers[layer_idx].attn_weights[sample_idx]  # [n_heads, seq, seq]
+                        attn_weights = attention_weights[layer_idx][sample_idx]  # [n_heads, seq, seq]
                         attn_weights_mean = attn_weights.mean(dim=0).cpu()
 
-                        # 원본 adjacency 사용
-                        adjacency = self.model.shared_layers[layer_idx].adjacency[sample_idx].cpu()
+                        # adjacency는 basis layer에서 가져오기
+                        adjacency = self.model.basis_layers[layer_idx].new_adjacency[sample_idx].cpu()
                         new_seq = attn_weights_mean.shape[0]
                         graph_matrix = torch.zeros((new_seq, new_seq), device=attn_weights_mean.device, dtype=torch.float)
 
-                        graph_matrix[1:, 1:] = adjacency  # 변수 간 연결은 원본 adjacency 사용
-                        graph_matrix[0, 1:] = 1.0  # CLS->변수 연결
-                        graph_matrix[1:, 0] = 0.0  # 변수->CLS 연결
+                        graph_matrix[1:, 1:] = adjacency[1:, 1:]  # 변수 간 연결
+                        graph_matrix[0, 1:] = adjacency[0, 1:]    # CLS->변수 연결
+                        graph_matrix[1:, 0] = adjacency[1:, 0]    # 변수->CLS 연결
                         
                         mask = (graph_matrix == 0)
                         final_graph_matrix = (attn_weights_mean * graph_matrix).numpy()
@@ -1038,8 +1049,8 @@ class AttentionInference:
                         n_nodes = final_graph_matrix.shape[0]
                         
                         # Edge 리스트 수집
-                        cls_edges_info = []  # CLS에서 나가는 엣지
-                        var_edges_info = []  # 나머지 엣지
+                        cls_edges_info = []
+                        var_edges_info = []
                         
                         for i in range(n_nodes):
                             for j in range(n_nodes):
@@ -2479,7 +2490,7 @@ def main():
     parser.add_argument('--layer_idx', type=int, default=2,
                         help='Layer index for clustering (default: 2)')
     parser.add_argument('--del_feat', nargs='+', default=[], help="features to remove (will be overridden by auto-detection)")
-    parser.add_argument('--n_clusters', type=int, default=3,
+    parser.add_argument('--n_clusters', type=int, default=8,
                         help='Number of clusters for K-means')
     parser.add_argument('--max_samples', type=int, default=5,
                         help='Maximum number of samples for graph visualization ONLY')

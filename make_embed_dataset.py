@@ -35,6 +35,11 @@ class TabularToEmbeddingDataset:
             "car": ['target_multiclass', ['unacceptable', 'acceptable', 'very good', 'good']],
             'forest_covertype_sampled': ['target_multiclass', [1,2,3,4,5,6,7]],
             "communities": ['target_multiclass', ['medium', 'high', 'low']],
+            "Cardiovascular_Disease_Dataset" : ['target_binary', ['no', 'yes']],
+            "Medicaldataset" : ['target_binary', ['no', 'yes']],
+            "heart1" : ['target_binary', ['no', 'yes']],
+            "Heart_disease_statlog" : ['target_binary', ['no','yes']],
+            "heart_disease" : ['target_binary', ['no','yes']]
 
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)
@@ -87,8 +92,16 @@ class TabularToEmbeddingDataset:
             elif data_name == 'blood' and 'Class' in DATASETS.columns:
                 DATASETS['target_binary'] = DATASETS['Class']
                 DATASETS = DATASETS.drop('Class', axis = 1)
+            elif data_name == 'Cardiovascular_Disease_Dataset' and 'target' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['target']
+                DATASETS = DATASETS.drop('target', axis = 1)
+            elif data_name == 'Medicaldataset' and 'Result' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['Result']
+                DATASETS = DATASETS.drop('Result', axis = 1)
+            elif data_name == 'heart1' and 'output' in DATASETS.columns:
+                DATASETS['target_binary'] = DATASETS['output']
+                DATASETS = DATASETS.drop('output', axis = 1)
 
-            
             class_mapping = {label: idx for idx, label in enumerate(class_values)}
             
         elif class_name == 'target_multiclass':
@@ -210,7 +223,14 @@ if __name__ == "__main__":
         #"heart_target_4",
         #"diabetes",
         #"adult"
-        'hungarian'
+        #'hungarian',
+        #"Cardiovascular_Disease_Dataset",
+        "heart_disease",
+        #"cleveland",
+        #"Heart_disease_statlog"
+        #"Medicaldataset"
+        #'heart_statlog',
+        #"heart1"
     ]
     
     for dataset_name in datasets_to_process:

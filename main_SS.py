@@ -52,10 +52,10 @@ def get_args():
     parser.add_argument('--k_basis', type=int, default=8)
     parser.add_argument('--model', type=str, default='NORM_GNN')
     parser.add_argument('--source_data', nargs='+',
-                        default=['heart_target_1', 'heart_target_2', 'heart_target_3', 'heart_target_4'],
-                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
+                        default=['Heart_disease_statlog','Medicaldataset', 'cleveland', 'Cardiovascular_Disease_Dataset'],
+                        choices=['Cardiovascular_Disease_Dataset', 'Heart_disease_statlog','heart_statlog', 'heart1', 'Medicaldataset','adult','bank','blood','car','communities','credit-g','diabetes','heart',
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
-                                 'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
+                                 'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope', 'heart_disease',
                                  'forest_covertype_sampled','higgs_sampled'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
@@ -99,7 +99,7 @@ def get_args():
 
     # BasisGAT
     # BasisGAT 스택 관련
-    parser.add_argument('--num_basis_layers', type=int, default=3, help='Number of stacked BasisGAT layers.')
+    parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
     parser.add_argument('--mask_share_across_layers', action='store_true', help='Reuse the same relation mask M across all BasisGAT layers.')
 
     # 관계 마스크 스코어러

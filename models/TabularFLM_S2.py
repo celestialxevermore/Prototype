@@ -12,7 +12,7 @@ import math
 import torch.nn.init as nn_init
 import logging
 import torch.nn.init as init
-from utils.affinity import PairwiseMLPScorer, RelationQueryScorer, FSTHeadwiseEntmaxScorer
+from utils.affinity import PairwiseMLPScorer, RelationQueryScorer, FSTHeadwiseEntmaxScorer, FSTHeadwiseEntmaxScorerNodeFirst
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +254,7 @@ class Model(nn.Module):
 
         # ----- Relation scorer (FFN1 + scorer) -----
         self.mask_share_across_layers = bool(getattr(args, 'mask_share_across_layers', True))
-        rel_input_dim   = int(getattr(args, 'rel_input_dim', 768))
+        rel_proj_dim   = int(getattr(args, 'rel_proj_dim', 768))
         rel_hidden_dim = int(getattr(args, 'rel_hidden_dim', 512))
         rel_symmetric  = bool(getattr(args, 'rel_symmetric', False))
         no_self_loop   = bool(getattr(args, 'no_self_loop', True))
@@ -263,25 +263,30 @@ class Model(nn.Module):
 
         # FFN1: project LLM embeddings to relation-space
         self.rel_proj = nn.Sequential(
-            nn.Linear(self.input_dim, rel_input_dim),
-            nn.LayerNorm(rel_input_dim),
+            nn.Linear(self.input_dim, rel_proj_dim),
+            nn.LayerNorm(rel_proj_dim),
             nn.ReLU()
         )
 
         # scorer: make M [B,H,S,S]
         if scorer_type == 'pair_mlp':
             self.relation_scorer = PairwiseMLPScorer(
-                rel_input_dim=rel_input_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
+                rel_input_dim=rel_proj_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
                 dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
             )
         elif scorer_type == 'query':
             self.relation_scorer = RelationQueryScorer(
-                rel_input_dim=rel_input_dim, k_basis=args.k_basis, rel_hidden_dim=rel_hidden_dim,
+                rel_input_dim=rel_proj_dim, k_basis=args.k_basis, rel_hidden_dim=rel_hidden_dim,
                 dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
             )
         elif scorer_type == 'fst_headwise_entmax':
             self.relation_scorer = FSTHeadwiseEntmaxScorer(
-                rel_input_dim=rel_input_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
+                rel_proj_dim=rel_proj_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
+                dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
+            )
+        elif scorer_type == 'fst_pair_first_headwise_entmax':
+            self.relation_scorer = FSTHeadwiseEntmaxScorerNodeFirst(
+                rel_input_dim=rel_proj_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
                 dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
             )
         else:
@@ -551,7 +556,7 @@ class Model(nn.Module):
             if self.mask_share_across_layers and (l > 0):
                 M = M0
             else:
-                E_rel = self.rel_proj(E_vars)    # [B,S,rel_input_dim]
+                E_rel = self.rel_proj(E_vars)    # [B,S,rel_proj_dim]
                 M = self.relation_scorer(E_rel)  # [B,H,S,S]
                 if self.mask_share_across_layers and l == 0:
                     M0 = M

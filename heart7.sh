@@ -19,7 +19,7 @@ for random_seed in $random_seeds; do
                 for edge_type in $edge_types; do
                     for num_basis in $num_basis_layers; do
                         for rel_scorer in $relation_scorer_types; do
-                            base_dir="test20250902_new_gat_v1_embed_type_${embed_type}_num_basis_${num_basis}_mask_share_across_layers:True_scorer_${rel_scorer}_rel_symmetric:True_no_self_loop:False"
+                            base_dir="test20250902_new_gat_v1_embed_type_${embed_type}_num_basis_${num_basis}_mask_share_across_layers:False_scorer_${rel_scorer}_rel_symmetric:False_no_self_loop:True"
                             echo "Running experiment - heart_target_1 heart_target_2 heart_target_3 heart_target_4 -> heart (gat_v1)"
                             CUDA_VISIBLE_DEVICES=$gpu_id OMP_NUM_THREADS=10 python main_S.py \
                             --random_seed $random_seed \
@@ -32,8 +32,7 @@ for random_seed in $random_seeds; do
                             --few_shot $few_shot \
                             --num_basis_layers $num_basis \
                             --relation_scorer_type $rel_scorer \
-                            --mask_share_across_layers \
-                            --rel_symmetric
+                            --no_self_loop
                         done
                     done
                 done

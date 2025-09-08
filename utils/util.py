@@ -432,8 +432,10 @@ def save_results_(args, results):
         "no_self_loop" : args.no_self_loop,
         "del_exp": getattr(args, 'del_exp', 'unknown'),
         "results": results['Best_results'], 
-        #"shared_connectivity" : args.shared_connectivity,
-        #"basis_connectivity" : args.basis_connectivity,
+        #"relation_scorer_type" : args.relation_scorer_type,
+        #"mask_share_across_layers" : args.mask_share_across_layers,
+        #"rel_symmetric" : args.rel_symmetric,
+        #"num_basis_layers" : args.num_basis_layers,
         "source_data" : args.source_data,
         "target_data" : args.target_data,
     }
