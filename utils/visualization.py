@@ -1027,7 +1027,7 @@ def visualize_results(args, results, exp_dir):
 
     plt.suptitle(f'Training Progress - {title_src} (K={args.few_shot})', y=1.02, fontsize=16)
     plt.tight_layout()
-    metrics_plot_path = os.path.join(exp_dir, f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.n_heads}_{timestamp}.png")
+    metrics_plot_path = os.path.join(exp_dir, f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_h{args.n_heads}_{timestamp}.png")
     plt.savefig(metrics_plot_path)
     plt.close()
     print(f"Metrics plot saved as {metrics_plot_path}")

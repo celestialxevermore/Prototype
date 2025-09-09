@@ -12,7 +12,7 @@ import math
 import torch.nn.init as nn_init
 import logging
 import torch.nn.init as init
-from utils.affinity import PairwiseMLPScorer, RelationQueryScorer, FSTHeadwiseEntmaxScorer
+from utils.affinity import BasisAffinityGAT
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,324 @@ class CoordinatorMLP(nn.Module):
     def forward(self, cls_emb: torch.Tensor) -> torch.Tensor:
         logits = self.coordinate_mlp(cls_emb)                # [B, K]
         return F.softmax(logits / max(self.temperature, 1e-6), dim=-1)
+
+
+class SharedGraphAttention(nn.Module):
+    def __init__(
+        self,
+        args,
+        input_dim : int,
+        hidden_dim : int,
+        n_heads : int, 
+        dropout : float = 0.1,
+        threshold : float = 0.5
+    ):
+        super().__init__()
+        assert input_dim % n_heads == 0 
+        self.args = args
+        self.n_heads = n_heads 
+        self.head_dim = input_dim // n_heads 
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        
+        self.threshold = threshold
+        self.attn_dropout = nn.Dropout(dropout)
+
+        self.q_proj = nn.Linear(input_dim, input_dim)
+        self.k_proj = nn.Linear(input_dim, input_dim)
+        self.v_proj = nn.Linear(input_dim, input_dim)
+        
+        if self.args.attn_type in ['gat_v1', 'gat_v2']:
+            if self.args.edge_type == 'normal':
+                self.attn_proj = nn.Linear(self.head_dim * 3, 1)
+            elif self.args.edge_type == 'mlp':
+                self.attn_proj = nn.Linear(self.head_dim * 3, 1)
+                self.edge_update = nn.Sequential(
+                    nn.Linear(input_dim * 2, input_dim),
+                    nn.LayerNorm(input_dim),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim)
+                )
+            elif self.args.edge_type == 'no_use':
+                self.attn_proj = nn.Linear(self.head_dim * 2, 1)
+        elif self.args.attn_type == 'gate':
+            if self.args.edge_type == 'normal':
+                self.gate_proj = nn.Linear(self.head_dim * 3, 1)
+                self.content_proj = nn.Linear(self.head_dim * 3, 1)
+            elif self.args.edge_type == 'mlp':
+                self.gate_proj = nn.Linear(self.head_dim * 3, 1)
+                self.content_proj = nn.Linear(self.head_dim * 3, 1)
+                self.edge_update = nn.Sequential(
+                    nn.Linear(input_dim * 2, input_dim),
+                    nn.LayerNorm(input_dim),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim)
+                )
+            elif self.args.edge_type == 'no_use':
+                self.gate_proj = nn.Linear(self.head_dim * 2, 1)
+                self.content_proj = nn.Linear(self.head_dim * 2, 1)
+        
+        self.out_proj = nn.Linear(input_dim, input_dim)
+        nn_init.xavier_uniform_(self.q_proj.weight, gain=1 / math.sqrt(2))
+        nn_init.xavier_uniform_(self.k_proj.weight, gain=1 / math.sqrt(2))
+        nn_init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
+        nn_init.xavier_uniform_(self.out_proj.weight, gain=1 / math.sqrt(2))
+        
+        if hasattr(self, 'attn_proj'):
+            nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
+        if hasattr(self, 'gate_proj'):
+            nn_init.xavier_uniform_(self.gate_proj.weight, gain=1 / math.sqrt(2))
+        if hasattr(self, 'content_proj'):
+            nn_init.xavier_uniform_(self.content_proj.weight, gain=1 / math.sqrt(2))
+        if hasattr(self, 'edge_update'):
+            for module in self.edge_update:
+                if isinstance(module, nn.Linear):
+                    nn_init.xavier_uniform_(module.weight, gain=1 / math.sqrt(2))
+
+    def _no_self_interaction(self, adjacency_matrix):
+        batch_size, seq_len, _ = adjacency_matrix.shape
+        diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
+        return adjacency_matrix * diag_mask
+
+    def forward(self, desc_embeddings, name_value_embeddings):
+        batch_size, new_seq, _ = name_value_embeddings.shape
+        seq_len = new_seq - 1
+
+        self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
+        if self.args.no_self_loop:
+            self.adjacency = self._no_self_interaction(self.adjacency)
+
+        new_adjacency = torch.zeros(batch_size, new_seq, new_seq, device=self.adjacency.device)
+        new_adjacency[:, 1:, 1:] = self.adjacency 
+        new_adjacency[:, 0, 1:] = 1.0 # CLS -> Var
+        new_adjacency[:, 1:, 0] = 0.0 # Var -> CLS
+        
+        self.new_adjacency = new_adjacency
+        
+        '''
+            Attention
+        '''
+        q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        # Attention 계산 방식 선택
+        if self.args.attn_type == 'gat_v1':
+            # GAT-style attention (concat + MLP)
+            if self.args.edge_type == "normal":
+                # Case 1: GAT with edge attributes - MLP([q | k | edge_attr])
+                target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                cls_edge_attr = desc_embeddings
+
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = target_desc  # 변수 노드 간
+                edge_attr[:, 0, 1:] = cls_edge_attr  # CLS->변수
+                
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+            elif self.args.edge_type == "mlp":
+                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
+                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+                edge_dim = var_edge_attr.size(-1)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = var_edge_attr  # 변수 노드 간
+                edge_attr[:, 0, 1:] = cls_edge_attr   # CLS->변수
+                edge_attr[:, 1:, 0] = cls_edge_attr   # 변수->CLS
+                
+                # 4. 차원 맞추기 (edge_update 필요)
+                edge_attr = self.edge_update(edge_attr)  # [batch, new_seq, new_seq, n_heads * head_dim]
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                # 5. Attention 계산 (기존과 동일)
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
+            elif self.args.edge_type == 'no_use':
+                # Case 2: GAT without edge attributes - MLP([q | k])
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qk_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1)
+                ], dim = -1)
+                
+                attn_weights = self.attn_proj(qk_expanded).squeeze(-1)
+        elif self.args.attn_type == 'gat_v2':
+           # GAT-v2 style attention (LeakyReLU before attention)
+           if self.args.edge_type == "normal":
+               target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+               cls_edge_attr = desc_embeddings
+
+               edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+               edge_attr[:, 1:, 1:] = target_desc
+               edge_attr[:, 0, 1:] = cls_edge_attr
+               
+               edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+               edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+               edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+               
+               q_expanded = q.unsqueeze(3)
+               k_expanded = k.unsqueeze(2)
+               qke_expanded = torch.cat([
+                   q_expanded.expand(-1,-1,-1, new_seq, -1),
+                   k_expanded.expand(-1,-1, new_seq, -1, -1),
+                   edge_attr
+               ], dim = -1)
+               
+               # GAT-v2: LeakyReLU before attention
+               activated_features = F.leaky_relu(qke_expanded)
+               attn_weights = self.attn_proj(activated_features).squeeze(-1)
+           elif self.args.edge_type == "mlp":
+               node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+               node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+               var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
+               cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+               edge_dim = var_edge_attr.size(-1)
+               edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+               edge_attr[:, 1:, 1:] = var_edge_attr
+               edge_attr[:, 0, 1:] = cls_edge_attr
+               edge_attr[:, 1:, 0] = cls_edge_attr
+               
+               edge_attr = self.edge_update(edge_attr)
+               edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+               edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+               edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+               
+               q_expanded = q.unsqueeze(3)
+               k_expanded = k.unsqueeze(2)
+               qke_expanded = torch.cat([
+                   q_expanded.expand(-1,-1,-1, new_seq, -1),
+                   k_expanded.expand(-1,-1, new_seq, -1, -1),
+                   edge_attr
+               ], dim = -1)
+               
+               # GAT-v2: LeakyReLU before attention
+               activated_features = F.leaky_relu(qke_expanded)
+               attn_weights = self.attn_proj(activated_features).squeeze(-1)
+           elif self.args.edge_type == 'no_use':
+               q_expanded = q.unsqueeze(3)
+               k_expanded = k.unsqueeze(2)
+               qk_expanded = torch.cat([
+                   q_expanded.expand(-1,-1,-1, new_seq, -1),
+                   k_expanded.expand(-1,-1, new_seq, -1, -1)
+               ], dim = -1)
+               
+               # GAT-v2: LeakyReLU before attention
+               activated_features = F.leaky_relu(qk_expanded)
+               attn_weights = self.attn_proj(activated_features).squeeze(-1)
+        elif self.args.attn_type == "gate":
+            # Gate attention mechanism
+            if self.args.edge_type == "normal":
+                # Edge attributes 준비
+                target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                cls_edge_attr = desc_embeddings
+
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = target_desc
+                edge_attr[:, 0, 1:] = cls_edge_attr
+                
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                # Gate mechanism: σ(W_g * [q|k|e]) * tanh(W_c * [q|k|e])
+                gate_values = torch.sigmoid(self.gate_proj(qke_expanded))  # [batch, n_heads, seq, seq, 1]
+                content_values = torch.tanh(self.content_proj(qke_expanded))  # [batch, n_heads, seq, seq, 1]
+                attn_weights = (gate_values * content_values).squeeze(-1)  # [batch, n_heads, seq, seq]
+                
+            elif self.args.edge_type == "mlp":
+                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
+                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+                edge_dim = var_edge_attr.size(-1)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+                edge_attr[:, 1:, 1:] = var_edge_attr
+                edge_attr[:, 0, 1:] = cls_edge_attr
+                edge_attr[:, 1:, 0] = cls_edge_attr
+                
+                edge_attr = self.edge_update(edge_attr)
+                edge_attr = edge_attr.view(batch_size, new_seq, new_seq, self.n_heads, self.head_dim)
+                edge_attr = edge_attr.permute(0, 3, 1, 2, 4)
+                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+                
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qke_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1),
+                    edge_attr
+                ], dim = -1)
+                
+                # Gate mechanism: σ(W_g * [q|k|e]) * tanh(W_c * [q|k|e])
+                gate_values = torch.sigmoid(self.gate_proj(qke_expanded))
+                content_values = torch.tanh(self.content_proj(qke_expanded))
+                attn_weights = (gate_values * content_values).squeeze(-1)
+                
+            elif self.args.edge_type == 'no_use':
+                q_expanded = q.unsqueeze(3)
+                k_expanded = k.unsqueeze(2)
+                qk_expanded = torch.cat([
+                    q_expanded.expand(-1,-1,-1, new_seq, -1),
+                    k_expanded.expand(-1,-1, new_seq, -1, -1)
+                ], dim = -1)
+                
+                # Gate mechanism: σ(W_g * [q|k]) * tanh(W_c * [q|k])
+                gate_values = torch.sigmoid(self.gate_proj(qk_expanded))
+                content_values = torch.tanh(self.content_proj(qk_expanded))
+                attn_weights = (gate_values * content_values).squeeze(-1)
+
+        elif self.args.attn_type == "att":
+            # Case 3: Standard dot-product attention (use_edge_attr는 무시)
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        else:
+            # Default: standard dot-product attention
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        
+        # Graph structure masking
+        mask = (new_adjacency.unsqueeze(1) == 0).float() * -1e9
+        attn_weights = attn_weights + mask 
+        attn_weights = F.softmax(attn_weights, dim = -1)
+        self.attn_weights = self.attn_dropout(attn_weights)
+
+        # Context 계산
+        context = torch.matmul(self.attn_weights, v)
+        context = context.transpose(1,2).reshape(batch_size, new_seq, self.input_dim)
+        output = self.out_proj(context)
+        
+        return output, attn_weights
+
+
+
 
 
 class BasisGATLayer(nn.Module):
@@ -233,8 +551,7 @@ class BasisGATLayer(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, args, input_dim, hidden_dim, output_dim,
-                 num_layers, dropout_rate, llm_model, experiment_id, mode):
+    def __init__(self, args, input_dim, hidden_dim, output_dim, dropout_rate, llm_model, experiment_id, mode):
         super().__init__()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -253,46 +570,32 @@ class Model(nn.Module):
         nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
 
         # ----- Relation scorer (FFN1 + scorer) -----
-        self.mask_share_across_layers = bool(getattr(args, 'mask_share_across_layers', True))
         rel_input_dim   = int(getattr(args, 'rel_input_dim', 768))
         rel_hidden_dim = int(getattr(args, 'rel_hidden_dim', 512))
-        rel_symmetric  = bool(getattr(args, 'rel_symmetric', False))
         no_self_loop   = bool(getattr(args, 'no_self_loop', True))
-        scorer_type    = str(getattr(args, 'relation_scorer_type', 'pair_mlp'))
         self.num_basis_layers = int(getattr(args, 'num_basis_layers', 3))
+        self.num_shared_layers = int(getattr(args, 'num_shared_layers', 3))
 
-        # FFN1: project LLM embeddings to relation-space
-        self.rel_proj = nn.Sequential(
-            nn.Linear(self.input_dim, rel_input_dim),
-            nn.LayerNorm(rel_input_dim),
-            nn.ReLU()
+
+        self.shared_layers = nn.ModuleList([ 
+            SharedGraphAttention(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim,
+            n_heads = args.n_heads, dropout = self.dropout_rate, threshold = getattr(args, 'threshold', 0.5)
+            ) for _ in range(self.num_shared_layers)
+        ])
+        self.shared_layer_norms = nn.ModuleList([ 
+            nn.LayerNorm(self.input_dim) for _ in range(self.num_shared_layers)
+        ])
+
+        self.basis_affinity = BasisAffinityGAT(
+            args, input_dim = self.input_dim, k_basis = args.k_basis
         )
+        self.anchor_kl_lambda = float(getattr(args, "anchor_kl_lambda", 0.05))
 
-        # scorer: make M [B,H,S,S]
-        if scorer_type == 'pair_mlp':
-            self.relation_scorer = PairwiseMLPScorer(
-                rel_input_dim=rel_input_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
-                dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
-            )
-        elif scorer_type == 'query':
-            self.relation_scorer = RelationQueryScorer(
-                rel_input_dim=rel_input_dim, k_basis=args.k_basis, rel_hidden_dim=rel_hidden_dim,
-                dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
-            )
-        elif scorer_type == 'fst_headwise_entmax':
-            self.relation_scorer = FSTHeadwiseEntmaxScorer(
-                rel_input_dim=rel_input_dim, rel_hidden_dim=rel_hidden_dim, k_basis=args.k_basis,
-                dropout_rate=self.dropout_rate, mask_symmetric=rel_symmetric, no_self_loop=no_self_loop
-            )
-        else:
-            raise ValueError(f"Unknown relation_scorer_type: {scorer_type}")
-
-        # ----- BasisGAT stack -----
-        self.basis_layers = nn.ModuleList([
-            BasisGATLayer(args, input_dim, hidden_dim, args.k_basis, self.dropout_rate)
+        self.basis_layers = nn.ModuleList([ 
+            BasisGATLayer(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, n_heads = args.k_basis, dropout = self.dropout_rate)
             for _ in range(self.num_basis_layers)
         ])
-        self.basis_layer_norms = nn.ModuleList([
+        self.basis_layer_norms = nn.ModuleList([ 
             nn.LayerNorm(self.input_dim) for _ in range(self.num_basis_layers)
         ])
 
@@ -360,6 +663,145 @@ class Model(nn.Module):
         # 5) (선택) relation_scorer는 프리징 유지 (pretrain에서 학습되었다고 가정)
         # for p in self.relation_scorer.parameters(): p.requires_grad = False
 
+    @torch.no_grad()
+    def get_coordinates(self, batch):
+        self.eval()
+        # gather
+        desc_list, nv_list = [], []
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            desc_list.append(batch['cat_desc_embeddings'].to(self.device))
+            nv_list.append(batch['cat_name_value_embeddings'].to(self.device))
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
+            desc_list.append(batch['num_desc_embeddings'].to(self.device))
+            nv_list.append(batch['num_prompt_embeddings'].to(self.device))
+        if not desc_list or not nv_list:
+            raise ValueError("No categorical or numerical features found in batch")
+
+        desc = torch.cat(desc_list, dim=1)  # [B,S,D]
+        nv   = torch.cat(nv_list ,dim=1)    # [B,S,D]
+
+        x_shared = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim = 1) 
+        for l in range(self.num_shared_layers):
+            nx = self.shared_layer_norms[l](x_shared)
+            out, _ = self.shared_layers[l](desc, nx)
+            x_shared = x_shared + out 
+        cls_coord = x_shared[:, 0, :]
+        c = self.coordinator(cls_coord)
+        return c
+
+    def set_kmeans_centroids(self, centroids: torch.Tensor):
+        self.register_buffer("centroids", centroids.detach(), persistent=False)
+        self.best_k = int(centroids.size(0))
+
+    def set_coord_temperature(self, t: float):
+        self.coordinator.temperature = float(t)
+
+    # ---- training ----
+    def forward(self, batch, y):
+        target = y.to(self.device)
+        if self.num_classes == 2:
+            target = target.view(-1, 1).float()
+        else:
+            target = target.squeeze().long()
+
+        pred = self.predict(batch)
+        loss = self.criterion(pred, target)
+
+        # KL(anchor): alpha (with-grad) vs anchor (no-grad)
+        if self.anchor_kl_lambda > 0.0 and hasattr(self, "_last_alpha") and hasattr(self, "_last_bias_log"):
+            eps = 1e-6 
+            alpha = self._last_alpha 
+            bias_log = self._last_bias_log 
+            alpha_log = (alpha + eps).log() 
+            L_anchor = (alpha * (alpha_log - bias_log)).sum(dim=(-1, -2)).mean() 
+            loss = loss + self.anchor_kl_lambda * L_anchor 
+
+        # 좌표-KL (Few일 때)
+        lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
+        if (self.mode == 'Few') and (lam > 0.0) and hasattr(self, "centroids"):
+            c = getattr(self, "_last_coordinates", None)
+            if c is not None:
+                from utils.coord_Kmeans import build_centroid_target
+                q = build_centroid_target(
+                    c, self.centroids,
+                    tau=float(getattr(self.args, "coord_tau", 0.3)),
+                    mode=str(getattr(self.args, "coord_target_mode", "soft"))
+                ).to(c.device)
+                eps = 1e-8
+                c_safe = c.clamp_min(eps)
+                q_safe = q.clamp_min(eps)
+                kl = torch.sum(q_safe * (q_safe.log() - c_safe.log()), dim=1).mean()
+                loss = loss + lam * kl
+
+        return loss
+
+    # ---- inference ----
+    def predict(self, batch):
+        # gather
+        desc_embeddings, name_value_embeddings = [], []
+        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
+            name_value_embeddings.append(batch['cat_name_value_embeddings'].to(self.device))
+            desc_embeddings.append(batch['cat_desc_embeddings'].to(self.device))
+        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
+            name_value_embeddings.append(batch['num_prompt_embeddings'].to(self.device))
+            desc_embeddings.append(batch['num_desc_embeddings'].to(self.device))
+        if not desc_embeddings or not name_value_embeddings:
+            raise ValueError("No categorical or numerical features found in batch")
+
+        desc = torch.cat(desc_embeddings, dim=1)  # [B,S,D]
+        nv   = torch.cat(name_value_embeddings, dim=1)
+
+        x_shared = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim = 1) 
+        for l in range(self.num_shared_layers):
+            nx = self.shared_layer_norms[l](x_shared)
+            out, _ = self.shared_layers[l](desc, nx)
+            x_shared = x_shared + out 
+        cls_for_coord = x_shared[:, 0, :]
+        coordinates = self.coordinator(cls_for_coord)
+        self._last_coordinates = coordinates
+
+        # Global anchor / Batch affinity 
+        bias_log , alpha = self.basis_affinity(desc, nv)
+        self._last_bias_log = bias_log 
+        self._last_alpha = alpha 
+
+        # cls_token = self.cls.expand(nv.size(0), 1, self.input_dim)
+        # x = torch.cat([cls_token, nv], dim=1)     # [B,T,D]
+
+        mask_M = bias_log.exp().clamp(min = 1e-6 ,max = 1.0 -1e-6)
+
+        B, S = desc.size(0), desc.size(1) 
+        K = self.args.k_basis 
+        if mask_M.dim() == 4: 
+            if mask_M.shape == (B, S, K ,S):
+                mask_M = mask_M.permute(0, 2, 1, 3)
+            elif mask_M.shape == (B, 1, K, S): 
+                mask_M = mask_M.squeeze(1) 
+                mask_M = mask_M.unsqueeze(-1).expand(-1, -1, -1, S)
+            elif mask_M.shape == (B, S, S): 
+                mask_M = mask_M.unsqueeze(1).expand(B, K, S, S)
+        assert mask_M.shape[0] == B and mask_M.shape[1] == K and mask_M.shape[2] == S and mask_M.shape[3] == S, \
+            f"mask_M must be [B, {K}, {S}, {S}], got {list(mask_M.shape)}"
+
+        x_basis = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim = 1)
+
+        for l in range(self.num_basis_layers):
+            norm_x = self.basis_layer_norms[l](x_basis)
+            basis_outputs, _ = self.basis_layers[l](desc, norm_x, mask_M = mask_M)
+            x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
+
+        expert_outputs = basis_outputs[:, 0, :, :]
+        preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.k_basis)]
+        expert_predictions = torch.stack(preds, dim = 1)
+        pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim = 1)
+        if 'src_idx' in batch:
+            pred = pred + self.heads[int(batch['src_idx'])](cls_for_coord)
+        elif getattr(self.args, 'use_target_head', False):
+            pred = pred + self.thead(cls_for_coord)
+
+        return pred
+
+    
     def set_attention_save_dir(self, experiment_id, mode):
         base_viz_dir = f"/storage/personal/eungyeop/experiments/visualization/{self.args.llm_model}/{self.args.source_data}/{mode}/{experiment_id}"
         self.attention_save_dir = os.path.join(base_viz_dir, 'attention_maps')
@@ -455,126 +897,3 @@ class Model(nn.Module):
                 filtered_name_value_embeddings.append(batch['num_prompt_embeddings'].to(self.device))
 
         return filtered_desc_embeddings, filtered_name_value_embeddings
-
-    @torch.no_grad()
-    def get_coordinates(self, batch):
-        self.eval()
-        # gather
-        desc_list, nv_list = [], []
-        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-            desc_list.append(batch['cat_desc_embeddings'].to(self.device))
-            nv_list.append(batch['cat_name_value_embeddings'].to(self.device))
-        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-            desc_list.append(batch['num_desc_embeddings'].to(self.device))
-            nv_list.append(batch['num_prompt_embeddings'].to(self.device))
-        if not desc_list or not nv_list:
-            raise ValueError("No categorical or numerical features found in batch")
-
-        desc = torch.cat(desc_list, dim=1)  # [B,S,D]
-        nv   = torch.cat(nv_list ,dim=1)    # [B,S,D]
-
-        cls_token = self.cls.expand(nv.size(0), 1, self.input_dim)
-        x = torch.cat([cls_token, nv], dim=1)  # [B,T,D]
-
-        # 첫 레이어 기준으로 마스크 생성 → 통과
-        norm_x = self.basis_layer_norms[0](x)
-        E_vars = norm_x[:, 1:, :]
-        E_rel  = self.rel_proj(E_vars)
-        M = self.relation_scorer(E_rel)       # [B,H,S,S]
-        basis_outputs, _ = self.basis_layers[0](desc, norm_x, mask_M=M)
-
-        cls_for_coord = basis_outputs[:, 0, :, :].contiguous().view(nv.size(0), self.input_dim)
-        c = self.coordinator(cls_for_coord)    # [B,K]
-        return c
-
-    def set_kmeans_centroids(self, centroids: torch.Tensor):
-        self.register_buffer("centroids", centroids.detach(), persistent=False)
-        self.best_k = int(centroids.size(0))
-
-    def set_coord_temperature(self, t: float):
-        self.coordinator.temperature = float(t)
-
-    # ---- training ----
-    def forward(self, batch, y):
-        target = y.to(self.device)
-        if self.num_classes == 2:
-            target = target.view(-1, 1).float()
-        else:
-            target = target.squeeze().long()
-
-        pred = self.predict(batch)
-        loss = self.criterion(pred, target)
-
-        # 좌표-KL (Few일 때)
-        lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
-        if (self.mode == 'Few') and (lam > 0.0) and hasattr(self, "centroids"):
-            c = getattr(self, "_last_coordinates", None)
-            if c is not None:
-                from utils.coord_Kmeans import build_centroid_target
-                q = build_centroid_target(
-                    c, self.centroids,
-                    tau=float(getattr(self.args, "coord_tau", 0.3)),
-                    mode=str(getattr(self.args, "coord_target_mode", "soft"))
-                ).to(c.device)
-                eps = 1e-8
-                c_safe = c.clamp_min(eps)
-                q_safe = q.clamp_min(eps)
-                kl = torch.sum(q_safe * (q_safe.log() - c_safe.log()), dim=1).mean()
-                loss = loss + lam * kl
-
-        return loss
-
-    # ---- inference ----
-    def predict(self, batch):
-        # gather
-        desc_embeddings, name_value_embeddings = [], []
-        if all(k in batch for k in ['cat_name_value_embeddings', 'cat_desc_embeddings']):
-            name_value_embeddings.append(batch['cat_name_value_embeddings'].to(self.device))
-            desc_embeddings.append(batch['cat_desc_embeddings'].to(self.device))
-        if all(k in batch for k in ['num_prompt_embeddings', 'num_desc_embeddings']):
-            name_value_embeddings.append(batch['num_prompt_embeddings'].to(self.device))
-            desc_embeddings.append(batch['num_desc_embeddings'].to(self.device))
-        if not desc_embeddings or not name_value_embeddings:
-            raise ValueError("No categorical or numerical features found in batch")
-
-        desc = torch.cat(desc_embeddings, dim=1)  # [B,S,D]
-        nv   = torch.cat(name_value_embeddings, dim=1)
-
-        cls_token = self.cls.expand(nv.size(0), 1, self.input_dim)
-        x = torch.cat([cls_token, nv], dim=1)     # [B,T,D]
-
-        M0 = None
-        for l in range(self.num_basis_layers):
-            norm_x = self.basis_layer_norms[l](x)
-            E_vars = norm_x[:, 1:, :]            # [B,S,D]
-
-            if self.mask_share_across_layers and (l > 0):
-                M = M0
-            else:
-                E_rel = self.rel_proj(E_vars)    # [B,S,rel_input_dim]
-                M = self.relation_scorer(E_rel)  # [B,H,S,S]
-                if self.mask_share_across_layers and l == 0:
-                    M0 = M
-
-            basis_outputs, _ = self.basis_layers[l](desc, norm_x, mask_M=M)
-            # residual
-            x = x + basis_outputs.reshape(x.size(0), x.size(1), self.input_dim)
-
-        # 마지막 층 CLS(H,d) → [B,input_dim]
-        cls_for_coord = basis_outputs[:, 0, :, :].contiguous().view(nv.size(0), self.input_dim)
-        coordinates = self.coordinator(cls_for_coord)  # [B,H]
-        self._last_coordinates = coordinates
-
-        # experts
-        expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,d]
-        preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.k_basis)]
-        expert_predictions = torch.stack(preds, dim=1)  # [B,H,out]
-        pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim=1)
-
-        # residual head
-        if 'src_idx' in batch:
-            pred = pred + self.heads[int(batch['src_idx'])](cls_for_coord)
-        elif getattr(self.args, 'use_target_head', False):
-            pred = pred + self.thead(cls_for_coord)
-
-        return pred

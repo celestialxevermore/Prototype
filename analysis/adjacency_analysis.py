@@ -1,4 +1,4 @@
-# adjacency_viz.py
+# adjacency_analysis.py
 import os, copy, argparse
 from pathlib import Path
 import numpy as np
@@ -12,9 +12,9 @@ root_dir = current_dir.parent
 sys.path.append(str(root_dir))  # models, dataset, utils 등이 위치한 루트 디렉토리를 추가
 from models.TabularFLM_S import Model
 
-
 from dataset.data_dataloaders import prepare_embedding_dataloaders
 from utils.util import fix_seed
+
 def extract_deleted_features_from_checkpoint(p):
     import re
     stem = Path(p).stem
@@ -52,15 +52,31 @@ class MVisualizer:
             self.args.del_feat = auto_del_feat
             print(f"[INFO] Applied del_feat from filename: {auto_del_feat}")
 
+        # 모델 생성
         self.model = Model(self.args, self.args.input_dim, self.args.hidden_dim,
-                           self.args.output_dim, self.args.num_layers,
+                           self.args.output_dim,
                            self.args.dropout_rate, self.args.llm_model,
                            "viz","viz").to(self.device)
-        self.model.load_state_dict(ckpt['model_state_dict'], strict=True)
+
+        # 1) 체크포인트에 저장된 alpha_ema를 따로 보관(시각화에 쓸 수 있음)
+        sd = ckpt['model_state_dict']
+        self.anchor_from_ckpt = sd.get('basis_affinity.alpha_ema', None)
+
+        # 2) alpha_ema 키 제거 후 로드 (사이즈 미스매치 회피)
+        sd_wo_anchor = {k: v for k, v in sd.items() if 'alpha_ema' not in k}
+        missing, unexpected = self.model.load_state_dict(sd_wo_anchor, strict=False)
+
+        # (선택) 안전 확인: 다른 키가 빠지지 않았는지 로그 정도만
+        if any(k != 'basis_affinity.alpha_ema' for k in missing):
+            print("[WARN] Missing keys (except alpha_ema):", missing)
+        if unexpected:
+            print("[WARN] Unexpected keys:", unexpected)
+
         self.model.eval()
 
         self.num_layers = int(getattr(self.args,'num_basis_layers',3))
         self.num_heads  = int(getattr(self.args,'k_basis',8))
+
 
     def _make_loader(self, dataset_name: str):
         args2 = copy.deepcopy(self.args)
@@ -88,24 +104,46 @@ class MVisualizer:
         cls = self.model.cls.expand(B,1,D)
         x = torch.cat([cls, nv], dim=1)     # [B,T,D], T=S+1
 
+        # Shared layers
+        # x_shared = x.clone()
+        # for l in range(self.model.num_shared_layers):
+        #     nx = self.model.shared_layer_norms[l](x_shared)
+        #     out, _ = self.model.shared_layers[l](desc, nx)
+        #     x_shared = x_shared + out
+
+        # # Get coordinates
+        # cls_coord = x_shared[:, 0, :]
+        # coordinates = self.model.coordinator(cls_coord)
+        bias_log, alpha = self.model.basis_affinity(desc, nv)
+        anchor = self.model.basis_affinity.alpha_ema 
+        if anchor.numel() == 0 or torch.all(anchor ==0):
+            anchor = alpha.mean(dim = 0, keepdim = False)
+        alpha_np = alpha[0].detach().cpu().numpy() 
+        anchor_np = anchor.detach().cpu().numpy() 
+
+        mask_M = alpha.clamp_(1e-6, 1.0 - 1e-6)
+
+
+        # Basis layers - 각 레이어마다 새로운 affinity 계산
         Ms, ATTs, ADJs = [], [], []
-        M0=None
+        x_basis = x.clone()
+        
         for l in range(self.num_layers):
-            nx = self.model.basis_layer_norms[l](x)
-            E_vars = nx[:,1:,:]
-            if self.model.mask_share_across_layers and (l>0):
-                M = M0
-            else:
-                E_rel = self.model.rel_proj(E_vars)
-                M = self.model.relation_scorer(E_rel)   # [B,H,S,S]  (Var-Var only)
-                if self.model.mask_share_across_layers and l==0: M0=M
-            bo, att = self.model.basis_layers[l](desc, nx, mask_M=M)  # att: [B,H,T,T]
-            new_adj = self.model.basis_layers[l].new_adjacency        # [B,T,T] with CLS->Var=1, Var->CLS=0
-            x = x + bo.reshape(B,S+1,D)
-            Ms.append(M); ATTs.append(att); ADJs.append(new_adj)
+            # 각 레이어마다 새로운 affinity 계산
+            norm_x = self.model.basis_layer_norms[l](x_basis)
+            basis_outputs, att = self.model.basis_layers[l](desc, norm_x, mask_M = mask_M) 
+            new_adj = self.model.basis_layers[l].new_adjacency 
+            x_basis = x_basis + basis_outputs.reshape(B, S+1, D)
+            
+            A_np = alpha[0].cpu().numpy() 
+            for h in range(self.num_heads):
+                Ms.append(A_np[h]) 
+            
+            ATTs.append(att[0].cpu().numpy())  # [H,T,T] - take first sample
+            ADJs.append(new_adj[0].cpu().numpy())  # [T,T] - take first sample
 
         feat_names = self.model.extract_feature_names(bd)  # length S
-        return Ms, ATTs, ADJs, feat_names  # note: feat_names has NO CLS
+        return Ms, ATTs, ADJs, feat_names, alpha_np, anchor_np
 
     def _grid_plot(self, mats, names, title, save_path):
         L,H = self.num_layers, self.num_heads
@@ -154,9 +192,9 @@ class MVisualizer:
         n = len(names_all)
         
         # 최종 그래프 행렬 계산
-        final_graph_matrix = (att * adj).numpy()
+        final_graph_matrix = att * adj  # 이미 numpy 배열이므로 .numpy() 제거
         mask = (adj == 0)
-        final_graph_matrix[mask.numpy()] = 0.0
+        final_graph_matrix[mask] = 0.0
         
         # Edge 리스트 수집
         cls_edges_info = []  # CLS에서 나가는 엣지
@@ -215,8 +253,8 @@ class MVisualizer:
         # 각 바 위에 attention score 값 표시
         for i, (weight, label) in enumerate(zip(edge_weights, edge_labels)):
             ax_bar.text(i, weight + 0.01, f"{weight:.3f}", 
-                      ha='center', va='bottom', rotation=90, 
-                      fontsize=7, color='black')
+                    ha='center', va='bottom', rotation=90, 
+                    fontsize=7, color='black')
         
         ax_bar.set_title(f'Top Edge Weights - Layer {layer_idx} · Head {head_idx}', fontsize=12)
         ax_bar.set_xlabel('Edge (i->j)')
@@ -339,7 +377,7 @@ class MVisualizer:
 
         # (C) Graph matrix heatmap (이진 Structural Adjacency)
         ax_graph_matrix = axes[1, 0]
-        graph_matrix_np = adj.numpy() 
+        graph_matrix_np = adj  # 이미 numpy 배열이므로 .numpy() 제거
         im_graph = ax_graph_matrix.imshow(graph_matrix_np, cmap="Blues", interpolation='nearest')
         ax_graph_matrix.set_title("Graph Matrix (Structural Adjacency)", fontsize=14)
         fig.colorbar(im_graph, ax=ax_graph_matrix)
@@ -352,7 +390,7 @@ class MVisualizer:
         for i in range(len(names_all)):
             for j in range(len(names_all)):
                 ax_graph_matrix.text(j, i, f"{graph_matrix_np[i,j]:.2f}", ha="center", va="center", 
-                                   color="black" if graph_matrix_np[i,j] < 0.5 else "white", fontsize=8)
+                                color="black" if graph_matrix_np[i,j] < 0.5 else "white", fontsize=8)
 
         # (D) Final graph matrix (Attention × Adjacency)
         ax_final = axes[1, 1]
@@ -393,32 +431,42 @@ class MVisualizer:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
-    # def _plot_binary_adjacency(self, adj, var_names, sample_idx, base_path):
-    #     """이진 Structural Adjacency 시각화"""
-    #     names_all = ["CLS"] + var_names
-        
-    #     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        
-    #     # 이진 마스크 시각화
-    #     im = ax.imshow(adj, cmap='binary', vmin=0, vmax=1, interpolation='nearest')
-    #     ax.set_title(f"Sample {sample_idx} · Binary Structural Adjacency", fontsize=14)
-    #     ax.set_xticks(range(len(names_all)))
-    #     ax.set_yticks(range(len(names_all)))
-    #     ax.set_xticklabels(names_all, rotation=90, fontsize=10)
-    #     ax.set_yticklabels(names_all, fontsize=10)
-        
-    #     # 값 표시
-    #     for i in range(len(names_all)):
-    #         for j in range(len(names_all)):
-    #             text = ax.text(j, i, f'{adj[i, j]:.0f}', 
-    #                           ha="center", va="center", color="red" if adj[i, j] == 0 else "black")
-        
-    #     add_cb(ax, im)
-        
-    #     plt.tight_layout()
-    #     save_path = base_path / f"sample_{sample_idx}_binary_adjacency.png"
-    #     plt.savefig(save_path, dpi=250, bbox_inches='tight')
-    #     plt.close(fig)
+    def _grid_plot_centered(self, mats, names, title, save_path, center=0.0, cmap='RdBu_r'):
+        L, H = self.num_layers, self.num_heads
+        n = mats[0].shape[0]
+
+        # 대칭 vlim 계산 (대각 제외)
+        max_abs = 0.0
+        for M in mats:
+            mask = ~np.eye(n, dtype=bool)
+            vals = M[mask] - center if np.isscalar(center) else (M[mask] - center[mask])
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                max_abs = max(max_abs, np.max(np.abs(vals)))
+        vmin, vmax = -max_abs, +max_abs
+
+        fig, axes = plt.subplots(L, H, figsize=(H*3.2, L*3.2))
+        if L == 1: axes = np.expand_dims(axes, 0)
+        if H == 1: axes = np.expand_dims(axes, 1)
+
+        for l in range(L):
+            for h in range(H):
+                ax = axes[l, h]
+                M = mats[l*H + h]
+                data = (M - center) if np.isscalar(center) else (M - center)  # center가 스칼라든 행렬이든 동일 처리
+                im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
+                ax.set_title(f"L{l} · H{h}", fontsize=10)
+                ax.set_xticks(range(n)); ax.set_yticks(range(n))
+                ax.set_xticklabels(names, rotation=90, fontsize=7)
+                ax.set_yticklabels(names, fontsize=7)
+                add_cb(ax, im)
+        plt.suptitle(title, fontsize=14)
+        plt.tight_layout(rect=[0,0,1,0.95])
+        ensure_dir(Path(save_path).parent)
+        plt.savefig(save_path, dpi=250, bbox_inches='tight')
+        plt.close(fig)
+
+    
 
     def visualize_dataset(self, dataset_name: str, role: str, out_root: Path, max_samples=2):
         loader = self._make_loader(dataset_name)
@@ -426,47 +474,80 @@ class MVisualizer:
         ensure_dir(base)
         count=0
         for batch in loader:
-            Ms, ATTs, ADJs, var_names = self._forward_collect(batch)
+            Ms, ATTs, ADJs, var_names, alpha_np, anchor_np = self._forward_collect(batch)
             
             # 각 샘플별 서브폴더 생성
             sample_dir = base / f"sample_{count}"
             ensure_dir(sample_dir)
             
-            # ---------- (1) scorer M (Var-Var ONLY) ----------
+            # ---------- (1) Var-Var Affinity (BasisAffinityGAT) ----------
             grid_M=[]
             for l in range(self.num_layers):
                 for h in range(self.num_heads):
-                    grid_M.append(Ms[l][0,h].cpu().numpy())  # [S,S]
+                    # Ms는 [head0, head1, ..., head7, head0, head1, ..., head7, ...] 순서로 저장됨
+                    # 각 레이어마다 num_heads개씩 저장되어 있음
+                    head_idx = l * self.num_heads + h
+                    grid_M.append(Ms[head_idx])  # [S,S] - each head's affinity
             self._grid_plot(grid_M, var_names,
-                            f"{role.capitalize()} • {dataset_name} • Sample {count} • scorer M (Var–Var)",
-                            sample_dir/f"M_varvar_grid.png")
+                            f"{role.capitalize()} • {dataset_name} • Sample {count} • Var-Var Affinity",
+                            sample_dir/f"Affinity_varvar_grid.png")
 
             # ---------- (2) attention × structural adjacency (CLS 포함) ----------
             names_all = ["CLS"]+var_names
             grid_AX=[]
             for l in range(self.num_layers):
-                att = ATTs[l][0].cpu().numpy()    # [H,T,T]
-                adj = ADJs[l][0].cpu().numpy()    # [T,T]
+                att = ATTs[l]    # [H,T,T]
+                adj = ADJs[l]    # [T,T]
                 for h in range(self.num_heads):
                     grid_AX.append(att[h]*adj)     # [T,T]; CLS->Var가 살아있음
             self._grid_plot(grid_AX, names_all,
                             f"{role.capitalize()} • {dataset_name} • Sample {count} • Attention × Adjacency",
                             sample_dir/f"AttnXAdj_grid.png")
 
-            # ---------- (3) 이진 Structural Adjacency ----------
-            # 첫 번째 레이어의 adjacency 사용 (모든 레이어에서 동일)
-            #binary_adj = ADJs[0][0].cpu().numpy()
-            #self._plot_binary_adjacency(binary_adj, var_names, count, sample_dir)
-
-            # ---------- (4) 각 헤드별 완전한 분석 (2x2 서브플롯) ----------
+            # ---------- (3) 각 헤드별 완전한 분석 (2x2 서브플롯) ----------
+            # for l in range(self.num_layers):
+            #     att = ATTs[l]    # [H,T,T]
+            #     adj = ADJs[l]    # [T,T]
+            #     for h in range(self.num_heads):
+            #         self._plot_complete_head_analysis(
+            #             att[h], adj, var_names, l, h, count, sample_dir
+            #         )
+            # (A) 샘플 α (균등 1/S를 중심으로)
+            uniform = 1.0 / len(var_names)
+            grid_alpha = []
             for l in range(self.num_layers):
-                att = ATTs[l][0].cpu()    # [H,T,T]
-                adj = ADJs[l][0].cpu()    # [T,T]
                 for h in range(self.num_heads):
-                    self._plot_complete_head_analysis(
-                        att[h], adj, var_names, l, h, count, sample_dir
-                    )
+                    grid_alpha.append(alpha_np[h])  # [S,S]
+            self._grid_plot_centered(
+                grid_alpha, var_names,
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • Var-Var Affinity (center=1/S)",
+                sample_dir / "Affinity_varvar_grid_center_uniform.png",
+                center=uniform, cmap='RdBu_r'
+            )
 
+            # (B) 전역 앵커 α_ema (동일한 센터/스케일)
+            grid_anchor = []
+            for l in range(self.num_layers):
+                for h in range(self.num_heads):
+                    grid_anchor.append(anchor_np[h])
+            self._grid_plot_centered(
+                grid_anchor, var_names,
+                f"{role.capitalize()} • {dataset_name} • Global Anchor (EMA) (center=1/S)",
+                sample_dir / "Anchor_varvar_grid_center_uniform.png",
+                center=uniform, cmap='RdBu_r'
+            )
+
+            # (C) 편차 Δ = α - α_ema (center=0)
+            grid_delta = []
+            for l in range(self.num_layers):
+                for h in range(self.num_heads):
+                    grid_delta.append(alpha_np[h] - anchor_np[h])
+            self._grid_plot_centered(
+                grid_delta, var_names,
+                f"{role.capitalize()} • {dataset_name} • Δ(α − EMA)",
+                sample_dir / "Delta_alpha_minus_anchor.png",
+                center=0.0, cmap='RdBu_r'
+            )
             count+=1
             if count>=max_samples: break
 

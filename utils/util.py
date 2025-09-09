@@ -401,7 +401,7 @@ def save_results_(args, results):
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.n_heads}_{timestamp}.json"
+    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_h{args.n_heads}_{timestamp}.json"
     filepath = os.path.join(exp_dir, filename)
 
     data = {
@@ -418,7 +418,8 @@ def save_results_(args, results):
             "llm_models": args.llm_model,
             "dropout_rate": args.dropout_rate,
             "hidden_dim": args.hidden_dim,
-            "num_layers": args.num_layers,
+            "num_shared_layers": args.num_shared_layers,
+            "num_basis_layers": args.num_basis_layers,
             "num_heads": args.n_heads,
             "few_shot": args.few_shot,
             "threshold": args.threshold,

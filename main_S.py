@@ -46,7 +46,7 @@ def get_args():
     parser.add_argument('--input_dim', type=int, default=768)
     parser.add_argument('--hidden_dim', type=int, default=192)
     parser.add_argument('--output_dim', type=int, default=1)
-    parser.add_argument('--num_layers', type=int, default=3)
+    parser.add_argument('--num_shared_layers', type=int, default=2)
     parser.add_argument('--dropout_rate', type=float, default=0.1)
     parser.add_argument('--n_heads', type=int, default=8)
     parser.add_argument('--k_basis', type=int, default=8)
@@ -99,15 +99,14 @@ def get_args():
 
     # BasisGAT
     # BasisGAT 스택 관련
-    parser.add_argument('--num_basis_layers', type=int, default=3, help='Number of stacked BasisGAT layers.')
-    parser.add_argument('--mask_share_across_layers', action='store_true', help='Reuse the same relation mask M across all BasisGAT layers.')
-
+    parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
+    parser.add_argument('--basis_ema_momentum', type=float, default=0.99, help = 'EMA momentum for basis affinity')
+    parser.add_argument('--anchor_kl_lambda', type=float, default=0.05, help = 'Weight of KL(anchor) regularizer during Few-shot.')
     # 관계 마스크 스코어러
-    parser.add_argument('--relation_scorer_type', type=str, default='pair_mlp', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
+    parser.add_argument('--relation_scorer_type', type=str, default='AAAAAAAAAAAAAA', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
     parser.add_argument('--rel_input_dim', type=int, default=512,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
     parser.add_argument('--rel_hidden_dim', type=int, default=256,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
-    parser.add_argument('--rel_symmetric', action='store_true', help='Symmetrize M by (M + M^T)/2.')
-
+    
     # 마스크를 로짓에 더할 때 세기(γ)
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
@@ -245,7 +244,7 @@ def find_optimal_threshold(y_true, y_pred):
 
 def train_and_validate(args, model, train_loader, val_loader,
                        criterion, optimizer, device, epochs,
-                       is_binary, patience=10, mode="Full", scheduler=None):
+                       is_binary, patience=10, mode="Full", scheduler=None, warmup_epochs = 0):
     """
     Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
     마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
@@ -264,13 +263,14 @@ def train_and_validate(args, model, train_loader, val_loader,
     best_val_auc   = 0.0
     best_epoch     = 0
     no_improve     = 0
+    warmup_epochs  = int(warmup_epochs)
     best_threshold = 0.5
     best_model_state = None
 
     # 경로용 태그(리스트 방어)
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
 
-    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_rel_id_{args.rel_input_dim}_rel_hd_{args.rel_hidden_dim}_mask_share_{args.mask_share_across_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}_rel_symmetric_{args.rel_symmetric}"
+    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_num_shared_layers_{args.num_shared_layers}_num_basis_layers_{args.num_basis_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}"
     checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -377,9 +377,11 @@ def train_and_validate(args, model, train_loader, val_loader,
                 'args': args
             }, ckpt_path)
         else:
-            no_improve += 1
-
-        if no_improve >= patience:
+            if epoch + 1 > warmup_epochs:
+                no_improve += 1
+            else: 
+                no_improve = 0 
+        if (epoch + 1 > warmup_epochs) and (no_improve >= patience):
             logger.info(f"[{mode}] Early stopping at epoch {epoch+1} (no improve {patience} epochs)")
             break
 
@@ -450,7 +452,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
 
     # === 체크포인트 디렉토리 & 파일명 (고정 이름 + 히스토리) ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_rel_id_{args.rel_input_dim}_rel_hd_{args.rel_hidden_dim}_mask_share_{args.mask_share_across_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}_rel_symmetric_{args.rel_symmetric}"
+    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_num_shared_layers_{args.num_shared_layers}_num_basis_layers_{args.num_basis_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}"
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     os.makedirs(ckpt_dir, exist_ok=True)
     ckpt_latest = os.path.join(ckpt_dir, "best.pt")  # ← 고정 이름(재사용용)
@@ -499,8 +501,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
             except Exception as e:
                 logger.warning(f"[Pretrain] history copy failed: {e}")
         else:
-            no_improve += 1
-            if no_improve >= patience:
+            if epoch + 1 > warmup_epochs: 
+                no_improve += 1 
+            else: 
+                no_improve = 0 
+            if no_improve >= patience : 
                 logger.info(f"[Pre] Early stop at epoch {epoch+1} (no improvement for {patience} epochs)")
                 break
 
@@ -686,16 +691,16 @@ def main():
 
     # 1) 모델 생성
     model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
-                       args.num_layers, args.dropout_rate, args.llm_model,
+                       args.dropout_rate, args.llm_model,
                        experiment_id, mode="Full").to(device)
     model_few  = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
-                       args.num_layers, args.dropout_rate, args.llm_model,
+                       args.dropout_rate, args.llm_model,
                        experiment_id, mode="Few").to(device)
 
     # 2) 프리트레인 체크포인트 로드 시도 (고정 best.pt 우선, 없으면 최신 best_*.pt)
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_rel_id_{args.rel_input_dim}_rel_hd_{args.rel_hidden_dim}_mask_share_{args.mask_share_across_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}_rel_symmetric_{args.rel_symmetric}"
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
+    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_rel_id_{args.rel_input_dim}_rel_hd_{args.rel_hidden_dim}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}"
+    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints__/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
 
     loaded_pretrain = False
     full_metrics = None
@@ -722,7 +727,7 @@ def main():
 
     # 4) few-shot 적응: 가중치 복사 → freeze 정책 적용
     args.use_target_head = True
-    model_few.load_state_dict(model_full.state_dict())
+    model_few.load_state_dict(model_full.state_dict(),strict=False)
     model_few.set_freeze_target()
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
@@ -813,7 +818,7 @@ def main():
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
         ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, mode="Few", scheduler=scheduler_few)
+                               optimizer_few, device, args.train_epochs, is_binary_t, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
         # ---- 테스트 ----
         (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
