@@ -102,8 +102,12 @@ def get_args():
     parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
     parser.add_argument('--basis_ema_momentum', type=float, default=0.99, help = 'EMA momentum for basis affinity')
     parser.add_argument('--anchor_kl_lambda', type=float, default=0.05, help = 'Weight of KL(anchor) regularizer during Few-shot.')
+    parser.add_argument('--slot_align_kl_lambda', type = float, default = 0.1)
+    parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
+    parser.add_argument('--slot_usage_lambda', type=float, default = 0.1)
+    parser.add_argument('--affinity_l2norm', action='store_true')
     # 관계 마스크 스코어러
-    parser.add_argument('--relation_scorer_type', type=str, default='AAAAAAAAAAAAAA', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
+    parser.add_argument('--relation_scorer_type', type=str, default='slot', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
     parser.add_argument('--rel_input_dim', type=int, default=512,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
     parser.add_argument('--rel_hidden_dim', type=int, default=256,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
     
@@ -111,7 +115,7 @@ def get_args():
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
     # 재샘플링(한 seed 내에서 support set 여러 번 뽑아 평균)
-    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,

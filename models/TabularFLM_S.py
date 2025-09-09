@@ -12,7 +12,7 @@ import math
 import torch.nn.init as nn_init
 import logging
 import torch.nn.init as init
-from utils.affinity import BasisAffinityGAT
+from utils.affinity import BasisAffinityGAT, BasisSlotAffinityGAT
 
 logger = logging.getLogger(__name__)
 
@@ -586,10 +586,16 @@ class Model(nn.Module):
             nn.LayerNorm(self.input_dim) for _ in range(self.num_shared_layers)
         ])
 
-        self.basis_affinity = BasisAffinityGAT(
-            args, input_dim = self.input_dim, k_basis = args.k_basis
+        # self.basis_affinity = BasisAffinityGAT(
+        #     args, input_dim = self.input_dim, k_basis = args.k_basis
+        # )
+        # self.anchor_kl_lambda = float(getattr(args, "anchor_kl_lambda", 0.05))
+
+
+        self.basis_affinity = BasisSlotAffinityGAT(
+            args, input_dim = self.input_dim, k_basis = args.k_basis, k_slots = args.k_basis
         )
-        self.anchor_kl_lambda = float(getattr(args, "anchor_kl_lambda", 0.05))
+
 
         self.basis_layers = nn.ModuleList([ 
             BasisGATLayer(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, n_heads = args.k_basis, dropout = self.dropout_rate)
@@ -655,13 +661,6 @@ class Model(nn.Module):
                 p.requires_grad = True
         for p in self.thead.parameters():
             p.requires_grad = True
-        # (선택) relation 모듈도 열고 싶으면 아래 주석 해제
-        # for p in self.rel_proj.parameters(): p.requires_grad = True
-        # for p in self.relation_scorer.parameters(): p.requires_grad = True
-
-        # (원하면 relation_scorer/edge_update 일부만 열 수도 있음)
-        # 5) (선택) relation_scorer는 프리징 유지 (pretrain에서 학습되었다고 가정)
-        # for p in self.relation_scorer.parameters(): p.requires_grad = False
 
     @torch.no_grad()
     def get_coordinates(self, batch):
@@ -707,16 +706,11 @@ class Model(nn.Module):
         pred = self.predict(batch)
         loss = self.criterion(pred, target)
 
-        # KL(anchor): alpha (with-grad) vs anchor (no-grad)
-        if self.anchor_kl_lambda > 0.0 and hasattr(self, "_last_alpha") and hasattr(self, "_last_bias_log"):
-            eps = 1e-6 
-            alpha = self._last_alpha 
-            bias_log = self._last_bias_log 
-            alpha_log = (alpha + eps).log() 
-            L_anchor = (alpha * (alpha_log - bias_log)).sum(dim=(-1, -2)).mean() 
-            loss = loss + self.anchor_kl_lambda * L_anchor 
+        # === 추가: 슬롯 기반 총 손실 그냥 더하기 ===
+        if self.training and hasattr(self, "_last_slot_loss") and (self._last_slot_loss is not None):
+            loss = loss + self._last_slot_loss
 
-        # 좌표-KL (Few일 때)
+        # (기존 Few-shot coord KL 유지)
         lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
         if (self.mode == 'Few') and (lam > 0.0) and hasattr(self, "centroids"):
             c = getattr(self, "_last_coordinates", None)
@@ -761,10 +755,10 @@ class Model(nn.Module):
         self._last_coordinates = coordinates
 
         # Global anchor / Batch affinity 
-        bias_log , alpha = self.basis_affinity(desc, nv)
+        bias_log , alpha, slot_loss = self.basis_affinity(desc, nv)
         self._last_bias_log = bias_log 
         self._last_alpha = alpha 
-
+        self._last_slot_loss = (slot_loss if self.training else None)
         # cls_token = self.cls.expand(nv.size(0), 1, self.input_dim)
         # x = torch.cat([cls_token, nv], dim=1)     # [B,T,D]
 

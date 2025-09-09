@@ -58,22 +58,16 @@ class MVisualizer:
                            self.args.dropout_rate, self.args.llm_model,
                            "viz","viz").to(self.device)
 
-        # 1) 체크포인트에 저장된 alpha_ema를 따로 보관(시각화에 쓸 수 있음)
+        # ✔ alpha_ema 같은 옛 키는 통째로 제외하고 로드(사이즈 미스매치 회피)
         sd = ckpt['model_state_dict']
-        self.anchor_from_ckpt = sd.get('basis_affinity.alpha_ema', None)
-
-        # 2) alpha_ema 키 제거 후 로드 (사이즈 미스매치 회피)
-        sd_wo_anchor = {k: v for k, v in sd.items() if 'alpha_ema' not in k}
-        missing, unexpected = self.model.load_state_dict(sd_wo_anchor, strict=False)
-
-        # (선택) 안전 확인: 다른 키가 빠지지 않았는지 로그 정도만
-        if any(k != 'basis_affinity.alpha_ema' for k in missing):
-            print("[WARN] Missing keys (except alpha_ema):", missing)
+        sd = {k: v for k, v in sd.items() if 'alpha_ema' not in k}
+        missing, unexpected = self.model.load_state_dict(sd, strict=False)
+        if missing:
+            print("[INFO] Missing keys:", missing)
         if unexpected:
-            print("[WARN] Unexpected keys:", unexpected)
+            print("[INFO] Unexpected keys:", unexpected)
 
         self.model.eval()
-
         self.num_layers = int(getattr(self.args,'num_basis_layers',3))
         self.num_heads  = int(getattr(self.args,'k_basis',8))
 
@@ -90,7 +84,9 @@ class MVisualizer:
 
     @torch.no_grad()
     def _forward_collect(self, batch):
-        bd = {k:(v.to(self.device) if isinstance(v, torch.Tensor) else v) for k,v in batch.items()}
+        bd = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+            for k, v in batch.items()}
+
         desc_list, nv_list = [], []
         if all(k in bd for k in ['cat_name_value_embeddings','cat_desc_embeddings']):
             nv_list.append(bd['cat_name_value_embeddings']); desc_list.append(bd['cat_desc_embeddings'])
@@ -98,52 +94,54 @@ class MVisualizer:
             nv_list.append(bd['num_prompt_embeddings']);     desc_list.append(bd['num_desc_embeddings'])
         desc_list, nv_list = self.model.remove_feature(bd, desc_list, nv_list)
 
-        desc = torch.cat(desc_list, dim=1)  # [B,S,D]
-        nv   = torch.cat(nv_list , dim=1)   # [B,S,D]
+        desc = torch.cat(desc_list, dim=1)   # [B,S,D]
+        nv   = torch.cat(nv_list , dim=1)    # [B,S,D]
         B,S,D = nv.shape
-        cls = self.model.cls.expand(B,1,D)
-        x = torch.cat([cls, nv], dim=1)     # [B,T,D], T=S+1
 
-        # Shared layers
-        # x_shared = x.clone()
-        # for l in range(self.model.num_shared_layers):
-        #     nx = self.model.shared_layer_norms[l](x_shared)
-        #     out, _ = self.model.shared_layers[l](desc, nx)
-        #     x_shared = x_shared + out
+        # ----- 슬롯 기반 affinity 호출 -----
+        # bias_log = log(Q), alpha = P
+        bias_log, alpha, _ = self.model.basis_affinity(desc, nv)  # [B,H,S,S], [B,H,S,S]
 
-        # # Get coordinates
-        # cls_coord = x_shared[:, 0, :]
-        # coordinates = self.model.coordinator(cls_coord)
-        bias_log, alpha = self.model.basis_affinity(desc, nv)
-        anchor = self.model.basis_affinity.alpha_ema 
-        if anchor.numel() == 0 or torch.all(anchor ==0):
-            anchor = alpha.mean(dim = 0, keepdim = False)
-        alpha_np = alpha[0].detach().cpu().numpy() 
-        anchor_np = anchor.detach().cpu().numpy() 
+        # numpy로 변환 (첫 샘플만)
+        alpha_np = alpha[0].detach().cpu().numpy()           # P  (샘플 affinity)
+        slotQ_np = bias_log[0].detach().exp().cpu().numpy()  # Q = exp(log Q)
 
-        mask_M = alpha.clamp_(1e-6, 1.0 - 1e-6)
+        # ----- 전역 슬롯 그래프 G 꺼내기 -----
+        # BasisSlotAffinityGAT 에서 self.G_param: [H,K,K]
+        G_param = getattr(self.model.basis_affinity, "G_param", None)
+        if G_param is not None:
+            # 보기 좋게 행별 확률로 변환 (전역 슬롯 관계의 조건분포 관점)
+            # 굳이 온도를 맞추고 싶으면 / self.model.basis_affinity.tau_slot 로 나눠도 됨.
+            G_prob = torch.softmax(G_param, dim=-1)
+            G_np = G_prob.detach().cpu().numpy()  # [H,K,K]
+        else:
+            G_np = None
 
-
-        # Basis layers - 각 레이어마다 새로운 affinity 계산
+        # ----- Basis 레이어 통과 (ATT/ADJ 수집) -----
         Ms, ATTs, ADJs = [], [], []
+        cls = self.model.cls.expand(B,1,D)
+        x   = torch.cat([cls, nv], dim=1)  # [B,T,D], T=S+1
         x_basis = x.clone()
-        
-        for l in range(self.num_layers):
-            # 각 레이어마다 새로운 affinity 계산
-            norm_x = self.model.basis_layer_norms[l](x_basis)
-            basis_outputs, att = self.model.basis_layers[l](desc, norm_x, mask_M = mask_M) 
-            new_adj = self.model.basis_layers[l].new_adjacency 
-            x_basis = x_basis + basis_outputs.reshape(B, S+1, D)
-            
-            A_np = alpha[0].cpu().numpy() 
-            for h in range(self.num_heads):
-                Ms.append(A_np[h]) 
-            
-            ATTs.append(att[0].cpu().numpy())  # [H,T,T] - take first sample
-            ADJs.append(new_adj[0].cpu().numpy())  # [T,T] - take first sample
 
-        feat_names = self.model.extract_feature_names(bd)  # length S
-        return Ms, ATTs, ADJs, feat_names, alpha_np, anchor_np
+        # mask_M: 여기서는 α(=P)를 그대로 사용 (필요에 따라 clamp)
+        mask_M = alpha.clamp(1e-6, 1.0 - 1e-6)  # [B,H,S,S]
+
+        for l in range(self.num_layers):
+            norm_x = self.model.basis_layer_norms[l](x_basis)
+            basis_outputs, att = self.model.basis_layers[l](desc, norm_x, mask_M=mask_M)
+            new_adj = self.model.basis_layers[l].new_adjacency  # [B,T,T]
+            x_basis = x_basis + basis_outputs.reshape(B, S+1, D)
+
+            # Var-Var affinity(시각화용): 각 헤드별 α
+            for h in range(self.num_heads):
+                Ms.append(alpha_np[h])  # [S,S]
+
+            ATTs.append(att[0].cpu().numpy())       # [H,T,T]
+            ADJs.append(new_adj[0].cpu().numpy())   # [T,T]
+
+        feat_names = self.model.extract_feature_names(bd)  # 길이 S
+        return Ms, ATTs, ADJs, feat_names, alpha_np, slotQ_np, G_np
+
 
     def _grid_plot(self, mats, names, title, save_path):
         L,H = self.num_layers, self.num_heads
@@ -470,86 +468,114 @@ class MVisualizer:
 
     def visualize_dataset(self, dataset_name: str, role: str, out_root: Path, max_samples=2):
         loader = self._make_loader(dataset_name)
-        base = out_root/role/dataset_name
+        base = out_root / role / dataset_name
         ensure_dir(base)
-        count=0
+        count = 0
+
         for batch in loader:
-            Ms, ATTs, ADJs, var_names, alpha_np, anchor_np = self._forward_collect(batch)
-            
-            # 각 샘플별 서브폴더 생성
+            # Ms, ATTs, ADJs, var_names, alpha_np, slotQ_np, G_np 를 돌려받는다고 가정
+            Ms, ATTs, ADJs, var_names, alpha_np, slotQ_np, G_np = self._forward_collect(batch)
+
             sample_dir = base / f"sample_{count}"
             ensure_dir(sample_dir)
-            
-            # ---------- (1) Var-Var Affinity (BasisAffinityGAT) ----------
-            grid_M=[]
+
+            # ---------- (1) Var-Var Affinity (α) ----------
+            grid_M = []
             for l in range(self.num_layers):
                 for h in range(self.num_heads):
-                    # Ms는 [head0, head1, ..., head7, head0, head1, ..., head7, ...] 순서로 저장됨
-                    # 각 레이어마다 num_heads개씩 저장되어 있음
                     head_idx = l * self.num_heads + h
-                    grid_M.append(Ms[head_idx])  # [S,S] - each head's affinity
-            self._grid_plot(grid_M, var_names,
-                            f"{role.capitalize()} • {dataset_name} • Sample {count} • Var-Var Affinity",
-                            sample_dir/f"Affinity_varvar_grid.png")
+                    grid_M.append(Ms[head_idx])  # [S,S]
+            self._grid_plot(
+                grid_M, var_names,
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • Var-Var Affinity (α)",
+                sample_dir / "Affinity_varvar_grid_alpha.png"
+            )
 
-            # ---------- (2) attention × structural adjacency (CLS 포함) ----------
-            names_all = ["CLS"]+var_names
-            grid_AX=[]
+            # ---------- (2) Attention × Adjacency ----------
+            names_all = ["CLS"] + var_names
+            grid_AX = []
             for l in range(self.num_layers):
-                att = ATTs[l]    # [H,T,T]
-                adj = ADJs[l]    # [T,T]
+                att = ATTs[l]  # [H,T,T]
+                adj = ADJs[l]  # [T,T]
                 for h in range(self.num_heads):
-                    grid_AX.append(att[h]*adj)     # [T,T]; CLS->Var가 살아있음
-            self._grid_plot(grid_AX, names_all,
-                            f"{role.capitalize()} • {dataset_name} • Sample {count} • Attention × Adjacency",
-                            sample_dir/f"AttnXAdj_grid.png")
+                    grid_AX.append(att[h] * adj)
+            self._grid_plot(
+                grid_AX, names_all,
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • Attention × Adjacency",
+                sample_dir / "AttnXAdj_grid.png"
+            )
 
-            # ---------- (3) 각 헤드별 완전한 분석 (2x2 서브플롯) ----------
-            # for l in range(self.num_layers):
-            #     att = ATTs[l]    # [H,T,T]
-            #     adj = ADJs[l]    # [T,T]
-            #     for h in range(self.num_heads):
-            #         self._plot_complete_head_analysis(
-            #             att[h], adj, var_names, l, h, count, sample_dir
-            #         )
-            # (A) 샘플 α (균등 1/S를 중심으로)
-            uniform = 1.0 / len(var_names)
+            # ---------- (3) 중심화 히트맵 ----------
+            S = len(var_names)
+            uniform_S = 1.0 / max(S, 1)
+
+            # (A) α 중심화
             grid_alpha = []
             for l in range(self.num_layers):
                 for h in range(self.num_heads):
                     grid_alpha.append(alpha_np[h])  # [S,S]
             self._grid_plot_centered(
                 grid_alpha, var_names,
-                f"{role.capitalize()} • {dataset_name} • Sample {count} • Var-Var Affinity (center=1/S)",
-                sample_dir / "Affinity_varvar_grid_center_uniform.png",
-                center=uniform, cmap='RdBu_r'
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • α (center=1/S)",
+                sample_dir / "Alpha_center_uniform.png",
+                center=uniform_S, cmap='RdBu_r'
             )
 
-            # (B) 전역 앵커 α_ema (동일한 센터/스케일)
-            grid_anchor = []
+            # (B) Q_slot 중심화 (Q = S G S^T)
+            grid_q = []
             for l in range(self.num_layers):
                 for h in range(self.num_heads):
-                    grid_anchor.append(anchor_np[h])
+                    grid_q.append(slotQ_np[h])  # [S,S]
             self._grid_plot_centered(
-                grid_anchor, var_names,
-                f"{role.capitalize()} • {dataset_name} • Global Anchor (EMA) (center=1/S)",
-                sample_dir / "Anchor_varvar_grid_center_uniform.png",
-                center=uniform, cmap='RdBu_r'
+                grid_q, var_names,
+                f"{role.capitalize()} • {dataset_name} • Slot Target Q = S G S^T (center=1/S)",
+                sample_dir / "SlotTarget_center_uniform.png",
+                center=uniform_S, cmap='RdBu_r'
             )
 
-            # (C) 편차 Δ = α - α_ema (center=0)
+            # (C) Δ = α − Q
             grid_delta = []
             for l in range(self.num_layers):
                 for h in range(self.num_heads):
-                    grid_delta.append(alpha_np[h] - anchor_np[h])
+                    grid_delta.append(alpha_np[h] - slotQ_np[h])  # [S,S]
             self._grid_plot_centered(
                 grid_delta, var_names,
-                f"{role.capitalize()} • {dataset_name} • Δ(α − EMA)",
-                sample_dir / "Delta_alpha_minus_anchor.png",
+                f"{role.capitalize()} • {dataset_name} • Δ(α − Q)",
+                sample_dir / "Delta_alpha_minus_Q.png",
                 center=0.0, cmap='RdBu_r'
             )
-            count+=1
-            if count>=max_samples: break
+
+            # ---------- (4) Global Slot Graph G (전역, K×K) ----------
+            # G_np: [H, K, K]
+            K = G_np.shape[-1]
+            slot_names = [f"z{j}" for j in range(K)]
+
+            # (D) G 원본 (레이어 수만큼 복제해서 L×H 그리드에 배치)
+            grid_G = []
+            for l in range(self.num_layers):
+                for h in range(self.num_heads):
+                    grid_G.append(G_np[h])  # [K,K]
+            self._grid_plot(
+                grid_G, slot_names,
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • Global Slot Graph G (per head)",
+                sample_dir / "GlobalSlotGraph_G.png"
+            )
+
+            # (E) G 중심화 (center=1/K)
+            uniform_K = 1.0 / max(K, 1)
+            self._grid_plot_centered(
+                grid_G, slot_names,
+                f"{role.capitalize()} • {dataset_name} • Global Slot Graph G (center=1/K)",
+                sample_dir / "GlobalSlotGraph_center_uniform.png",
+                center=uniform_K, cmap='RdBu_r'
+            )
+
+            count += 1
+            if count >= max_samples:
+                break
+
+
+
 
 def main():
     ap = argparse.ArgumentParser()
