@@ -706,11 +706,26 @@ class Model(nn.Module):
         pred = self.predict(batch)
         loss = self.criterion(pred, target)
 
-        # === 추가: 슬롯 기반 총 손실 그냥 더하기 ===
+        # (1) 슬롯 규제(겹침/사용량) 그냥 더하기
         if self.training and hasattr(self, "_last_slot_loss") and (self._last_slot_loss is not None):
             loss = loss + self._last_slot_loss
 
-        # (기존 Few-shot coord KL 유지)
+        # (2) P vs Q 정렬 KL — 중복 없이 여기서만 계산
+        align_lam = float(getattr(self.args, "slot_align_kl_lambda", 0.0))
+        if self.training and align_lam > 0.0 and hasattr(self, "_last_P_basis") and hasattr(self, "_last_bias_log"):
+            eps = 1e-8
+            P = self._last_P_basis.clamp_min(eps)          # [B,H,S,S], BasisGAT 실제 attention
+            Q = self._last_Q_slot.clamp_min(eps)   # [B,H,S,S], 슬롯 프라이어
+
+            # 기본: KL(P‖Q)  ← P를 Q에 맞추게 만드는 방향(안정적)
+            L_align = (P * (P.log() - Q.log())).sum(dim=(-1, -2, -3)).mean()
+
+            # 만약 네가 KL(Q‖P)를 원한다면 위 한 줄 대신 아래 한 줄을 쓰면 됨:
+            # L_align = (Q * (Q.log() - P.log())).sum(dim=(-1, -2, -3)).mean()
+
+            loss = loss + align_lam * L_align
+
+        # (3) 기존 Few-shot coord KL 유지 (타깃 에피소드에서 좌표 분포 정렬)
         lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
         if (self.mode == 'Few') and (lam > 0.0) and hasattr(self, "centroids"):
             c = getattr(self, "_last_coordinates", None)
@@ -755,15 +770,15 @@ class Model(nn.Module):
         self._last_coordinates = coordinates
 
         # Global anchor / Batch affinity 
-        bias_log , alpha, slot_loss = self.basis_affinity(desc, nv)
+        bias_log , Q_slot, slot_loss = self.basis_affinity(desc, nv)
         self._last_bias_log = bias_log 
-        self._last_alpha = alpha 
+        self._last_Q_slot = Q_slot 
         self._last_slot_loss = (slot_loss if self.training else None)
         # cls_token = self.cls.expand(nv.size(0), 1, self.input_dim)
         # x = torch.cat([cls_token, nv], dim=1)     # [B,T,D]
 
-        mask_M = bias_log.exp().clamp(min = 1e-6 ,max = 1.0 -1e-6)
-
+        #mask_M = bias_log.exp().clamp(min = 1e-6 ,max = 1.0 -1e-6)
+        mask_M = self._last_bias_log
         B, S = desc.size(0), desc.size(1) 
         K = self.args.k_basis 
         if mask_M.dim() == 4: 
@@ -778,12 +793,15 @@ class Model(nn.Module):
             f"mask_M must be [B, {K}, {S}, {S}], got {list(mask_M.shape)}"
 
         x_basis = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim = 1)
-
+        last_att = None 
         for l in range(self.num_basis_layers):
             norm_x = self.basis_layer_norms[l](x_basis)
-            basis_outputs, _ = self.basis_layers[l](desc, norm_x, mask_M = mask_M)
+            basis_outputs, att = self.basis_layers[l](desc, norm_x, mask_M = mask_M)
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
-
+            last_att = att 
+        if last_att is not None:
+            self._last_P_basis = last_att[:, :, 1:, 1:]
+        
         expert_outputs = basis_outputs[:, 0, :, :]
         preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.k_basis)]
         expert_predictions = torch.stack(preds, dim = 1)

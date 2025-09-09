@@ -100,20 +100,15 @@ class MVisualizer:
 
         # ----- 슬롯 기반 affinity 호출 -----
         # bias_log = log(Q), alpha = P
-        bias_log, alpha, _ = self.model.basis_affinity(desc, nv)  # [B,H,S,S], [B,H,S,S]
-
-        # numpy로 변환 (첫 샘플만)
-        alpha_np = alpha[0].detach().cpu().numpy()           # P  (샘플 affinity)
-        slotQ_np = bias_log[0].detach().exp().cpu().numpy()  # Q = exp(log Q)
+        bias_log, P, _ = self.model.basis_affinity(desc, nv)  # [B,H,S,S], [B,H,S,S]
+        P_np = P[0].detach().cpu().numpy()                    # 샘플 affinity P
+        Q_np = bias_log[0].detach().exp().cpu().numpy()       # 전역 유도 Q = exp(log Q)
 
         # ----- 전역 슬롯 그래프 G 꺼내기 -----
-        # BasisSlotAffinityGAT 에서 self.G_param: [H,K,K]
-        G_param = getattr(self.model.basis_affinity, "G_param", None)
+        G_param = getattr(self.model.basis_affinity, "G_param", None)  # [H,K,K]
         if G_param is not None:
-            # 보기 좋게 행별 확률로 변환 (전역 슬롯 관계의 조건분포 관점)
-            # 굳이 온도를 맞추고 싶으면 / self.model.basis_affinity.tau_slot 로 나눠도 됨.
-            G_prob = torch.softmax(G_param, dim=-1)
-            G_np = G_prob.detach().cpu().numpy()  # [H,K,K]
+            G_prob = torch.softmax(G_param, dim=-1)  # row softmax
+            G_np = G_prob.detach().cpu().numpy()     # [H,K,K]
         else:
             G_np = None
 
@@ -123,8 +118,8 @@ class MVisualizer:
         x   = torch.cat([cls, nv], dim=1)  # [B,T,D], T=S+1
         x_basis = x.clone()
 
-        # mask_M: 여기서는 α(=P)를 그대로 사용 (필요에 따라 clamp)
-        mask_M = alpha.clamp(1e-6, 1.0 - 1e-6)  # [B,H,S,S]
+        # 훈련과 동일하게 Q를 pre-softmax bias로 사용
+        mask_M = bias_log.exp().clamp(1e-6, 1.0 - 1e-6)  # [B,H,S,S]
 
         for l in range(self.num_layers):
             norm_x = self.model.basis_layer_norms[l](x_basis)
@@ -132,15 +127,16 @@ class MVisualizer:
             new_adj = self.model.basis_layers[l].new_adjacency  # [B,T,T]
             x_basis = x_basis + basis_outputs.reshape(B, S+1, D)
 
-            # Var-Var affinity(시각화용): 각 헤드별 α
+            # Var-Var affinity(시각화용): 각 헤드별 P (레이어마다 동일한 P를 반복해서 넣어 grid 채움)
             for h in range(self.num_heads):
-                Ms.append(alpha_np[h])  # [S,S]
+                Ms.append(P_np[h])  # [S,S]
 
-            ATTs.append(att[0].cpu().numpy())       # [H,T,T]
-            ADJs.append(new_adj[0].cpu().numpy())   # [T,T]
+            ATTs.append(att[0].cpu().numpy())     # [H,T,T]
+            ADJs.append(new_adj[0].cpu().numpy()) # [T,T]
 
         feat_names = self.model.extract_feature_names(bd)  # 길이 S
-        return Ms, ATTs, ADJs, feat_names, alpha_np, slotQ_np, G_np
+        return Ms, ATTs, ADJs, feat_names, P_np, Q_np, G_np
+
 
 
     def _grid_plot(self, mats, names, title, save_path):
@@ -573,8 +569,6 @@ class MVisualizer:
             count += 1
             if count >= max_samples:
                 break
-
-
 
 
 def main():

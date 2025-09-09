@@ -194,7 +194,7 @@ class BasisSlotAffinityGAT(nn.Module):
 
         # 전역 슬롯-슬롯 행렬 G^{(h)}: [H,K,K]
         self.G_param = nn.Parameter(torch.zeros(self.H, self.K, self.K))
-
+        nn.init.xavier_uniform_(self.G_param)
         # per-head Q/K (scaled dot)
         self.W_q = nn.Parameter(torch.empty(self.H, self.D, self.D))
         self.W_k = nn.Parameter(torch.empty(self.H, self.D, self.D))
@@ -215,51 +215,33 @@ class BasisSlotAffinityGAT(nn.Module):
         # (1) 융합 임베딩
         z = self.fusion_mlp(torch.cat([desc_embeddings, name_value_embeddings], dim=-1))  # [B,N,D]
 
-        # (2) 샘플별 affinity (scaled dot, row-softmax)
-        q = torch.einsum("bnd,hdf->bhnf", z, self.W_q).contiguous().view(B, self.H, N, D)
-        k = torch.einsum("bnd,hdf->bhnf", z, self.W_k).contiguous().view(B, self.H, N, D)
-        if self.use_l2norm:
-            q = F.normalize(q, dim=-1)
-            k = F.normalize(k, dim=-1)
-        A_logits = torch.einsum("bhnd,bhmd->bhnm", q, k) * self.scale  # [B,H,N,N]
-        if self.no_self_loop:
-            eye = torch.eye(N, device=device, dtype=torch.bool).view(1,1,N,N)
-            A_logits = A_logits.masked_fill(eye, float("-inf"))
-        P = self._row_softmax(A_logits, temperature=self.tau_aff)       # [B,H,N,N]
-
-        # (3) 슬롯 할당 S: [B,N,K]
+        # (2) 슬롯 할당 S: [B,N,K]
         S_logits = self.slot_proj(z)
         S = F.softmax(S_logits, dim=-1)
 
-        # (4) 전역 슬롯 그래프 A_slot = S G S^T → Q = row-softmax
+        # (3) 전역 슬롯 그래프 → Q(x) = row-softmax(S G S^T / τ_slot)
         A_slot = torch.einsum("bnk,hkl,bml->bhnm", S, self.G_param, S)  # [B,H,N,N]
         if self.no_self_loop:
             eye = torch.eye(N, device=device, dtype=torch.bool).view(1,1,N,N)
             A_slot = A_slot.masked_fill(eye, float("-inf"))
-        Q = self._row_softmax(A_slot, temperature=self.tau_slot)
+        Q = self._row_softmax(A_slot, temperature=self.tau_slot)        # [B,H,N,N]
 
-        # (5) 정렬 KL: KL(P||Q) 행 합
-        align_kl = (P * (torch.log(P + eps) - torch.log(Q + eps))).sum(dim=-1).mean()
-
-        # (6) 슬롯 겹침 억제: offdiag((S^T S)/N)^2
-        StS = torch.einsum("bnk,bnl->bkl", S, S) / max(float(N), 1.0)   # [B,K,K]
+        # (4) 규제항(슬롯 겹침/사용량)만 합침 — 정렬 KL은 여기서 하지 않음
+        StS = torch.einsum("bnk,bnl->bkl", S, S) / max(float(N), 1.0)    # [B,K,K]
         offdiag = StS - torch.diag_embed(torch.diagonal(StS, dim1=-2, dim2=-1))
-        slot_orth = (offdiag ** 2).mean()
+        slot_orth  = (offdiag ** 2).mean()
 
-        # (7) 슬롯 사용량 균형: KL(mean_i S_i || uniform)
-        u = S.mean(dim=1)                               # [B,K]
+        u = S.mean(dim=1)                                # [B,K]
         u = u / (u.sum(dim=-1, keepdim=True) + eps)
         uniform = torch.full_like(u, 1.0 / self.K)
         slot_usage = (u * (torch.log(u + eps) - torch.log(uniform + eps))).sum(dim=-1).mean()
 
-        # (8) 전부 합쳐서 한 덩어리
-        total_loss = (self.align_kl_lambda * align_kl
-                      + self.slot_orth_lambda * slot_orth
-                      + self.slot_usage_lambda * slot_usage)
+        total_reg = (self.slot_orth_lambda  * slot_orth
+                    + self.slot_usage_lambda * slot_usage)
 
-        # (9) 바이어스(log 타겟)와 현재 분포 반환
-        bias_log = torch.log(Q + eps).detach()  # [B,H,N,N]
-        return bias_log, P, total_loss
+        bias_log = torch.log(Q + eps).detach()           # [B,H,N,N]  (전역 프라이어의 log)
+        # 두 번째 리턴값은 “샘플 P”가 아니라 Q를 넘겨도 되고(None로 둬도 무방)
+        return bias_log, Q, total_reg
 
 
 class RelationQueryScorer(nn.Module):
