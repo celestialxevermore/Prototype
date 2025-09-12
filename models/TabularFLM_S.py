@@ -760,58 +760,67 @@ class Model(nn.Module):
         desc = torch.cat(desc_embeddings, dim=1)  # [B,S,D]
         nv   = torch.cat(name_value_embeddings, dim=1)
 
-        x_shared = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim = 1) 
+        # ---- shared blocks -> coordinator ----
+        x_shared = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim=1)
         for l in range(self.num_shared_layers):
             nx = self.shared_layer_norms[l](x_shared)
             out, _ = self.shared_layers[l](desc, nx)
-            x_shared = x_shared + out 
+            x_shared = x_shared + out
         cls_for_coord = x_shared[:, 0, :]
         coordinates = self.coordinator(cls_for_coord)
         self._last_coordinates = coordinates
 
-        # Global anchor / Batch affinity 
-        bias_log , Q_slot, slot_loss = self.basis_affinity(desc, nv)
-        self._last_bias_log = bias_log 
-        self._last_Q_slot = Q_slot 
+        # ---- global/slot prior Q and regularizers ----
+        bias_log, Q_slot, slot_loss = self.basis_affinity(desc, nv)
+        self._last_bias_log  = bias_log          # log Q  (시각화/기록용)
+        self._last_Q_slot    = Q_slot            # Q      (확률)
         self._last_slot_loss = (slot_loss if self.training else None)
-        # cls_token = self.cls.expand(nv.size(0), 1, self.input_dim)
-        # x = torch.cat([cls_token, nv], dim=1)     # [B,T,D]
 
-        #mask_M = bias_log.exp().clamp(min = 1e-6 ,max = 1.0 -1e-6)
-        mask_M = self._last_bias_log
-        B, S = desc.size(0), desc.size(1) 
-        K = self.args.k_basis 
-        if mask_M.dim() == 4: 
-            if mask_M.shape == (B, S, K ,S):
-                mask_M = mask_M.permute(0, 2, 1, 3)
-            elif mask_M.shape == (B, 1, K, S): 
-                mask_M = mask_M.squeeze(1) 
-                mask_M = mask_M.unsqueeze(-1).expand(-1, -1, -1, S)
-            elif mask_M.shape == (B, S, S): 
-                mask_M = mask_M.unsqueeze(1).expand(B, K, S, S)
-        assert mask_M.shape[0] == B and mask_M.shape[1] == K and mask_M.shape[2] == S and mask_M.shape[3] == S, \
-            f"mask_M must be [B, {K}, {S}, {S}], got {list(mask_M.shape)}"
+        # === 핵심: GAT의 pre-softmax bias로 넣을 프라이어 확률 ===
+        # in-place 사용 금지! (detach().clamp_ 는 금지)
+        mask_M = torch.clamp(self._last_Q_slot, min=1e-6, max=1.0 - 1e-6).detach().clone()  # [B,H,S,S]
 
-        x_basis = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim = 1)
-        last_att = None 
+        # ---- shape normalize to [B,K,S,S] ----
+        B, S = desc.size(0), desc.size(1)
+        K    = self.args.k_basis
+        if mask_M.dim() == 3:                         # [B,S,S] -> [B,K,S,S]
+            mask_M = mask_M.unsqueeze(1).expand(B, K, S, S)
+        elif mask_M.shape == (B, S, K, S):            # [B,S,K,S] -> [B,K,S,S]
+            mask_M = mask_M.permute(0, 2, 1, 3).contiguous()
+        elif mask_M.shape == (B, 1, K, S):            # [B,1,K,S] -> [B,K,S,S]
+            mask_M = mask_M.squeeze(1).unsqueeze(-1).expand(-1, -1, -1, S)
+        elif mask_M.shape == (B, K, S, S):            # 이미 원하는 형태
+            pass
+        else:
+            raise ValueError(f"mask_M must be broadcastable to [B,{K},{S},{S}], got {list(mask_M.shape)}")
+        assert mask_M.shape == (B, K, S, S), f"mask_M must be [B,{K},{S},{S}], got {list(mask_M.shape)}"
+
+        # ---- basis GAT stack (Q를 pre-softmax logit bias로 사용) ----
+        x_basis  = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim=1)
+        last_att = None
         for l in range(self.num_basis_layers):
             norm_x = self.basis_layer_norms[l](x_basis)
-            basis_outputs, att = self.basis_layers[l](desc, norm_x, mask_M = mask_M)
+            basis_outputs, att = self.basis_layers[l](desc, norm_x, mask_M=mask_M)
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
-            last_att = att 
+            last_att = att
         if last_att is not None:
+            # Var-Var 블록만 저장: [B,H,S,S]
             self._last_P_basis = last_att[:, :, 1:, 1:]
-        
-        expert_outputs = basis_outputs[:, 0, :, :]
+
+        # ---- experts & mixture ----
+        expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,head_dim]
         preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.k_basis)]
-        expert_predictions = torch.stack(preds, dim = 1)
-        pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim = 1)
+        expert_predictions = torch.stack(preds, dim=1)  # [B,H,C]
+        pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim=1)  # [B,C]
+
+        # residual heads
         if 'src_idx' in batch:
             pred = pred + self.heads[int(batch['src_idx'])](cls_for_coord)
         elif getattr(self.args, 'use_target_head', False):
             pred = pred + self.thead(cls_for_coord)
 
         return pred
+
 
     
     def set_attention_save_dir(self, experiment_id, mode):
