@@ -4,201 +4,76 @@ import torch.nn.functional as F
 import torch.nn.init as nn_init
 from entmax import entmax_bisect as entmax
 import math
-# class BasisAffinityGAT(nn.Module):
-#     def __init__(self, args, input_dim : int, k_basis : int):
-#         super().__init__()
-#         self.args = args 
-#         self.input_dim = input_dim 
-#         self.k_basis = k_basis 
-
-#         r = input_dim 
-#         self.W_q = nn.Parameter(torch.empty(k_basis, input_dim, r))
-#         self.W_k = nn.Parameter(torch.empty(k_basis, input_dim , r))
-#         self.a = nn.Parameter(torch.empty(k_basis, 2 * r, 1))
-#         for p in (self.W_q, self.W_k, self.a):
-#             nn_init.xavier_uniform_(p)
-#         self.leaky_relu = nn.LeakyReLU(negative_slope = 0.2)
-#         self.fusion_mlp = nn.Linear(input_dim * 2, input_dim)
-#         nn_init.xavier_uniform_(self.fusion_mlp.weight); nn_init.zeros_(self.fusion_mlp.bias)
 
 
-#         self.momentum = getattr(args, "basis_ema_momentum", 0.99)
-#         self.register_buffer("alpha_ema", torch.tensor([]), persistent= False)
 
-#     def _maybe_reset_ema(self, N:int, device):
-#         if self.alpha_ema.numel() == 0 or self.alpha_ema.shape != (self.k_basis, N, N):
-#             self.alpha_ema = torch.zeros(self.k_basis, N, N, device = device)
-
-#     def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor) -> torch.Tensor:
-#         '''
-#             Args:
-#                 desc_embeddings : [B, N, D]
-#                 name_value_embeddings: [B, N, D]
-#             Returns:
-#                 bias_log : [B, K, N, N] (Var <-> Var log(alpha + eps))
-#         '''
-#         B, N, D = name_value_embeddings.shape 
-#         device = name_value_embeddings.device 
-
-#         self._maybe_reset_ema(N, device)
-
-        
-#         fused = self.fusion_mlp(torch.cat([desc_embeddings, name_value_embeddings], dim = -1))
-        
-#         q = torch.einsum("bnd,kdf->bknf", fused, self.W_q)
-#         k = torch.einsum("bnd,kdf->bknf", fused, self.W_k)
-#         q_exp = q.unsqueeze(3); k_exp = k.unsqueeze(2)
-#         feat = torch.cat([q_exp.expand(-1, -1, -1, N, -1), k_exp.expand(-1, -1, N, -1, -1)], dim = -1)
-#         h = self.leaky_relu(feat)
-#         logits = torch.einsum('bknmf,kfo->bkno', h, self.a).squeeze(-1) # [B,K,N,N]
-        
-#         if getattr(self.args, "no_self_loop", False):
-#             eye = torch.eye(N, device = device, dtype=torch.bool).view(1, 1, N, N)
-#             logits = logits.masked_fill(eye, -1e9)
-
-
-#         alpha = torch.softmax(logits, dim = -1)
-#         alpha_batch_mean = alpha.mean(dim=0, keepdim=False)
-
-#         with torch.no_grad():
-#             if (self.alpha_ema.numel() == 0) or (self.alpha_ema.shape != alpha_batch_mean.shape):
-#                 self.alpha_ema = alpha_batch_mean.detach().to(device)
-#             else:
-#                 # in-place EMA (권장)
-#                 self.alpha_ema.mul_(self.momentum).add_((1.0 - self.momentum) * alpha_batch_mean.detach())
-#                 # 또는 out-of-place 한 줄짜리(위와 동등, 이 줄만 쓰고 위 in-place는 지워):
-#                 # self.alpha_ema = self.momentum * self.alpha_ema + (1.0 - self.momentum) * alpha_batch_mean.detach()
-#         eps = 1e-6
-#         bias_log = torch.log(self.alpha_ema.clamp_min(eps)).detach()
-#         bias_log = bias_log.unsqueeze(0).expand(B, -1, -1, -1)
-#         return bias_log, alpha
-class BasisAffinityGAT(nn.Module):
-    def __init__(self, args, input_dim: int, k_basis: int):
-        super().__init__()
-        self.args = args
-        self.input_dim = input_dim
-        self.k_basis = k_basis
-
-        r = input_dim
-        # per-basis projection
-        self.W_q = nn.Parameter(torch.empty(k_basis, input_dim, r))
-        self.W_k = nn.Parameter(torch.empty(k_basis, input_dim, r))
-        # (레거시) concat-MLP용 파라미터. 체크포인트 호환을 위해 유지하지만 사용하지는 않음.
-        self.a = nn.Parameter(torch.empty(k_basis, 2 * r, 1))
-
-        for p in (self.W_q, self.W_k, self.a):
-            nn_init.xavier_uniform_(p)
-
-        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
-        self.fusion_mlp = nn.Linear(input_dim * 2, input_dim)
-        nn_init.xavier_uniform_(self.fusion_mlp.weight); nn_init.zeros_(self.fusion_mlp.bias)
-
-        # dot-product scale
-        self.scale = 1.0 / math.sqrt(r)
-        self.use_l2norm = bool(getattr(args, "affinity_l2norm", True))  # 기본 True 권장
-
-        # EMA for global anchor
-        self.momentum = float(getattr(args, "basis_ema_momentum", 0.99))
-        self.register_buffer("alpha_ema", torch.tensor([]), persistent=True)
-
-    def _maybe_reset_ema(self, N: int, device):
-        if self.alpha_ema.numel() == 0 or self.alpha_ema.shape != (self.k_basis, N, N):
-            self.alpha_ema = torch.zeros(self.k_basis, N, N, device=device)
-
-    def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor):
-        """
-        Args:
-            desc_embeddings      : [B, N, D]
-            name_value_embeddings: [B, N, D]
-        Returns:
-            bias_log : [B, K, N, N]  (Var-Var log prob; no-grad anchor)
-            alpha    : [B, K, N, N]  (per-batch affinity prob; with-grad)
-        """
-        B, N, D = name_value_embeddings.shape
-        device = name_value_embeddings.device
-        self._maybe_reset_ema(N, device)
-
-        # 1) fuse desc & value
-        fused = self.fusion_mlp(torch.cat([desc_embeddings, name_value_embeddings], dim=-1))  # [B,N,D]
-
-        # 2) per-basis Q/K (bmm with per-basis weights)
-        #    q,k: [B,K,N,r]
-        q = torch.einsum("bnd,kdf->bknf", fused, self.W_q)
-        k = torch.einsum("bnd,kdf->bknf", fused, self.W_k)
-
-        # (옵션) L2 normalize for stability
-        if self.use_l2norm:
-            q = F.normalize(q, dim=-1)
-            k = F.normalize(k, dim=-1)
-
-        # 3) scaled dot-product logits: [B,K,N,N]
-        logits = torch.einsum("bknf,bkmf->bknm", q, k) * self.scale
-
-        # 4) (옵션) 자기 자신 금지
-        if bool(getattr(self.args, "no_self_loop", False)):
-            eye = torch.eye(N, device=device, dtype=torch.bool).view(1, 1, N, N)
-            logits = logits.masked_fill(eye, float("-inf"))
-
-        # 5) softmax over j-dim
-        alpha = torch.softmax(logits, dim=-1)  # [B,K,N,N]
-
-        if self.training:
-            # 6) batch mean -> EMA anchor (no-grad)
-            alpha_batch_mean = alpha.mean(dim=0, keepdim=False)  # [K,N,N]
-            with torch.no_grad():
-                if (self.alpha_ema.numel() == 0) or (self.alpha_ema.shape != alpha_batch_mean.shape):
-                    self.alpha_ema = alpha_batch_mean.detach().to(device)
-                else:
-                    self.alpha_ema.mul_(self.momentum).add_((1.0 - self.momentum) * alpha_batch_mean.detach())
-
-        # 7) return log prob (anchor) + current prob
-        eps = 1e-6
-        bias_log = torch.log(self.alpha_ema.clamp_min(eps)).detach()  # [K,N,N]
-        bias_log = bias_log.unsqueeze(0).expand(B, -1, -1, -1)        # [B,K,N,N]
-        return bias_log, alpha
-
-
+# utils/affinity.py
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.nn.init as nn_init
 
 class BasisSlotAffinityGAT(nn.Module):
     """
-    Slot-only Affinity (no EMA, no prototypes)
     Returns:
-        bias_log: [B,H,N,N]  - 전역 슬롯 그래프에서 유도한 타겟 분포의 log (detach)
-        alpha   : [B,H,N,N]  - 샘플별 affinity 분포 (row-softmax)
-        total_loss: scalar   - (KL 정렬 + 슬롯 겹침 억제 + 사용량 균형) 전부 합친 값
+        bias_log: [B,H,N,N]  - log Q (detach) : GAT bias 용
+        Q       : [B,H,N,N]  - sample-conditional global prior
+        total_reg: scalar    - (G/S 관련 정규화 합)
     """
     def __init__(self, args, input_dim: int, k_basis: int, k_slots: int = None):
         super().__init__()
         self.args = args
         self.D = int(input_dim)
-        self.H = int(k_basis)                  # heads
-        self.K = int(k_slots or k_basis)       # slots (기본 heads와 같게)
+        self.H = int(k_basis)                 # heads
+        self.K = int(k_slots or k_basis)      # slots (기본 heads와 같게)
 
-        # 하이퍼파라미터
-        self.no_self_loop = bool(getattr(args, "no_self_loop", False))
-        self.tau_aff   = float(getattr(args, "slot_aff_temp", 0.5))      # 샘플 affinity 온도
-        self.tau_slot  = float(getattr(args, "slot_graph_temp", 0.5))    # 슬롯 그래프 온도
-        self.align_kl_lambda  = float(getattr(args, "slot_align_kl_lambda", 0.1))
-        self.slot_orth_lambda = float(getattr(args, "slot_orth_lambda", 0.1))
-        self.slot_usage_lambda= float(getattr(args, "slot_usage_lambda", 0.1))
-        self.scale = 1.0 / math.sqrt(self.D)
-        self.use_l2norm = bool(getattr(args, "affinity_l2norm", True))
+        # temps
+        self.tau_aff  = float(getattr(args, "slot_aff_temp", 0.5))
+        self.tau_slot = float(getattr(args, "slot_graph_temp", 0.5))
 
-        # 임베딩 융합
+        # G constraints (공통)
+        self.g_mode        = str(getattr(args, "slot_g_mode", "markov"))  # "markov" | "kernel"
+        self.g_diag_zero   = bool(getattr(args, "slot_g_diag_zero", True))
+        self.g_sparse_l1   = float(getattr(args, "slot_g_sparse_l1", 0.0))
+        self.g_ent_lambda  = float(getattr(args, "slot_g_ent_lambda", 0.0))
+        self.g_temp        = float(getattr(args, "slot_g_temp", 1.0))
+        self.g_frob_div_lambda = float(getattr(args, "g_frob_div_lambda", 0.02))
+
+        # Markov 전용
+        self.g_sinkhorn       = bool(getattr(args, "slot_g_sinkhorn", False))
+        self.g_sinkhorn_iters = int(getattr(args, "slot_g_sinkhorn_iters", 10))
+        self.g_sinkhorn_eps   = float(getattr(args, "slot_g_sinkhorn_eps", 1e-6))
+
+        # Kernel 전용
+        _kr = getattr(args, "slot_kernel_rank", None)
+        self.kernel_rank = int(_kr if (_kr is not None and _kr > 0) else self.K)
+        self.kernel_row_norm   = bool(getattr(args, "slot_kernel_row_stoch", False))
+        self.laplacian_lambda  = float(getattr(args, "slot_laplacian_lambda", 0.0))
+
+        # S 관련 규제
+        self.slot_orth_lambda  = float(getattr(args, "slot_orth_lambda", 0.1))
+        self.slot_usage_lambda = float(getattr(args, "slot_usage_lambda", 0.1))
+
+        # 융합 임베딩 -> S
         self.fusion_mlp = nn.Linear(self.D * 2, self.D)
-        nn.init.xavier_uniform_(self.fusion_mlp.weight); nn.init.zeros_(self.fusion_mlp.bias)
+        nn_init.xavier_uniform_(self.fusion_mlp.weight); nn_init.zeros_(self.fusion_mlp.bias)
 
-        # 슬롯 할당기 S: [B,N,K]
         self.slot_proj = nn.Linear(self.D, self.K)
-        nn.init.xavier_uniform_(self.slot_proj.weight); nn.init.zeros_(self.slot_proj.bias)
+        nn_init.xavier_uniform_(self.slot_proj.weight); nn_init.zeros_(self.slot_proj.bias)
 
-        # 전역 슬롯-슬롯 행렬 G^{(h)}: [H,K,K]
-        self.G_param = nn.Parameter(torch.zeros(self.H, self.K, self.K))
-        nn.init.xavier_uniform_(self.G_param)
-        # per-head Q/K (scaled dot)
-        self.W_q = nn.Parameter(torch.empty(self.H, self.D, self.D))
-        self.W_k = nn.Parameter(torch.empty(self.H, self.D, self.D))
-        nn.init.xavier_uniform_(self.W_q); nn.init.xavier_uniform_(self.W_k)
+        # G 파라미터
+        if self.g_mode == "markov":
+            self.G_param = nn.Parameter(torch.zeros(self.H, self.K, self.K))
+            nn_init.xavier_uniform_(self.G_param)
+        elif self.g_mode == "kernel":
+            self.U_param = nn.Parameter(torch.empty(self.H, self.K, self.kernel_rank))
+            nn_init.xavier_uniform_(self.U_param)
+        else:
+            raise ValueError(f"Unknown slot_g_mode: {self.g_mode}")
+
+        # 옵션
+        self.no_self_loop = bool(getattr(args, "no_self_loop", False))
 
     @staticmethod
     def _row_softmax(x, temperature=1.0, mask=None):
@@ -207,94 +82,151 @@ class BasisSlotAffinityGAT(nn.Module):
         t = max(temperature, 1e-6)
         return F.softmax(x / t, dim=-1)
 
+    @staticmethod
+    def _bistochastic_sinkhorn(M, iters=10, eps=1e-6):
+        # M: [H,K,K] (양수 가정)
+        M = M.clamp_min(eps)
+        for _ in range(iters):
+            M = M / (M.sum(dim=-1, keepdim=True) + eps)  # row normalize
+            M = M / (M.sum(dim=-2, keepdim=True) + eps)  # col normalize
+        return M
+
+    # ==== G 생성(+정규화)와 그에 따른 정규화항 ====
+    def _make_G_and_regs(self, S):
+        """
+        S: [B,N,K]
+        Return:
+          G: [H,K,K]  - 제약 적용된 전역 행렬
+          g_reg: scalar
+          L: [H,K,K] or None (kernel 모드일 때 라플라시안)
+        """
+        eps = 1e-8
+        g_reg_terms = []
+        L = None
+
+        if self.g_mode == "markov":
+            G = F.softmax(self.G_param / max(self.g_temp, 1e-6), dim=-1)  # row-stochastic
+            if self.g_sinkhorn:
+                G = self._bistochastic_sinkhorn(G, iters=self.g_sinkhorn_iters, eps=self.g_sinkhorn_eps)
+            if self.g_diag_zero:
+                G = G - torch.diag_embed(torch.diagonal(G, dim1=-2, dim2=-1))
+
+            if self.g_frob_div_lambda > 0.0:
+                H = G.size(0)
+                if H > 1:
+                    V = F.normalize(G.reshape(H, -1), p=2, dim=1, eps=1e-8)
+                    Gram = torch.matmul(V, V.t())
+                    off_mean = (Gram.sum() - torch.diag(Gram).sum()) / (H * (H - 1))
+                    g_reg_terms.append(self.g_frob_div_lambda * off_mean)
+
+            if self.g_sparse_l1 > 0.0:
+                off = G * (1.0 - torch.eye(self.K, device=G.device).view(1, self.K, self.K))
+                g_reg_terms.append(self.g_sparse_l1 * off.abs().mean())
+            if self.g_ent_lambda != 0.0:
+                row_ent = -(G.clamp_min(eps) * G.clamp_min(eps).log()).sum(dim=-1).mean()
+                g_reg_terms.append(self.g_ent_lambda * row_ent)
+
+        else:  # "kernel"
+            #U = F.softplus(self.U_param)                            # [H,K,R]  (비음수)
+            G = torch.einsum("hkr,hjr->hkj", self.U_param, self.U_param)                  # [H,K,K]  (PSD)
+            if self.g_diag_zero:
+                G = G - torch.diag_embed(torch.diagonal(G, dim1=-2, dim2=-1))
+            if self.kernel_row_norm:
+                G = G / (G.sum(dim=-1, keepdim=True).clamp_min(eps))
+
+            if self.g_frob_div_lambda > 0.0:
+                H = G.size(0)
+                if H > 1:
+                    V = F.normalize(G.reshape(H, -1), p=2, dim=1, eps=1e-8)
+                    Gram = torch.matmul(V, V.t())
+                    off_mean = (Gram.sum() - torch.diag(Gram).sum()) / (H * (H - 1))
+                    g_reg_terms.append(self.g_frob_div_lambda * off_mean)
+
+            if self.g_sparse_l1 > 0.0:
+                off = G * (1.0 - torch.eye(self.K, device=G.device).view(1, self.K, self.K))
+                g_reg_terms.append(self.g_sparse_l1 * off.abs().mean())
+
+            if self.laplacian_lambda > 0.0:
+                D = torch.diag_embed(G.sum(dim=-1))
+                L = D - G
+
+        g_reg = (torch.stack(g_reg_terms).sum() if g_reg_terms else torch.tensor(0.0, device=S.device))
+        return G, g_reg, L
+
+    # ==== 라플라시안 스무딩 ====
+    def _laplacian_smoothness(self, S, L):
+        """
+        S: [B,N,K], L: [H,K,K]
+        return scalar mean_bh Tr(S_b^T L_h S_b)
+        """
+        if L is None:
+            return torch.tensor(0.0, device=S.device)
+        y = torch.einsum("bnk,hkj->bhnj", S, L)   # [B,H,N,K]
+        S_exp = S.unsqueeze(1)                    # [B,1,N,K]
+        term_bh = (S_exp * y).sum(dim=(-1, -2))   # [B,H]
+        return term_bh.mean()
+
+    # ==== 현재 G 반환 (시각화/디버깅용) ====
+    def _current_G(self):
+        eps = 1e-8
+        if self.g_mode == "markov":
+            G = F.softmax(self.G_param / max(self.g_temp, 1e-6), dim=-1)
+            if self.g_sinkhorn:
+                G = self._bistochastic_sinkhorn(G, iters=self.g_sinkhorn_iters, eps=self.g_sinkhorn_eps)
+            if self.g_diag_zero:
+                G = G - torch.diag_embed(torch.diagonal(G, dim1=-2, dim2=-1))
+            return G
+        else:
+            U = F.softplus(self.U_param)
+            G = torch.einsum("hkr,hjr->hkj", U, U)
+            if self.g_diag_zero:
+                G = G - torch.diag_embed(torch.diagonal(G, dim1=-2, dim2=-1))
+            if self.kernel_row_norm:
+                G = G / (G.sum(dim=-1, keepdim=True).clamp_min(eps))
+            return G
+
+    def export_G_numpy(self):
+        return self._current_G().detach().cpu().numpy()
+
+    # ==== 전방 ====
     def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor):
         B, N, D = name_value_embeddings.shape
         device = name_value_embeddings.device
         eps = 1e-8
 
-        # (1) 융합 임베딩
+        # (1) 융합 -> z
         z = self.fusion_mlp(torch.cat([desc_embeddings, name_value_embeddings], dim=-1))  # [B,N,D]
 
-        # (2) 슬롯 할당 S: [B,N,K]
-        S_logits = self.slot_proj(z)
+        # (2) 슬롯 할당 S
+        S_logits = self.slot_proj(z)                # [B,N,K]
         S = F.softmax(S_logits, dim=-1)
 
-        # (3) 전역 슬롯 그래프 → Q(x) = row-softmax(S G S^T / τ_slot)
-        A_slot = torch.einsum("bnk,hkl,bml->bhnm", S, self.G_param, S)  # [B,H,N,N]
+        # (3) G + Q
+        G, g_reg, L = self._make_G_and_regs(S)      # G:[H,K,K]
+        A_slot = torch.einsum("bnk,hkl,bml->bhnm", S, G, S)  # [B,H,N,N]
         if self.no_self_loop:
-            eye = torch.eye(N, device=device, dtype=torch.bool).view(1,1,N,N)
+            eye = torch.eye(N, device=device, dtype=torch.bool).view(1, 1, N, N)
             A_slot = A_slot.masked_fill(eye, float("-inf"))
         Q = self._row_softmax(A_slot, temperature=self.tau_slot)        # [B,H,N,N]
 
-        # (4) 규제항(슬롯 겹침/사용량)만 합침 — 정렬 KL은 여기서 하지 않음
-        StS = torch.einsum("bnk,bnl->bkl", S, S) / max(float(N), 1.0)    # [B,K,K]
-        offdiag = StS - torch.diag_embed(torch.diagonal(StS, dim1=-2, dim2=-1))
-        slot_orth  = (offdiag ** 2).mean()
+        # (4) S 관련 규제
+        reg_terms = []
+        if self.slot_orth_lambda > 0.0:
+            StS = torch.einsum("bnk,bnl->bkl", S, S) / max(float(N), 1.0)  # [B,K,K]
+            offdiag = StS - torch.diag_embed(torch.diagonal(StS, dim1=-2, dim2=-1))
+            reg_terms.append(self.slot_orth_lambda * (offdiag ** 2).mean())
+        if self.slot_usage_lambda > 0.0:
+            u = S.mean(dim=1)
+            u = u / (u.sum(dim=-1, keepdim=True) + eps)
+            uniform = torch.full_like(u, 1.0 / self.K)
+            usage_kl = (u.clamp_min(eps) * (u.clamp_min(eps).log() - uniform.log())).sum(dim=-1).mean()
+            reg_terms.append(self.slot_usage_lambda * usage_kl)
 
-        u = S.mean(dim=1)                                # [B,K]
-        u = u / (u.sum(dim=-1, keepdim=True) + eps)
-        uniform = torch.full_like(u, 1.0 / self.K)
-        slot_usage = (u * (torch.log(u + eps) - torch.log(uniform + eps))).sum(dim=-1).mean()
+        if (self.g_mode == "kernel") and (self.laplacian_lambda > 0.0):
+            reg_terms.append(self.laplacian_lambda * self._laplacian_smoothness(S, L))
 
-        total_reg = (self.slot_orth_lambda  * slot_orth
-                    + self.slot_usage_lambda * slot_usage)
+        total_reg = (torch.stack(reg_terms).sum() if reg_terms else torch.tensor(0.0, device=device)) + g_reg
 
-        bias_log = torch.log(Q + eps).detach()           # [B,H,N,N]  (전역 프라이어의 log)
-        # 두 번째 리턴값은 “샘플 P”가 아니라 Q를 넘겨도 되고(None로 둬도 무방)
+        # (5) GAT 바이어스 용 logQ (detach)
+        bias_log = torch.log(Q.clamp_min(eps)).detach()
         return bias_log, Q, total_reg
-
-
-class RelationQueryScorer(nn.Module):
-    """
-    H(=k_basis)개의 관계 쿼리로 head별 Var-Var 마스크 예측.
-    phi([Ei||Ej])를 head별 쿼리 q_h와 내적해서 score → sigmoid.
-    입력: E [B,N,input_dim], 출력: M [B,k_basis,N,N]
-    """
-    def __init__(
-        self,
-        rel_input_dim: int,
-        k_basis: int = 8,
-        rel_hidden_dim: int = 128,
-        dropout_rate: float = 0.1,
-        mask_symmetric: bool = False,
-        no_self_loop: bool = True,
-    ):
-        super().__init__()
-        self.rel_input_dim = rel_input_dim
-        self.k_basis = k_basis
-        self.rel_hidden_dim = rel_hidden_dim
-        self.dropout_rate = dropout_rate
-        self.mask_symmetric = mask_symmetric    
-        self.no_self_loop = no_self_loop
-
-        self.phi = nn.Sequential(
-            nn.Linear(2 * self.rel_input_dim, self.rel_hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-            nn.Linear(self.rel_hidden_dim, self.rel_input_dim),  # pair → input_dim 특징
-        )
-        # H개의 쿼리 벡터
-        self.q = nn.Parameter(torch.randn(self.k_basis, self.rel_input_dim) * (1.0 / (self.rel_input_dim ** 0.5)))
-
-        # init
-        for m in self.phi:
-            if isinstance(m, nn.Linear):
-                nn_init.kaiming_uniform_(m.weight, a=0.0)
-                if m.bias is not None:
-                    nn_init.zeros_(m.bias)
-
-    def forward(self, E: torch.Tensor) -> torch.Tensor:
-        # E: [B, N, D]
-        B, N, D = E.shape
-        Ei = E.unsqueeze(2).expand(B, N, N, D)                 # [B,N,N,D]
-        Ej = E.unsqueeze(1).expand(B, N, N, D)                 # [B,N,N,D]
-        feat = self.phi(torch.cat([Ei, Ej], dim=-1))           # [B,N,N,D]
-        logits = torch.einsum('bijd,hd->bijh', feat, self.q)   # [B,N,N,k_basis]
-        M = torch.sigmoid(logits).permute(0, 3, 1, 2).contiguous()  # [B,k_basis,N,N]
-
-        if self.mask_symmetric:
-            M = 0.5 * (M + M.transpose(-1, -2))
-        if self.no_self_loop:
-            eye = torch.eye(N, device=E.device).view(1, 1, N, N)
-            M = M * (1.0 - eye)
-        return M

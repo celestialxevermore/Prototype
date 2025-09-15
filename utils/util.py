@@ -433,6 +433,7 @@ def save_results_(args, results):
         "no_self_loop" : args.no_self_loop,
         "del_exp": getattr(args, 'del_exp', 'unknown'),
         "results": results['Best_results'], 
+        "slot_g_mode" : args.slot_g_mode , 
         #"relation_scorer_type" : args.relation_scorer_type,
         #"mask_share_across_layers" : args.mask_share_across_layers,
         #"rel_symmetric" : args.rel_symmetric,

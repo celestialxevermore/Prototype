@@ -12,7 +12,7 @@ import math
 import torch.nn.init as nn_init
 import logging
 import torch.nn.init as init
-from utils.affinity import BasisAffinityGAT, BasisSlotAffinityGAT
+from utils.affinity import BasisSlotAffinityGAT
 
 logger = logging.getLogger(__name__)
 

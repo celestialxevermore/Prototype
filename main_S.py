@@ -105,12 +105,47 @@ def get_args():
     parser.add_argument('--slot_align_kl_lambda', type = float, default = 0.1)
     parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
     parser.add_argument('--slot_usage_lambda', type=float, default = 0.1)
-    parser.add_argument('--affinity_l2norm', action='store_true')
+    parser.add_argument('--affinity_l2norm', type=bool, default=True)
+    parser.add_argument('--slot_g_mode', type=str, default='markov', choices=['markov','kernel'])
+
+    # booleans는 store_true / store_false로
+    parser.add_argument('--slot_g_diag_zero', dest='slot_g_diag_zero', action='store_true')
+    parser.add_argument('--no-slot_g_diag_zero', dest='slot_g_diag_zero', action='store_false')
+    parser.set_defaults(slot_g_diag_zero=True)
+
+    parser.add_argument('--slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_true')
+    parser.add_argument('--no-slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_false')
+    parser.set_defaults(slot_g_sinkhorn=False)
+
+    parser.add_argument('--slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_true')
+    parser.add_argument('--no-slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_false')
+    parser.set_defaults(slot_kernel_row_stoch=False)
+
+    # 스칼라/온도/정규화 계수
+    parser.add_argument('--slot_g_temp', type=float, default=1.0)
+    parser.add_argument('--slot_g_sparse_l1', type=float, default=0.0)
+    parser.add_argument('--slot_g_ent_lambda', type=float, default=0.0)
+    parser.add_argument('--g_frob_div_lambda', type=float, default=0.02)   # ✅ 추천: 0.01~0.02
+
+    # kernel 전용
+    parser.add_argument('--slot_kernel_rank', type=int, default=0)  # None이면 K로 세팅
+    parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
+
+    # temperatures
+    parser.add_argument('--slot_aff_temp', type=float, default=0.5)   # P의 softmax 온도(Attention)
+    parser.add_argument('--slot_graph_temp', type=float, default=0.5) # Q의 softmax 온도
+
+    # Sinkhorn 세부
+    parser.add_argument('--slot_g_sinkhorn_iters', type=int, default=10)
+    parser.add_argument('--slot_g_sinkhorn_eps', type=float, default=1e-6)
+
     # 관계 마스크 스코어러
     parser.add_argument('--relation_scorer_type', type=str, default='slot', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
     parser.add_argument('--rel_input_dim', type=int, default=512,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
     parser.add_argument('--rel_hidden_dim', type=int, default=256,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
     
+
+
     # 마스크를 로짓에 더할 때 세기(γ)
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
