@@ -586,14 +586,8 @@ class Model(nn.Module):
             nn.LayerNorm(self.input_dim) for _ in range(self.num_shared_layers)
         ])
 
-        # self.basis_affinity = BasisAffinityGAT(
-        #     args, input_dim = self.input_dim, k_basis = args.k_basis
-        # )
-        # self.anchor_kl_lambda = float(getattr(args, "anchor_kl_lambda", 0.05))
-
-
         self.basis_affinity = BasisSlotAffinityGAT(
-            args, input_dim = self.input_dim, k_basis = args.k_basis, k_slots = args.k_basis
+            args, input_dim = self.input_dim, k_basis = args.n_heads, k_slots = args.k_basis
         )
 
 
@@ -710,18 +704,17 @@ class Model(nn.Module):
         if self.training and hasattr(self, "_last_slot_loss") and (self._last_slot_loss is not None):
             loss = loss + self._last_slot_loss
 
-        # (2) P vs Q 정렬 KL — 중복 없이 여기서만 계산
+        # # (2) P vs Q 정렬 KL — 중복 없이 여기서만 계산
         align_lam = float(getattr(self.args, "slot_align_kl_lambda", 0.0))
         if self.training and align_lam > 0.0 and hasattr(self, "_last_P_basis") and hasattr(self, "_last_bias_log"):
             eps = 1e-8
-            P = self._last_P_basis.clamp_min(eps)          # [B,H,S,S], BasisGAT 실제 attention
+            P = self._last_P_basis.clamp_min(eps)         # [B,H,S,S], BasisGAT 실제 attention
             Q = self._last_Q_slot.clamp_min(eps)   # [B,H,S,S], 슬롯 프라이어
 
-            # 기본: KL(P‖Q)  ← P를 Q에 맞추게 만드는 방향(안정적)
+            #KL(P‖Q)  ← P를 Q에 맞추게 만드는 방향(안정적)
             L_align = (P * (P.log() - Q.log())).sum(dim=(-1, -2, -3)).mean()
 
-            # 만약 네가 KL(Q‖P)를 원한다면 위 한 줄 대신 아래 한 줄을 쓰면 됨:
-            # L_align = (Q * (Q.log() - P.log())).sum(dim=(-1, -2, -3)).mean()
+            #L_align = (Q * (Q.log() - P.log())).sum(dim=(-1, -2, -3)).mean()
 
             loss = loss + align_lam * L_align
 
@@ -777,9 +770,7 @@ class Model(nn.Module):
         self._last_slot_loss = (slot_loss if self.training else None)
 
         # === 핵심: GAT의 pre-softmax bias로 넣을 프라이어 확률 ===
-        # in-place 사용 금지! (detach().clamp_ 는 금지)
         mask_M = torch.clamp(self._last_Q_slot, min=1e-6, max=1.0 - 1e-6).detach().clone()  # [B,H,S,S]
-
         # ---- shape normalize to [B,K,S,S] ----
         B, S = desc.size(0), desc.size(1)
         K    = self.args.k_basis
@@ -789,7 +780,7 @@ class Model(nn.Module):
             mask_M = mask_M.permute(0, 2, 1, 3).contiguous()
         elif mask_M.shape == (B, 1, K, S):            # [B,1,K,S] -> [B,K,S,S]
             mask_M = mask_M.squeeze(1).unsqueeze(-1).expand(-1, -1, -1, S)
-        elif mask_M.shape == (B, K, S, S):            # 이미 원하는 형태
+        elif mask_M.shape == (B, K, S, S):            
             pass
         else:
             raise ValueError(f"mask_M must be broadcastable to [B,{K},{S},{S}], got {list(mask_M.shape)}")

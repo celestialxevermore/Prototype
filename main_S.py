@@ -100,11 +100,10 @@ def get_args():
     # BasisGAT
     # BasisGAT 스택 관련
     parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
-    parser.add_argument('--basis_ema_momentum', type=float, default=0.99, help = 'EMA momentum for basis affinity')
     parser.add_argument('--anchor_kl_lambda', type=float, default=0.05, help = 'Weight of KL(anchor) regularizer during Few-shot.')
     parser.add_argument('--slot_align_kl_lambda', type = float, default = 0.1)
     parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
-    parser.add_argument('--slot_usage_lambda', type=float, default = 0.1)
+    parser.add_argument('--slot_usage_lambda',type=float , default = 0)
     parser.add_argument('--affinity_l2norm', type=bool, default=True)
     parser.add_argument('--slot_g_mode', type=str, default='markov', choices=['markov','kernel'])
 
@@ -115,7 +114,7 @@ def get_args():
 
     parser.add_argument('--slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_true')
     parser.add_argument('--no-slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_false')
-    parser.set_defaults(slot_g_sinkhorn=False)
+    parser.set_defaults(slot_g_sinkhorn=True)
 
     parser.add_argument('--slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_true')
     parser.add_argument('--no-slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_false')
@@ -128,7 +127,7 @@ def get_args():
     parser.add_argument('--g_frob_div_lambda', type=float, default=0.02)   # ✅ 추천: 0.01~0.02
 
     # kernel 전용
-    parser.add_argument('--slot_kernel_rank', type=int, default=0)  # None이면 K로 세팅
+    parser.add_argument('--slot_kernel_rank', type=int, default=8)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
 
     # temperatures
@@ -136,7 +135,7 @@ def get_args():
     parser.add_argument('--slot_graph_temp', type=float, default=0.5) # Q의 softmax 온도
 
     # Sinkhorn 세부
-    parser.add_argument('--slot_g_sinkhorn_iters', type=int, default=10)
+    parser.add_argument('--slot_g_sinkhorn_iters', type=int, default=20)
     parser.add_argument('--slot_g_sinkhorn_eps', type=float, default=1e-6)
 
     # 관계 마스크 스코어러
