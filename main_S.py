@@ -1,5 +1,5 @@
 import torch
-torch.cuda.set_device(0)
+#torch.cuda.set_device(0)
 #torch.use_deterministic_algorithms(False)
 import os
 import random, time
@@ -34,6 +34,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -103,14 +104,14 @@ def get_args():
     parser.add_argument('--anchor_kl_lambda', type=float, default=0.05, help = 'Weight of KL(anchor) regularizer during Few-shot.')
     parser.add_argument('--slot_align_kl_lambda', type = float, default = 0.1)
     parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
-    parser.add_argument('--slot_usage_lambda',type=float , default = 0)
+    parser.add_argument('--slot_usage_lambda',type=float , default = 0.01)
     parser.add_argument('--affinity_l2norm', type=bool, default=True)
-    parser.add_argument('--slot_g_mode', type=str, default='markov', choices=['markov','kernel'])
+    parser.add_argument('--slot_g_mode', type=str, default='gw', choices=['markov','kernel','gw'])
 
     # booleans는 store_true / store_false로
     parser.add_argument('--slot_g_diag_zero', dest='slot_g_diag_zero', action='store_true')
     parser.add_argument('--no-slot_g_diag_zero', dest='slot_g_diag_zero', action='store_false')
-    parser.set_defaults(slot_g_diag_zero=True)
+    #parser.set_defaults(slot_g_diag_zero=True)
 
     parser.add_argument('--slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_true')
     parser.add_argument('--no-slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_false')
@@ -129,7 +130,13 @@ def get_args():
     # kernel 전용
     parser.add_argument('--slot_kernel_rank', type=int, default=8)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
-
+    parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
+    parser.add_argument("--slot_dim", type=int, default=8, help="Global slot space latent dimension K")
+    parser.add_argument('--gw_eps', type=float, default = 0.05)
+    parser.add_argument("--gw_sigma", type = float, default = 0.3)
+    parser.add_argument("--gw_outer_iters", type=int, default=10)
+    parser.add_argument("--gw_sinkhorn_iters", type=int, default=30)
+    parser.add_argument("--gw_sinkhorn_eps", type=float, default=1e-6)
     # temperatures
     parser.add_argument('--slot_aff_temp', type=float, default=0.5)   # P의 softmax 온도(Attention)
     parser.add_argument('--slot_graph_temp', type=float, default=0.5) # Q의 softmax 온도

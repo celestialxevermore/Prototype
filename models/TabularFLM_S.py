@@ -389,6 +389,12 @@ class BasisGATLayer(nn.Module):
         self.head_dim   = input_dim // n_heads
         self.attn_dropout = nn.Dropout(dropout)
 
+        self.gw_eps = self.args.gw_eps 
+        self.gw_sigma = self.args.gw_sigma 
+        self.gw_outer_iters = self.args.gw_outer_iters 
+        self.gw_sink_iters = self.args.gw_sinkhorn_iters 
+        self.gw_tol = self.args.gw_sinkhorn_eps 
+
         # Q/K/V
         self.q_proj = nn.Linear(input_dim, input_dim)
         self.k_proj = nn.Linear(input_dim, input_dim)
@@ -454,102 +460,122 @@ class BasisGATLayer(nn.Module):
         p = prob.clamp(min=eps, max=1.0 - eps)
         return torch.log(p) - torch.log(1.0 - p)
 
-    def forward(self, desc_embeddings: torch.Tensor,
-                      name_value_embeddings: torch.Tensor,
-                      mask_M: torch.Tensor = None):
-        """
-        desc_embeddings        : [B, seq_len, D]        (변수 설명 임베딩)
-        name_value_embeddings  : [B, new_seq, D]        (CLS + 변수)
-        mask_M (optional)      : [B, n_heads, seq_len, seq_len] (Var-Var 확률)
-        """
+    def _build_base_logits(self, desc_embeddings, name_value_embeddings, new_adjacency):
         B, new_seq, _ = name_value_embeddings.shape
-        seq_len = new_seq - 1  # exclude CLS
 
-        # === structure adjacency ===
-        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
-        if self.args.no_self_loop:
-            var_adj = self._no_self_interaction(var_adj)
-
-        new_adjacency = torch.zeros(B, new_seq, new_seq, device=name_value_embeddings.device)
-        new_adjacency[:, 1:, 1:] = var_adj
-        new_adjacency[:, 0, 1:]  = 1.0  # CLS -> Var
-        new_adjacency[:, 1:, 0]  = 0.0  # Var -> CLS
-        self.new_adjacency = new_adjacency  # for debugging/visualization
-
-        # === Q/K/V ===
-        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,T,d]
+        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # === edge attributes if needed ===
-        if self.args.attn_type in ['gat_v1', 'gat_v2', 'gate']:
-            if self.args.edge_type in ['normal', 'mlp']:
-                # build var-var & cls-var attributes in the SAME way you already used
-                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)        # [B,S,S,D]
-                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)        # [B,S,S,D]
-                var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim=-1)                 # [B,S,S,2D]
-                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)         # [B,S,2D]
-                edge_dim = var_edge_attr.size(-1)
-
-                edge_attr = torch.zeros(B, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
-                edge_attr[:, 1:, 1:] = var_edge_attr
-                edge_attr[:, 0, 1:]  = cls_edge_attr
-                edge_attr[:, 1:, 0]  = cls_edge_attr
-
-                if self.args.edge_type == 'mlp' and hasattr(self, 'edge_update'):
-                    edge_attr = self.edge_update(edge_attr)  # [B,T,T,D]
-
-                # [B,T,T,D] -> [B,H,T,T,head_dim]
-                edge_attr = edge_attr.view(B, new_seq, new_seq, self.n_heads, self.head_dim).permute(0, 3, 1, 2, 4)
-                edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
-
-        # === build logits by branch ===
         q_exp = q.unsqueeze(3)  # [B,H,1,T,d]→[B,H,T,T,d] via expand
         k_exp = k.unsqueeze(2)  # [B,H,T,1,d]→[B,H,T,T,d]
         q_expanded = q_exp.expand(-1, -1, -1, new_seq, -1)
         k_expanded = k_exp.expand(-1, -1, new_seq, -1, -1)
 
+        if self.args.attn_type in ['gat_v1', 'gat_v2', 'gate'] and self.args.edge_type in ['normal', 'mlp']:
+            seq_len = new_seq - 1
+            node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+            node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+            var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim=-1)
+            cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+            edge_dim = var_edge_attr.size(-1)
+
+            edge_attr = torch.zeros(B, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+            edge_attr[:, 1:, 1:] = var_edge_attr
+            edge_attr[:, 0, 1:]  = cls_edge_attr
+            edge_attr[:, 1:, 0]  = cls_edge_attr
+
+            if self.args.edge_type == 'mlp' and hasattr(self, 'edge_update'):
+                edge_attr = self.edge_update(edge_attr)  # [B,T,T,D]
+
+            edge_attr = edge_attr.view(B, new_seq, new_seq, self.n_heads, self.head_dim).permute(0, 3, 1, 2, 4)
+            edge_attr = edge_attr * new_adjacency.unsqueeze(1).unsqueeze(-1)
+
+        # logits
         if self.args.attn_type in ['gat_v1', 'gat_v2']:
             if self.args.edge_type in ['normal', 'mlp']:
-                qke = torch.cat([q_expanded, k_expanded, edge_attr], dim=-1)  # [..., 3*head_dim]
-            elif self.args.edge_type == 'no_use':
+                qke = torch.cat([q_expanded, k_expanded, edge_attr], dim=-1)
+            else:
                 qke = torch.cat([q_expanded, k_expanded], dim=-1)
             if self.args.attn_type == 'gat_v2':
                 qke = F.leaky_relu(qke)
-            logits = self.attn_proj(qke).squeeze(-1)  # [B,H,T,T]
+            logits_base = self.attn_proj(qke).squeeze(-1)  # [B,H,T,T]
 
         elif self.args.attn_type == 'gate':
             if self.args.edge_type in ['normal', 'mlp']:
                 qke = torch.cat([q_expanded, k_expanded, edge_attr], dim=-1)
-            elif self.args.edge_type == 'no_use':
+            else:
                 qke = torch.cat([q_expanded, k_expanded], dim=-1)
             gate_values    = torch.sigmoid(self.gate_proj(qke))
             content_values = torch.tanh(self.content_proj(qke))
-            logits = (gate_values * content_values).squeeze(-1)  # [B,H,T,T]
+            logits_base = (gate_values * content_values).squeeze(-1)  # [B,H,T,T]
 
-        # === pre-softmax bias with mask_M (A안) ===
-        if mask_M is not None:
-            if mask_M.dim() != 4 or mask_M.size(0) != B or mask_M.size(1) != self.n_heads \
-               or mask_M.size(2) != seq_len or mask_M.size(3) != seq_len:
-                raise ValueError(f"mask_M must be [B, {self.n_heads}, {seq_len}, {seq_len}], got {list(mask_M.shape)}")
-            bias_full = torch.zeros_like(logits)  # [B,H,T,T]
-            bias_var  = self._logit_bias_from_prob(mask_M) * self.gate_strength
-            bias_full[:, :, 1:, 1:] = bias_var
-            logits = logits + bias_full
+        else:
+            # fallback: dot-product attention
+            logits_base = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
-        # === structural masking + softmax ===
+        return logits_base, v
+    def forward(self, 
+        desc_embeddings:torch.Tensor, 
+        name_value_embeddings:torch.Tensor,
+        prior_Q:torch.Tensor = None, # [B,H,S,S] Global node space affinity
+        DG:torch.Tensor = None, # [B,H,K,K] distance on slot space 
+        b:torch.Tensor = None):
+        """ 
+            desc_embeddings : [B,S,D] 
+            name_value_embeddings : [B,T,D] 
+            prior_Q (optional) : [B,H,S,S] (Var-Var prior from slots) Global node space affinity
+            DG (optional) : [B,H,K,K] Global slot space affinity
+            b (optional) : [B,H,K]
+        """
+        B, new_seq, _ = name_value_embeddings.shape
+        seq_len = new_seq - 1
+         
+        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
+        if self.args.no_self_loop:
+            var_adj = self._no_self_interaction(var_adj)
+        new_adjacency = torch.zeros(B, new_seq, new_seq, device = name_value_embeddings.device)
+        new_adjacency[:,1:,1:] = var_adj
+        new_adjacency[:,0,1:] = 1.0 
+        new_adjacency[:,1:,0] = 0.0
+        self.new_adjacency = new_adjacency 
+        logits_base, v = self._build_base_logits(desc_embeddings, name_value_embeddings, new_adjacency)
         NEG_INF = -1e9
-        struct_mask = (new_adjacency.unsqueeze(1) == 0).to(logits.dtype) * NEG_INF  # [B,1,T,T]
-        logits = logits + struct_mask
+        struct_mask = (new_adjacency.unsqueeze(1) ==0).to(logits_base.dtype) * NEG_INF
+        use_two_pass = ((prior_Q is not None) and (DG is not None) and (b is not None))
+        if use_two_pass:
+            logits_p0 = logits_base + struct_mask 
+            P0 = F.softmax(logits_p0, dim = -1)
+            P_var = P0[:, :, 1:, 1:] # [B, H, S, S]
+            P_norm = BasisSlotAffinityGAT.normalize_affinity(P_var, sym=True)
+            DP = BasisSlotAffinityGAT.affinity_to_distance(P_norm)
+            eps = 1e-8 
+            deg_P = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
+            a = deg_P / deg_P.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+            # Gw solve 
+            with torch.no_grad():
+                _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
+                alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
+            Q_var = prior_Q
+            Q_hat = BasisSlotAffinityGAT.sharpen_Q(Q_var, alpha)
+            bias_full = torch.zeros_like(logits_base)
+            bias_full[:, :, 1:, 1:] = self._logit_bias_from_prob(Q_hat) * self.gate_strength 
+            logits = logits_base + bias_full + struct_mask 
+        else:
+            logits = logits_base 
+            if prior_Q is not None:
+                bias_full = torch.zeros_like(logits_base)
+                bias_full[:, :, 1:, 1:] = self._logit_bias_from_prob(prior_Q) * self.gate_strength 
+                logits = logits + bias_full 
+            logits = logits + struct_mask 
+        # final attention
         attn_weights = F.softmax(logits, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)  # [B,H,T,T]
-
-        # === context ===
-        context = torch.matmul(attn_weights, v)               # [B,H,T,d]
-        basis_outputs = context.transpose(1, 2).contiguous()  # [B,T,H,d]
+        attn_weights = self.attn_dropout(attn_weights)
+        context = torch.matmul(attn_weights, v)
+        basis_outputs = context.transpose(1,2).contiguous()
         return basis_outputs, attn_weights
-
-
+    
 class Model(nn.Module):
     def __init__(self, args, input_dim, hidden_dim, output_dim, dropout_rate, llm_model, experiment_id, mode):
         super().__init__()
@@ -564,15 +590,12 @@ class Model(nn.Module):
         self.source_data  = args.source_data
         self.mode         = mode
         self.num_classes  = args.num_classes
-
+        self.n_slots = self.args.n_slots
+        self.slot_dim = self.args.slot_dim
         # CLS
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
 
-        # ----- Relation scorer (FFN1 + scorer) -----
-        rel_input_dim   = int(getattr(args, 'rel_input_dim', 768))
-        rel_hidden_dim = int(getattr(args, 'rel_hidden_dim', 512))
-        no_self_loop   = bool(getattr(args, 'no_self_loop', True))
         self.num_basis_layers = int(getattr(args, 'num_basis_layers', 3))
         self.num_shared_layers = int(getattr(args, 'num_shared_layers', 3))
 
@@ -587,12 +610,11 @@ class Model(nn.Module):
         ])
 
         self.basis_affinity = BasisSlotAffinityGAT(
-            args, input_dim = self.input_dim, k_basis = args.n_heads, k_slots = args.k_basis
+            args, input_dim = self.input_dim, n_slots = self.n_slots, slot_dim = self.slot_dim
         )
 
-
         self.basis_layers = nn.ModuleList([ 
-            BasisGATLayer(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, n_heads = args.k_basis, dropout = self.dropout_rate)
+            BasisGATLayer(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, n_heads = args.n_heads, dropout = self.dropout_rate)
             for _ in range(self.num_basis_layers)
         ])
         self.basis_layer_norms = nn.ModuleList([ 
@@ -601,12 +623,12 @@ class Model(nn.Module):
 
         # Experts (one per basis head)
         self.expert_predictors = nn.ModuleList([
-            nn.Linear(self.input_dim // args.k_basis, output_dim) for _ in range(args.k_basis)
+            nn.Linear(self.input_dim // args.n_heads, output_dim) for _ in range(args.n_heads)
         ])
 
         # Coordinator (weights over heads/bases)
         self.coordinator = CoordinatorMLP(
-            self.input_dim, hidden_dim, args.k_basis, self.dropout_rate,
+            self.input_dim, hidden_dim, args.n_heads, self.dropout_rate,
             getattr(args, 'coord_softmax_temp', 1.0)
         )
 
@@ -704,21 +726,7 @@ class Model(nn.Module):
         if self.training and hasattr(self, "_last_slot_loss") and (self._last_slot_loss is not None):
             loss = loss + self._last_slot_loss
 
-        # # (2) P vs Q 정렬 KL — 중복 없이 여기서만 계산
-        align_lam = float(getattr(self.args, "slot_align_kl_lambda", 0.0))
-        if self.training and align_lam > 0.0 and hasattr(self, "_last_P_basis") and hasattr(self, "_last_bias_log"):
-            eps = 1e-8
-            P = self._last_P_basis.clamp_min(eps)         # [B,H,S,S], BasisGAT 실제 attention
-            Q = self._last_Q_slot.clamp_min(eps)   # [B,H,S,S], 슬롯 프라이어
-
-            #KL(P‖Q)  ← P를 Q에 맞추게 만드는 방향(안정적)
-            L_align = (P * (P.log() - Q.log())).sum(dim=(-1, -2, -3)).mean()
-
-            #L_align = (Q * (Q.log() - P.log())).sum(dim=(-1, -2, -3)).mean()
-
-            loss = loss + align_lam * L_align
-
-        # (3) 기존 Few-shot coord KL 유지 (타깃 에피소드에서 좌표 분포 정렬)
+        # (2) 기존 Few-shot coord KL 유지 (타깃 에피소드에서 좌표 분포 정렬)
         lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
         if (self.mode == 'Few') and (lam > 0.0) and hasattr(self, "centroids"):
             c = getattr(self, "_last_coordinates", None)
@@ -764,34 +772,35 @@ class Model(nn.Module):
         self._last_coordinates = coordinates
 
         # ---- global/slot prior Q and regularizers ----
-        bias_log, Q_slot, slot_loss = self.basis_affinity(desc, nv)
+        bias_log, Q_slot, slot_loss, DG, b = self.basis_affinity(desc, nv)
         self._last_bias_log  = bias_log          # log Q  (시각화/기록용)
-        self._last_Q_slot    = Q_slot            # Q      (확률)
+        self._last_Q_slot    = Q_slot            # Q      (확률) [B,M,S,S]
         self._last_slot_loss = (slot_loss if self.training else None)
 
         # === 핵심: GAT의 pre-softmax bias로 넣을 프라이어 확률 ===
-        mask_M = torch.clamp(self._last_Q_slot, min=1e-6, max=1.0 - 1e-6).detach().clone()  # [B,H,S,S]
+        mask_M = torch.clamp(self._last_Q_slot, min=1e-6, max=1.0 - 1e-6)  # [B,M,S,S]
         # ---- shape normalize to [B,K,S,S] ----
         B, S = desc.size(0), desc.size(1)
-        K    = self.args.k_basis
+        M = Q_slot.size(1)
+
         if mask_M.dim() == 3:                         # [B,S,S] -> [B,K,S,S]
-            mask_M = mask_M.unsqueeze(1).expand(B, K, S, S)
-        elif mask_M.shape == (B, S, K, S):            # [B,S,K,S] -> [B,K,S,S]
+            mask_M = mask_M.unsqueeze(1).expand(B, M, S, S)
+        elif mask_M.shape == (B, S, M, S):            # [B,S,K,S] -> [B,K,S,S]
             mask_M = mask_M.permute(0, 2, 1, 3).contiguous()
-        elif mask_M.shape == (B, 1, K, S):            # [B,1,K,S] -> [B,K,S,S]
+        elif mask_M.shape == (B, 1, M, S):            # [B,1,K,S] -> [B,K,S,S]
             mask_M = mask_M.squeeze(1).unsqueeze(-1).expand(-1, -1, -1, S)
-        elif mask_M.shape == (B, K, S, S):            
+        elif mask_M.shape == (B, M, S, S):            
             pass
         else:
-            raise ValueError(f"mask_M must be broadcastable to [B,{K},{S},{S}], got {list(mask_M.shape)}")
-        assert mask_M.shape == (B, K, S, S), f"mask_M must be [B,{K},{S},{S}], got {list(mask_M.shape)}"
+            raise ValueError(f"mask_M must be broadcastable to [B,{M},{S},{S}], got {list(mask_M.shape)}")
+        assert mask_M.shape == (B, M, S, S), f"mask_M must be [B,{M},{S},{S}], got {list(mask_M.shape)}"
 
         # ---- basis GAT stack (Q를 pre-softmax logit bias로 사용) ----
         x_basis  = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim=1)
         last_att = None
         for l in range(self.num_basis_layers):
             norm_x = self.basis_layer_norms[l](x_basis)
-            basis_outputs, att = self.basis_layers[l](desc, norm_x, mask_M=mask_M)
+            basis_outputs, att = self.basis_layers[l](desc, norm_x, prior_Q=mask_M, DG=DG,b=b)
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
             last_att = att
         if last_att is not None:
@@ -800,7 +809,7 @@ class Model(nn.Module):
 
         # ---- experts & mixture ----
         expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,head_dim]
-        preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.k_basis)]
+        preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.n_heads)]
         expert_predictions = torch.stack(preds, dim=1)  # [B,H,C]
         pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim=1)  # [B,C]
 
