@@ -130,15 +130,40 @@ class BasisSlotAffinityGAT(nn.Module):
         #import pdb ; pdb.set_trace()
         return M if G.dim() == 4 else M.squeeze(0)
 
+    @staticmethod
+    def cosine_slot_cost_from_U(U: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """
+        Compute cosine-based slot cost directly from U (before UU^T).
+        Args:
+            U: [H, K, R]  - slot embeddings (nonnegative, after softplus)
+            eps: small value for numerical stability
+        Returns:
+            DG: [H, K, K] - slot-to-slot cosine distance matrix
+        """
+        # normalize slot embeddings along last dim (R)
+        U_norm = F.normalize(U, p=2, dim=-1, eps=eps)   # [H, K, R]
+
+        # cosine similarity between slots
+        cos_sim = torch.einsum("hkr,hjr->hkj", U_norm, U_norm)  # [H, K, K]
+
+        # cosine distance
+        DG = (1.0 - cos_sim).clamp_min(0.0)
+
+        # remove self-distance (diagonal = 0)
+        DG = DG - torch.diag_embed(torch.diagonal(DG, dim1=-2, dim2=-1))
+
+        return DG
+
     @staticmethod 
     def alpha_from_gw(gw_val:torch.Tensor, sigma:float) -> torch.Tensor:
         """
-            gw_val : [B,H] 
+            gw_val : [B,H,M] 
             return alpha : [B,H,1,1] in (0,1] 
         """
         sigma = max(float(sigma), 1e-6)
         scores = torch.exp(- (gw_val / sigma) ** 2)
         alpha = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-8)  # softmax-like
+
         return alpha
 
     @staticmethod 
@@ -272,7 +297,7 @@ class BasisSlotAffinityGAT(nn.Module):
                 L = D - G
 
         g_reg = torch.stack(g_reg_terms).sum() if g_reg_terms else torch.tensor(0.0, device=S.device)
-        return G, g_reg, L
+        return G, g_reg, L, U
 
     # ---------------- Laplacian smoothness ----------------
     def _laplacian_smoothness(self, S, L):
@@ -309,13 +334,21 @@ class BasisSlotAffinityGAT(nn.Module):
                 G = G / (G.sum(dim=-1, keepdim=True).clamp_min(eps))
             return G
 
+    def _current_U(self):
+        U = F.softplus(self.U_param)
+        return U
+
     def export_G_numpy(self):
         G = self._current_G()
         return G.detach().cpu().numpy()
+    def export_U_numpy(self):
+        U = self._current_U()
+        return U.detach().cpu().numpy()
 
     def export_slot_cost(self):
-        G = self._current_G() 
-        M = self.cosine_slot_cost(G)
+        #G = self._current_G() 
+        U = self._current_U()
+        M = self.cosine_slot_cost_from_U(U)
         return M.detach().cpu().numpy() 
 
     # ---------------- Forward ----------------
@@ -331,7 +364,7 @@ class BasisSlotAffinityGAT(nn.Module):
         S_logits = self.slot_proj(z)
         S = F.softmax(S_logits, dim=-1)
         # (3) Global slot graph G & Q(x)
-        G, g_reg, L = self._make_G_and_regs(S)      # G:[H,K,K]
+        G, g_reg, L, U = self._make_G_and_regs(S)      # G:[H,K,K]
         
         A_slot = torch.einsum("bnk,mkl,bjl->bmnj", S, G, S)  # [B,H,N,N]
         if self.no_self_loop:
@@ -359,7 +392,7 @@ class BasisSlotAffinityGAT(nn.Module):
         total_reg = torch.stack(reg_terms).sum() if reg_terms else torch.tensor(0.0, device=device)
         total_reg = total_reg + g_reg
 
-        DG = BasisSlotAffinityGAT.cosine_slot_cost(G)
+        DG = BasisSlotAffinityGAT.cosine_slot_cost_from_U(U)
         DG = DG.unsqueeze(0).expand(B, -1, -1, -1)          # [B,M,K,K]
         deg_G = 0.5 * (G.sum(dim=-1) + G.sum(dim=-2))       # [M,K]
         b = deg_G / deg_G.sum(dim=-1, keepdim=True).clamp_min(eps)  # [M,K]

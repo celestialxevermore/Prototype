@@ -124,9 +124,9 @@ class MVisualizer:
             # ---- A_slot "pre-softmax proxy": use log-prob (row-wise constant offset ignored) ----
             # True A_slot 계산
             A_slot_tensor = torch.einsum("bnk,bmkl,bjl->bmnj", 
-                                        torch.tensor(S_np).unsqueeze(0), 
-                                        torch.tensor(G_np).unsqueeze(0), 
-                                        torch.tensor(S_np).unsqueeze(0))
+                             torch.from_numpy(S_np).unsqueeze(0), 
+                             torch.from_numpy(G_np).unsqueeze(0), 
+                             torch.from_numpy(S_np).unsqueeze(0))
             A_slot_np = A_slot_tensor[0].detach().cpu().numpy()
 
             # ---- Build P0 and Q_hat (sharpened) for comparison ----
@@ -156,11 +156,14 @@ class MVisualizer:
                 sinkhorn_iters=int(getattr(self.args, "gw_sinkhorn_iters", 30)),
                 tol=float(getattr(self.args, "gw_sinkhorn_eps", 1e-6)),
             )
-            alpha   = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=float(getattr(self.args, "gw_sigma", 1.0)))
+            #alpha   = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=float(getattr(self.args, "gw_sigma", 1.0)))
+            alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=0.05)
             Q_hat   = BasisSlotAffinityGAT.sharpen_Q(Q_slot, alpha)              # [B,M,S,S]
             alpha_np = alpha.detach().cpu().numpy()
-            Qhat_np = Q_hat[0].detach().cpu().numpy()
 
+            Qhat_np = Q_hat[0].detach().cpu().numpy()
+            gw_np = gw_val.detach().cpu().numpy()
+            #import pdb ; pdb.set_trace()
             # ---- Basis / Shared attention (keep original 2-level accumulation) ----
             Ms, ATTs, ADJs = [], [], []
             x_basis = torch.cat([cls, nv], dim=1)
@@ -196,7 +199,7 @@ class MVisualizer:
                 Ms, ATTs, ADJs, feat_names,
                 slotQ_np, Qhat_np, G_np, S_np,
                 Shared_ATTs, Shared_ADJs, A_slot_np,
-                DG_np, b_np, alpha_np
+                DG_np, b_np, alpha_np,gw_np
             )
 
     def plot_Q_heatmap(self, Q_np, var_names, save_path):
@@ -518,6 +521,36 @@ class MVisualizer:
         plt.savefig(save_path, dpi=250, bbox_inches="tight")
         plt.close(fig)
 
+    def visualize_gw_val(self, gw_np, save_path=None, title="GW Values"):
+        """
+        gw_np: numpy array [B, H] - entropic GW values
+        save_path: optional path to save the figure
+        """
+        B, H = gw_np.shape
+        plt.figure(figsize=(12, 5))
+
+        # (1) Histogram of all values
+        plt.subplot(1, 2, 1)
+        plt.hist(gw_np.flatten(), bins=30, color="skyblue", edgecolor="black")
+        plt.xlabel("GW value")
+        plt.ylabel("Frequency")
+        plt.title(f"{title} - Histogram")
+
+        # (2) Heatmap across batches and heads
+        plt.subplot(1, 2, 2)
+        plt.imshow(gw_np, aspect="auto", cmap="viridis")
+        plt.colorbar(label="GW value")
+        plt.xlabel("Head index (H)")
+        plt.ylabel("Batch index (B)")
+        plt.title(f"{title} - Heatmap")
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300)
+            print(f"Saved GW visualization to {save_path}")
+        else:
+            plt.show()
 
     def _grid_plot_permatrix(self, mats, names, title, save_path, cmap='viridis'):
         L, H = self.num_layers, self.num_heads 
@@ -665,7 +698,22 @@ class MVisualizer:
         ensure_dir(Path(save_path).parent)
         plt.savefig(save_path, dpi=250, bbox_inches='tight')
         plt.close(fig)
-    
+
+    def plot_gw_values(self, gw_np, save_path=None):
+        import matplotlib.pyplot as plt
+
+        # Head별 분포를 boxplot으로
+        plt.figure(figsize=(8,4))
+        plt.boxplot([gw_np[:, h] for h in range(gw_np.shape[1])])
+        plt.xlabel("Head")
+        plt.ylabel("GW value")
+        plt.title("GW value distribution per head")
+
+        if save_path:
+            plt.savefig(save_path, bbox_inches="tight")
+            plt.close()
+        else:
+            plt.show()
     def visualize_dataset(self, dataset_name: str, role: str, out_root: Path, max_samples=2):
         loader = self._make_loader(dataset_name)
         base = out_root / role / dataset_name
@@ -674,7 +722,7 @@ class MVisualizer:
 
         for batch in loader:
             # Ms: 레이어×헤드 Var-Var P, ATTs: 레이어별 전체 P, ADJs: 레이어별 구조 마스크
-            Ms, ATTs, ADJs, var_names, slotQ_np, Qhat_np, G_np, S_np, Shared_ATTs, Shared_ADJs, A_slot_np, DG_np, b_np, alpha_np = self._forward_collect(batch)
+            Ms, ATTs, ADJs, var_names, slotQ_np, Qhat_np, G_np, S_np, Shared_ATTs, Shared_ADJs, A_slot_np, DG_np, b_np, alpha_np, gw_np = self._forward_collect(batch)
 
             sample_dir = base / f"sample_{count}"
             ensure_dir(sample_dir)
@@ -701,51 +749,6 @@ class MVisualizer:
                 f"{role.capitalize()} • {dataset_name} • Sample {count} • Attention × Adjacency",
                 sample_dir / "AttnXAdj_grid.png"
             )
-
-            # # (옵션) 구조 마스크 자체 확인 — 레이어×헤드로 복제해 LH 개수 맞춤
-            # grid_adj = []
-            # for l in range(self.num_layers):
-            #     for h in range(self.num_heads):
-            #         grid_adj.append(ADJs[l])  # [T,T]를 H번 복제
-            # self._grid_plot(
-            #     grid_adj, names_all,
-            #     f"{role.capitalize()} • {dataset_name} • Sample {count} • Structural Adjacency (binary)",
-            #     sample_dir / "Adjacency_binary_grid.png"
-            # )
-
-            # # (3) 중심화 비교
-            # S = len(var_names)
-            # uniform_S = 1.0 / max(S, 1)
-
-            # # 마지막 레이어 P 중심화
-            # alpha_last = ATTs[-1][:, 1:, 1:]   # [H,S,S] (numpy)
-            # grid_alpha = [alpha_last[h] for h in range(self.num_heads)]
-            # grid_alpha = grid_alpha * self.num_layers  # L×H 그리드 채우기
-            # self._grid_plot_centered(
-            #     grid_alpha, var_names,
-            #     f"{role.capitalize()} • {dataset_name} • Sample {count} • α (last layer, center=1/S)",
-            #     sample_dir / "Alpha_center_uniform_last.png",
-            #     center=uniform_S, cmap='RdBu_r'
-            # )
-
-            # # Q 중심화 — L×H 복제
-            # grid_q = [slotQ_np[h] for h in range(self.num_heads)] * self.num_layers
-            # self._grid_plot_centered(
-            #     grid_q, var_names,
-            #     f"{role.capitalize()} • {dataset_name} • Sample {count} • Slot Target Q (center=1/S)",
-            #     sample_dir / "SlotTarget_center_uniform.png",
-            #     center=uniform_S, cmap='RdBu_r'
-            # )
-
-            # # Δ = α − Q — 마지막 레이어 기준 (L×H 복제)
-            # grid_delta = [(alpha_last[h] - slotQ_np[h]) for h in range(self.num_heads)] * self.num_layers
-            # self._grid_plot_centered(
-            #     grid_delta, var_names,
-            #     f"{role.capitalize()} • {dataset_name} • Sample {count} • Δ(α − Q) (last layer)",
-            #     sample_dir / "Delta_alpha_minus_Q_last.png",
-            #     center=0.0, cmap='RdBu_r'
-            # )
-            # (NEW) A_slot before softmax
             grid_A = [A_slot_np[m] for m in range(A_slot_np.shape[0])]
             self._grid_plot_slotwise(
                 grid_A, var_names,
@@ -786,6 +789,7 @@ class MVisualizer:
             self.plot_DG_slotwise(DG_np, sample_dir / "SlotSpace_DG.png")
             self.plot_b_bars(b_np, sample_dir / "SlotMarginal_b.png")
             self.plot_U_per_slot(sample_dir / "Uparam_distribution.png")
+            #self.visualize_gw_val(gw_np, sample_dir / "GW.png")
             # SharedGAT Attention 시각화
             names_all = ["CLS"] + var_names
             grid_shared = []

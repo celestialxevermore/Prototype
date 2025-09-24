@@ -134,6 +134,7 @@ def get_args():
     parser.add_argument("--slot_dim", type=int, default=8, help="Global slot space latent dimension K")
     parser.add_argument('--gw_eps', type=float, default = 0.05)
     parser.add_argument("--gw_sigma", type = float, default = 0.3)
+    parser.add_argument("--alpha_scale", type = float, default = 1.0)
     parser.add_argument("--gw_outer_iters", type=int, default=10)
     parser.add_argument("--gw_sinkhorn_iters", type=int, default=30)
     parser.add_argument("--gw_sinkhorn_eps", type=float, default=1e-6)
