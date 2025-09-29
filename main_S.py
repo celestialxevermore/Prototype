@@ -131,7 +131,7 @@ def get_args():
     parser.add_argument('--slot_kernel_rank', type=int, default=8)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
     parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
-    parser.add_argument("--slot_dim", type=int, default=8, help="Global slot space latent dimension K")
+    parser.add_argument("--slot_dim", type=int, default=16, help="Global slot space latent dimension K")
     parser.add_argument('--gw_eps', type=float, default = 0.05)
     parser.add_argument("--gw_sigma", type = float, default = 0.3)
     parser.add_argument("--alpha_scale", type = float, default = 1.0)

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.nn.init as nn_init
 from entmax import entmax_bisect as entmax
 import math
+import pdb
 
 
 class BasisSlotAffinityGAT(nn.Module):
@@ -127,7 +128,7 @@ class BasisSlotAffinityGAT(nn.Module):
         cosG = (Gt / denom).clamp(-1.0, 1.0)
         M = (1.0 - cosG).clamp_min(0.0)
         M = M - torch.diag_embed(torch.diagonal(M, dim1=-2, dim2=-1))
-        #import pdb ; pdb.set_trace()
+        #import pdb ; #pdb.set_trace()
         return M if G.dim() == 4 else M.squeeze(0)
 
     @staticmethod
@@ -154,85 +155,169 @@ class BasisSlotAffinityGAT(nn.Module):
 
         return DG
 
-    @staticmethod 
-    def alpha_from_gw(gw_val:torch.Tensor, sigma:float) -> torch.Tensor:
-        """
-            gw_val : [B,H,M] 
-            return alpha : [B,H,1,1] in (0,1] 
-        """
+    # @staticmethod 
+    # def alpha_from_gw(gw_val:torch.Tensor, sigma:float) -> torch.Tensor:
+
+    #     """
+    #         gw_val : [B,H,M] 
+    #         return alpha : [B,H,1,1] in (0,1] 
+    #     """
+    #     sigma = max(float(sigma), 1e-6)
+    #     scores = torch.exp(- (gw_val / sigma) ** 2)
+    #     alpha = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-8)  # softmax-like
+    #     #pdb.set_trace()
+    #     return alpha
+    @staticmethod
+    def alpha_from_gw(gw_val: torch.Tensor, sigma: float) -> torch.Tensor:
         sigma = max(float(sigma), 1e-6)
-        scores = torch.exp(- (gw_val / sigma) ** 2)
-        alpha = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-8)  # softmax-like
+        # 행별 표준화가 더 안정적
+        mean = gw_val.mean(dim=-1, keepdim=True)
+        std  = gw_val.std(dim=-1, keepdim=True).clamp_min(1e-6)
+        z    = (gw_val - mean) / std
+        return torch.softmax(-z / sigma, dim=-1)  # sigma=temperature
+    # @staticmethod 
+    # def sharpen_Q(Q: torch.Tensor, alpha: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    #     """
+    #     Sharpen slot prior Q using alpha weights over M global affinities.
 
-        return alpha
+    #     Args:
+    #         Q: [B,H,N,N] prior affinity (row-stochastic expected)
+    #         alpha: [B,H,M] weights per head for M global affinities
+    #         eps: numerical stability
 
-    @staticmethod 
-    def sharpen_Q(Q: torch.Tensor, alpha: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    #     Returns:
+    #         Q_hat: [B,H,N,N] sharpened adjacency
+    #     """
+    #     # (1) 차원 확장
+    #     Q_exp = Q.unsqueeze(2)  # [B,H,1,N,N]
+    #     alpha_exp = alpha.unsqueeze(-1).unsqueeze(-1)  # [B,H,M,1,1]
+
+    #     # (2) slot별 sharpen 결과
+    #     Q_slotwise = (Q_exp.clamp_min(eps)) ** alpha_exp  # [B,H,M,N,N]
+
+    #     # (3) alpha로 가중합 (M 차원을 reduce)
+    #     Q_hat = (alpha_exp * Q_slotwise).sum(dim=2)  # [B,H,N,N]
+
+    #     # (4) row normalization (확률 분포 보장)
+    #     Q_hat = Q_hat / Q_hat.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+    #     return Q_hat
+    
+    
+    # @staticmethod
+    # def _sinkhorn_ot(a, b, C, eps = 0.05, iters= 30, tol=1e-6):
+    #     """
+    #         a: [B,H,N], b:[B,H,K], C:[B,H,N,K]
+    #         return \Pi : [B,H,N,K]
+    #     """
+    #     pdb.set_trace()
+    #     B, HM, N, K = C.shape 
+    #     Kmat = torch.exp(-C/max(eps, 1e-6)).clamp_min(1e-12)
+    #     u = torch.ones(B,HM,N,device=C.device) / N
+    #     v = torch.ones(B,HM,K,device=C.device) / K
+    #     for _ in range(iters):
+    #         Kv = torch.einsum("bhnk,bhk->bhn",Kmat,v) + tol 
+    #         u = a / Kv 
+    #         KTu = torch.einsum("bhnk,bhn->bhk",Kmat,u) + tol 
+    #         v = b / KTu 
+    #     Pi = (u.unsqueeze(-1) * Kmat) * v.unsqueeze(-2)
+    #     return Pi 
+    # @staticmethod
+    # def _gw_cost_matrix(Dx:torch.Tensor,Dy:torch.Tensor,Pi:torch.Tensor) -> torch.Tensor:
+    #     Dx2,Dy2 = Dx ** 2 , Dy ** 2
+    #     mass_j = Pi.sum(dim=-1)
+    #     term1 = torch.einsum("bhij,bhj->bhi",Dx2,mass_j).unsqueeze(-1) # [B,H,N,1]
+
+    #     mass_l = Pi.sum(dim=-2)
+    #     term2 = torch.einsum("bhkl,bhl->bhk",Dy2,mass_l).unsqueeze(-2) # [B,H,1,K]
+
+    #     cross = torch.einsum("bhij,bhjl,bhkl->bhik", Dx, Pi, Dy) # [B,H,N,K]
+    #     C = term1 + term2 -2.0 * cross 
+    #     return C.clamp_min(0.0)
+    @staticmethod
+    def sharpen_Q(Q_slot: torch.Tensor, alpha: torch.Tensor, eps=1e-8):
         """
-        Sharpen slot prior Q using alpha weights over M global affinities.
-
-        Args:
-            Q: [B,H,N,N] prior affinity (row-stochastic expected)
-            alpha: [B,H,M] weights per head for M global affinities
-            eps: numerical stability
-
-        Returns:
-            Q_hat: [B,H,N,N] sharpened adjacency
+        Q_slot : [B,M,N,N]   (SGS로 만든 slot affinity)
+        alpha  : [B,H,M]     (GW로 얻은 head-slot 가중치)
+        return : [B,H,N,N]   (head별로 재조합된 affinity)
         """
-        # (1) 차원 확장
-        Q_exp = Q.unsqueeze(2)  # [B,H,1,N,N]
-        alpha_exp = alpha.unsqueeze(-1).unsqueeze(-1)  # [B,H,M,1,1]
+        B, M, N, _ = Q_slot.shape
+        _, H, _ = alpha.shape
 
-        # (2) slot별 sharpen 결과
-        Q_slotwise = (Q_exp.clamp_min(eps)) ** alpha_exp  # [B,H,M,N,N]
+        # normalize alpha if needed
+        alpha = alpha / (alpha.sum(dim=-1, keepdim=True).clamp_min(eps))
 
-        # (3) alpha로 가중합 (M 차원을 reduce)
-        Q_hat = (alpha_exp * Q_slotwise).sum(dim=2)  # [B,H,N,N]
-
-        # (4) row normalization (확률 분포 보장)
-        Q_hat = Q_hat / Q_hat.sum(dim=-1, keepdim=True).clamp_min(eps)
+        # [B,H,M] × [B,M,N,N] → [B,H,N,N]
+        Q_hat = torch.einsum("bhm,bmij->bhij", alpha, Q_slot)
 
         return Q_hat
-    
-    
     @staticmethod
-    def _sinkhorn_ot(a, b, C, eps = 0.05, iters= 30, tol=1e-6):
+    def _sinkhorn_ot(a, b, C, eps=0.05, iters=30, tol=1e-6):
         """
-            a: [B,H,N], b:[B,H,K], C:[B,H,N,K]
-            return \Pi : [B,H,N,K]
+        a : [B,H,N]    (distribution over N features per head)
+        b : [B,M,K]    (distribution over K slots per global slot m)
+        C : [B,H,M,N,K] cost
+        return Pi: [B,H,M,N,K]
         """
-        B, HM, N, K = C.shape 
-        Kmat = torch.exp(-C/max(eps, 1e-6)).clamp_min(1e-12)
-        u = torch.ones(B,HM,N,device=C.device) / N
-        v = torch.ones(B,HM,K,device=C.device) / K
+        B, H, M, N, K = C.shape
+        
+        Kmat = torch.exp(-C / max(eps, 1e-6)).clamp_min(1e-12)  # [B,H,M,N,K]
+
+        # 초기화
+        u = torch.ones(B, H, M, N, device=C.device) / N
+        v = torch.ones(B, H, M, K, device=C.device) / K
+
         for _ in range(iters):
-            Kv = torch.einsum("bhnk,bhk->bhn",Kmat,v) + tol 
-            u = a / Kv 
-            KTu = torch.einsum("bhnk,bhn->bhk",Kmat,u) + tol 
-            v = b / KTu 
-        Pi = (u.unsqueeze(-1) * Kmat) * v.unsqueeze(-2)
-        return Pi 
+            # [B,H,M,N]
+            Kv = torch.einsum("bhmnk,bhmk->bhmn", Kmat, v) + tol
+            u = a.unsqueeze(2) / Kv  # broadcast a: [B,H,1,N] -> [B,H,M,N]
+
+            # [B,H,M,K]
+            KTu = torch.einsum("bhmnk,bhmn->bhmk", Kmat, u) + tol
+            v = b.unsqueeze(1) / KTu  # broadcast b: [B,1,M,K] -> [B,H,M,K]
+
+        Pi = (u.unsqueeze(-1) * Kmat) * v.unsqueeze(-2)  # [B,H,M,N,K]
+
+        return Pi
+
     @staticmethod
-    def _gw_cost_matrix(Dx:torch.Tensor,Dy:torch.Tensor,Pi:torch.Tensor) -> torch.Tensor:
-        Dx2,Dy2 = Dx ** 2 , Dy ** 2
+    def _gw_cost_matrix(Dx: torch.Tensor, Dy: torch.Tensor, Pi: torch.Tensor) -> torch.Tensor:
+        """
+        Dx : [B,H,N,N]
+        Dy : [B,M,K,K]
+        Pi : [B,H,M,N,K]
+        return: [B,H,M,N,K] cost tensor
+        """
+        Dx2, Dy2 = Dx ** 2, Dy ** 2
+
+        # (1) sum over K dimension → mass_j: [B,H,M,N]
         mass_j = Pi.sum(dim=-1)
-        term1 = torch.einsum("bhij,bhj->bhi",Dx2,mass_j).unsqueeze(-1) # [B,H,N,1]
+        term1 = torch.einsum("bhnj,bhmj->bhmn", Dx2, mass_j).unsqueeze(-1)  # [B,H,M,N,1]
 
+        # (2) sum over N dimension → mass_l: [B,H,M,K]
         mass_l = Pi.sum(dim=-2)
-        term2 = torch.einsum("bhkl,bhl->bhk",Dy2,mass_l).unsqueeze(-2) # [B,H,1,K]
+        #term2 = torch.einsum("bmkl,bhmk->bhmk", Dy2, mass_l).unsqueeze(-2)  # [B,H,M,1,K]
+        term2 = torch.einsum("bmkl,bhml->bhmk",Dy2,mass_l).unsqueeze(-2)
+        # (3) cross term
+        cross  = torch.einsum("bhij,bmkl,bhmjl->bhmik", Dx, Dy, Pi)
+        #cross = torch.einsum("bhij,bhkl,bhmjl->bhmik", Dx, Pi, Dy)  # [B,H,M,N,K]
+        #cross = torch.einsum("bhij,bhmnk,bmkl->bhmnk", Dx, Pi, Dy)  # [B,H,M,N,K]
+        #pdb.set_trace()
+        C = term1 + term2 - 2.0 * cross
 
-        cross = torch.einsum("bhij,bhjl,bhkl->bhik", Dx, Pi, Dy) # [B,H,N,K]
-        C = term1 + term2 -2.0 * cross 
         return C.clamp_min(0.0)
+
+
 
     @staticmethod
     def _entropic_gw(DP: torch.tensor, DG:torch.tensor, a:torch.tensor,b:torch.tensor,eps: float = 0.05, outer_iters: int = 10, sinkhorn_iters: int = 30, tol: float = 1e-6):
-        Pi = torch.einsum("bhn,bhk->bhnk",a,b)
+        #Pi = torch.einsum("bhn,bhk->bhnk",a,b)
+        Pi = torch.einsum("bhn,bmk->bhmnk", a, b)
         for _ in range(outer_iters):
             C = BasisSlotAffinityGAT._gw_cost_matrix(DP, DG, Pi)
             Pi = BasisSlotAffinityGAT._sinkhorn_ot(a,b,C,eps=eps,iters=sinkhorn_iters,tol=tol)
 
-        gw_val = (C * Pi).sum(dim=-2)
+        gw_val = (C * Pi).sum(dim=[-2,-1])
 
         return Pi, gw_val
     
@@ -297,6 +382,7 @@ class BasisSlotAffinityGAT(nn.Module):
                 L = D - G
 
         g_reg = torch.stack(g_reg_terms).sum() if g_reg_terms else torch.tensor(0.0, device=S.device)
+        #pdb.set_trace()
         return G, g_reg, L, U
 
     # ---------------- Laplacian smoothness ----------------
@@ -363,15 +449,18 @@ class BasisSlotAffinityGAT(nn.Module):
         # (2) Slot assignment S: [B,N,M]
         S_logits = self.slot_proj(z)
         S = F.softmax(S_logits, dim=-1)
+        #pdb.set_trace()
         # (3) Global slot graph G & Q(x)
         G, g_reg, L, U = self._make_G_and_regs(S)      # G:[H,K,K]
         
-        A_slot = torch.einsum("bnk,mkl,bjl->bmnj", S, G, S)  # [B,H,N,N]
+        #A_slot = torch.einsum("bnk,mkl,bjl->bmnj", S, G, S)  # [B,H,N,N]
+        A_slot = torch.einsum("bnm,mkl,bjm->bmnj", S, G, S)
+        #pdb.set_trace()
         if self.no_self_loop:
             eye = torch.eye(N, device=device, dtype=torch.bool).view(1, 1, N, N)
             A_slot = A_slot.masked_fill(eye, float("-inf"))
         Q = self._row_softmax(A_slot, temperature=self.tau_slot)        # [B,H,N,N]
-
+        #pdb.set_trace()
         # (4) Slot-related regularizers
         reg_terms = []
         if self.slot_orth_lambda > 0.0:
@@ -382,7 +471,7 @@ class BasisSlotAffinityGAT(nn.Module):
         if self.slot_usage_lambda > 0.0:
             u = S.mean(dim=1)                               # [B,K], 평균 슬롯 사용률
             u = u / (u.sum(dim=-1, keepdim=True) + eps)     # 정규화
-            uniform = torch.full_like(u, 1.0 / self.K)      # 균등 분포
+            uniform = torch.full_like(u, 1.0 / self.M)      # 균등 분포
             usage_kl = (u.clamp_min(eps) * (u.clamp_min(eps).log() - uniform.log())).sum(dim=-1).mean()
             reg_terms.append(self.slot_usage_lambda * usage_kl)
             

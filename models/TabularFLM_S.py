@@ -549,14 +549,19 @@ class BasisGATLayer(nn.Module):
             P_var = P0[:, :, 1:, 1:] # [B, H, S, S]
             P_norm = BasisSlotAffinityGAT.normalize_affinity(P_var, sym=True)
             DP = BasisSlotAffinityGAT.affinity_to_distance(P_norm)
+
             eps = 1e-8 
             deg_P = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
             a = deg_P / deg_P.sum(dim=-1, keepdim=True).clamp_min(eps)
 
-            # Gw solve 
-            with torch.no_grad():
-                _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
-                alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
+            # # Gw solve 
+            # with torch.no_grad():
+            #     _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
+            #     alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
+            _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
+            alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
+        
+            
             Q_var = prior_Q
             Q_hat = BasisSlotAffinityGAT.sharpen_Q(Q_var, alpha)
             bias_full = torch.zeros_like(logits_base)
@@ -675,8 +680,8 @@ class Model(nn.Module):
         for ln in self.basis_layer_norms:
             for p in ln.parameters():
                 p.requires_grad = True
-        for p in self.thead.parameters():
-            p.requires_grad = True
+        # for p in self.thead.parameters():
+        #     p.requires_grad = True
 
     @torch.no_grad()
     def get_coordinates(self, batch):

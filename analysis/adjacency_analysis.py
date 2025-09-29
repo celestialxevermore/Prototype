@@ -14,7 +14,7 @@ from utils.affinity import BasisSlotAffinityGAT
 from models.TabularFLM_S import Model
 from dataset.data_dataloaders import prepare_embedding_dataloaders
 from utils.util import fix_seed
-
+import pdb
 
 def extract_deleted_features_from_checkpoint(p):
     import re
@@ -102,34 +102,35 @@ class MVisualizer:
             nv   = torch.cat(nv_list , dim=1)    # [B,S,D]
             B, S, D = nv.shape
 
-            # ---- slot prior from affinity module (already batched correctly) ----
+            # ---- slot prior ----
             bias_log, Q_slot, slot_loss, DG, b = self.model.basis_affinity(desc, nv)   # Q_slot: [B,M,S,S]
             slotQ_np = Q_slot[0].detach().cpu().numpy()
             DG_np    = DG[0].detach().cpu().numpy()
             b_np     = b[0].detach().cpu().numpy()
 
-            # ---- Slot assignment S (for per-variable slot distribution viz) ----
+            # ---- slot assignment ----
             z = self.model.basis_affinity.fusion_mlp(torch.cat([desc, nv], dim=-1))
             S_logits = self.model.basis_affinity.slot_proj(z)
             S_probs  = torch.softmax(S_logits, dim=-1)           # [B,S,M]
             S_np     = S_probs[0].detach().cpu().numpy()
 
-            # ---- Global slot graph (for reference) ----
+            # ---- Global slot graph ----
             if hasattr(self.model.basis_affinity, "export_G_numpy"):
                 G_np = self.model.basis_affinity.export_G_numpy()
             else:
                 G_tensor, _, _ = self.model.basis_affinity._make_G_and_regs(S_probs)
                 G_np = G_tensor.detach().cpu().numpy()
 
-            # ---- A_slot "pre-softmax proxy": use log-prob (row-wise constant offset ignored) ----
-            # True A_slot 계산
-            A_slot_tensor = torch.einsum("bnk,bmkl,bjl->bmnj", 
-                             torch.from_numpy(S_np).unsqueeze(0), 
-                             torch.from_numpy(G_np).unsqueeze(0), 
-                             torch.from_numpy(S_np).unsqueeze(0))
-            A_slot_np = A_slot_tensor[0].detach().cpu().numpy()
+            # ---- A_slot ----
+            A_slot = torch.einsum(
+                "bnm,mkl,bjm->bmnj",
+                S_probs,
+                torch.tensor(G_np, device=self.device),
+                S_probs
+            )
+            A_slot_np = A_slot[0].detach().cpu().numpy()
 
-            # ---- Build P0 and Q_hat (sharpened) for comparison ----
+            # ---- Build P0, DP ----
             cls     = self.model.cls.expand(B, 1, D)
             x_basis = torch.cat([cls, nv], dim=1)                 # [B,S+1,D]
             new_adj = torch.zeros(B, S+1, S+1, device=nv.device)
@@ -149,25 +150,47 @@ class MVisualizer:
             a_deg = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
             a     = a_deg / a_deg.sum(dim=-1, keepdim=True).clamp_min(eps)
 
-            _, gw_val = BasisSlotAffinityGAT._entropic_gw(
+            # ---- GW 계산 ----
+            Pi, gw_val = BasisSlotAffinityGAT._entropic_gw(
                 DP, DG, a, b,
                 eps=float(getattr(self.args, "gw_eps", 0.05)),
                 outer_iters=int(getattr(self.args, "gw_outer_iters", 10)),
                 sinkhorn_iters=int(getattr(self.args, "gw_sinkhorn_iters", 30)),
                 tol=float(getattr(self.args, "gw_sinkhorn_eps", 1e-6)),
             )
-            #alpha   = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=float(getattr(self.args, "gw_sigma", 1.0)))
-            alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=0.05)
-            Q_hat   = BasisSlotAffinityGAT.sharpen_Q(Q_slot, alpha)              # [B,M,S,S]
-            alpha_np = alpha.detach().cpu().numpy()
 
-            Qhat_np = Q_hat[0].detach().cpu().numpy()
-            gw_np = gw_val.detach().cpu().numpy()
-            #import pdb ; pdb.set_trace()
-            # ---- Basis / Shared attention (keep original 2-level accumulation) ----
+            print("P_var range:", P_var.min().item(), P_var.max().item())
+            print("DP range   :", DP.min().item(), DP.max().item())
+
+            print("DP head diff mean:",
+                (DP[:,0] - DP[:,1]).abs().mean().item())  # 헤드 0 vs 1 평균차
+            print("DP sample fingerprint:",
+                DP.flatten()[::1000].mean().item())        # 샘플간 바뀌는지 간단 지문
+
+            # 2) 마진 a (X-side)
+            print("a per-head std:", a.std(dim=-1).mean().item())
+
+            # 3) DG, b (Y-side) — 이건 전역 고정이 정상
+            print("DG range:", DG.min().item(), DG.max().item())
+            print("b range :", b.min().item(),  b.max().item())
+
+
+
+            a = input()
+            alpha    = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=0.3)    # [B,H,M]
+            alpha_np = alpha[0].detach().cpu().numpy()
+            Q_hat    = BasisSlotAffinityGAT.sharpen_Q(Q_slot, alpha)            # [B,H,S,S]
+            Qhat_np  = Q_hat[0].detach().cpu().numpy()
+            gw_np    = gw_val[0].detach().cpu().numpy()
+
+            # 전체 배치 결과 보존 (시각화 저장용)
+            alpha_all_np = alpha.detach().cpu().numpy()
+            gw_all_np    = gw_val.detach().cpu().numpy()
+
+            # ---- Basis / Shared attention (기존 코드 유지) ----
             Ms, ATTs, ADJs = [], [], []
             x_basis = torch.cat([cls, nv], dim=1)
-            mask_M  = bias_log.exp().clamp(1e-6, 1.0 - 1e-6)                     # [B,M,S,S]
+            mask_M  = bias_log.exp().clamp(1e-6, 1.0 - 1.0e-6)   # [B,M,S,S]
 
             for l in range(self.num_layers):
                 norm_x = self.model.basis_layer_norms[l](x_basis)
@@ -181,8 +204,8 @@ class MVisualizer:
                 for h in range(self.num_heads):
                     Ms.append(varvar[h])
 
-                ATTs.append(att[0].cpu().numpy())                    # [H,T,T]
-                ADJs.append(new_adj_l[0].cpu().numpy())              # [T,T]
+                ATTs.append(att[0].cpu().numpy())
+                ADJs.append(new_adj_l[0].cpu().numpy())
 
             Shared_ATTs, Shared_ADJs = [], []
             x_shared = torch.cat([cls, nv], dim=1)
@@ -199,7 +222,8 @@ class MVisualizer:
                 Ms, ATTs, ADJs, feat_names,
                 slotQ_np, Qhat_np, G_np, S_np,
                 Shared_ATTs, Shared_ADJs, A_slot_np,
-                DG_np, b_np, alpha_np,gw_np
+                DG_np, b_np, alpha_np, gw_np,
+                alpha_all_np, gw_all_np
             )
 
     def plot_Q_heatmap(self, Q_np, var_names, save_path):
@@ -523,29 +547,33 @@ class MVisualizer:
 
     def visualize_gw_val(self, gw_np, save_path=None, title="GW Values"):
         """
-        gw_np: numpy array [B, H] - entropic GW values
-        save_path: optional path to save the figure
+        gw_np: numpy array [B,H,M] 또는 [H,M]
         """
-        B, H = gw_np.shape
-        plt.figure(figsize=(12, 5))
+        if gw_np.ndim == 2:   # [H, M]
+            H, M = gw_np.shape
+            B = 1
+            gw_np = gw_np[np.newaxis, :, :]   # [1,H,M]
+        elif gw_np.ndim == 3: # [B,H,M]
+            B, H, M = gw_np.shape
+        else:
+            raise ValueError(f"Invalid gw_np shape {gw_np.shape}, expected [H,M] or [B,H,M]")
 
-        # (1) Histogram of all values
+        plt.figure(figsize=(12, 5))
+        # (1) Histogram
         plt.subplot(1, 2, 1)
         plt.hist(gw_np.flatten(), bins=30, color="skyblue", edgecolor="black")
-        plt.xlabel("GW value")
-        plt.ylabel("Frequency")
+        plt.xlabel("GW value"); plt.ylabel("Frequency")
         plt.title(f"{title} - Histogram")
 
-        # (2) Heatmap across batches and heads
+        # (2) Heatmap
         plt.subplot(1, 2, 2)
-        plt.imshow(gw_np, aspect="auto", cmap="viridis")
+        plt.imshow(gw_np.reshape(B*H, M), aspect="auto", cmap="viridis")
         plt.colorbar(label="GW value")
-        plt.xlabel("Head index (H)")
-        plt.ylabel("Batch index (B)")
+        plt.xlabel("Slot index (M)")
+        plt.ylabel("Batch×Head index")
         plt.title(f"{title} - Heatmap")
 
         plt.tight_layout()
-
         if save_path:
             plt.savefig(save_path, dpi=300)
             print(f"Saved GW visualization to {save_path}")
@@ -584,25 +612,44 @@ class MVisualizer:
         plt.savefig(save_path, dpi=250, bbox_inches='tight')
         plt.close(fig)
 
-    def visualize_alpha_heatmap(self, alpha_np: np.ndarray, save_path: Path, sample_idx: int = 0):
+    def visualize_alpha_all_heatmap(self, alpha_all_np: np.ndarray, save_path: Path, sample_idx:int=0):
         """
-        Alpha 분포를 heatmap으로 시각화
-        alpha_np: [B, H, M] numpy array
-        sample_idx: 시각화할 batch 내 샘플 index
+        alpha_all_np: [B,H,M] numpy
+        sample_idx  : 시각화할 배치 인덱스
         """
-        alpha_sample = alpha_np[sample_idx]   # [H, M]
-        H, M = alpha_sample.shape
-
+        H, M = alpha_all_np.shape[1], alpha_all_np.shape[2]
         plt.figure(figsize=(M * 0.6, H * 0.6))
-        im = plt.imshow(alpha_sample, cmap="viridis", aspect="auto")
-        plt.colorbar(im)
 
+        # 🔑 자동 min/max 스케일링
+        vmin, vmax = alpha_all_np[sample_idx].min(), alpha_all_np[sample_idx].max()
+        im = plt.imshow(alpha_all_np[sample_idx], cmap="viridis", aspect="auto",
+                        vmin=vmin, vmax=vmax)
+
+        plt.colorbar(im)
         plt.xticks(range(M), [f"m{j}" for j in range(M)], rotation=90, fontsize=6)
         plt.yticks(range(H), [f"H{h}" for h in range(H)], fontsize=6)
         plt.title(f"Alpha distribution (sample {sample_idx})", fontsize=12)
         plt.tight_layout()
         plt.savefig(save_path, dpi=250, bbox_inches="tight")
         plt.close()
+
+
+    def visualize_gw_all_heatmap(self, gw_all_np: np.ndarray, save_path: Path, sample_idx:int=0):
+        """
+        gw_all_np: [B,H,M] numpy
+        sample_idx  : 시각화할 배치 인덱스
+        """
+        H, M = gw_all_np.shape[1], gw_all_np.shape[2]
+        plt.figure(figsize=(M * 0.6, H * 0.6))
+        im = plt.imshow(gw_all_np[sample_idx], cmap="plasma", aspect="auto")
+        plt.colorbar(im)
+        plt.xticks(range(M), [f"m{j}" for j in range(M)], rotation=90, fontsize=6)
+        plt.yticks(range(H), [f"H{h}" for h in range(H)], fontsize=6)
+        plt.title(f"GW values (sample {sample_idx})", fontsize=12)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=250, bbox_inches="tight")
+        plt.close()
+    
     def plot_Q_raw_heatmap(self, Q_np, var_names, save_path):
         """
         Q_np: [H, N, N] numpy (raw slot prior, pre-softmax)
@@ -722,7 +769,14 @@ class MVisualizer:
 
         for batch in loader:
             # Ms: 레이어×헤드 Var-Var P, ATTs: 레이어별 전체 P, ADJs: 레이어별 구조 마스크
-            Ms, ATTs, ADJs, var_names, slotQ_np, Qhat_np, G_np, S_np, Shared_ATTs, Shared_ADJs, A_slot_np, DG_np, b_np, alpha_np, gw_np = self._forward_collect(batch)
+            """
+                                Ms, ATTs, ADJs, feat_names,
+                slotQ_np, Qhat_np, G_np, S_np,
+                Shared_ATTs, Shared_ADJs, A_slot_np,
+                DG_np, b_np, alpha_np, gw_np,
+                alpha_all_np, gw_all_np 
+            """
+            Ms, ATTs, ADJs, var_names, slotQ_np, Qhat_np, G_np, S_np, Shared_ATTs, Shared_ADJs, A_slot_np, DG_np, b_np, alpha_np, gw_np , alpha_all_np, gw_all_np = self._forward_collect(batch)
 
             sample_dir = base / f"sample_{count}"
             ensure_dir(sample_dir)
@@ -774,8 +828,8 @@ class MVisualizer:
                     sample_dir / "GlobalSlotGraph_center_uniform.png",
                     center=uniform_K, cmap='RdBu_r'
                 )
-            if alpha_np is not None:
-                self.visualize_alpha_heatmap(alpha_np, sample_dir / "Alpha_distribution.png",sample_idx=0)
+            # if alpha_np is not None:
+            #     self.visualize_alpha_heatmap(alpha_np, sample_dir / "Alpha_distribution.png")
             self.plot_S_heatmap(S_np, var_names, sample_dir / "SlotAssignment_S_tsne.png")
             # (NEW) Q raw & 비교 시각화
             self.plot_Q_raw_heatmap(slotQ_np, var_names, sample_dir / "SlotPrior_Q_raw.png")
@@ -789,8 +843,14 @@ class MVisualizer:
             self.plot_DG_slotwise(DG_np, sample_dir / "SlotSpace_DG.png")
             self.plot_b_bars(b_np, sample_dir / "SlotMarginal_b.png")
             self.plot_U_per_slot(sample_dir / "Uparam_distribution.png")
-            #self.visualize_gw_val(gw_np, sample_dir / "GW.png")
+            self.visualize_gw_val(gw_np, sample_dir / "GW.png")
             # SharedGAT Attention 시각화
+            self.visualize_alpha_all_heatmap(
+                alpha_all_np, sample_dir / f"Alpha_sample{count}.png", sample_idx=0
+            )
+            self.visualize_gw_all_heatmap(
+                gw_all_np, sample_dir / f"GW_sample{count}.png", sample_idx=0
+            )
             names_all = ["CLS"] + var_names
             grid_shared = []
             for l in range(len(Shared_ATTs)):
