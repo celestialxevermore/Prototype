@@ -15,6 +15,28 @@ import torch.nn.init as init
 from utils.affinity import BasisSlotAffinityGAT
 
 logger = logging.getLogger(__name__)
+def _chk(name: str, t: torch.Tensor):
+    with torch.no_grad():
+        shape = list(t.shape)
+        has_nan = torch.isnan(t).any().item()
+        has_inf = torch.isinf(t).any().item()
+        is_finite = torch.isfinite(t)
+
+        if not is_finite.any():
+            print(f"[NaN@]{name} shape={shape} | ALL non-finite (nan/inf)!")
+            return
+
+        t_f = t[is_finite]
+        t_min = t_f.min().item()
+        t_max = t_f.max().item()
+        t_mean = t_f.mean().item()
+        t_std = t_f.std().item()
+
+        print(
+            f"[NaN@]{name} shape={shape} "
+            f"min={t_min:.6g} max={t_max:.6g} mean={t_mean:.6g} std={t_std:.6g} "
+            f"| has_nan={has_nan} has_inf={has_inf}"
+        )
 
 class CoordinatorMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, k_basis: int, dropout: float = 0.1, temperature: float = 1.0):
@@ -518,14 +540,14 @@ class BasisGATLayer(nn.Module):
     def forward(self, 
         desc_embeddings:torch.Tensor, 
         name_value_embeddings:torch.Tensor,
-        prior_Q:torch.Tensor = None, # [B,H,S,S] Global node space affinity
+        prior_Q:torch.Tensor = None, # [B,M,S,S] Global node space affinity
         DG:torch.Tensor = None, # [B,H,K,K] distance on slot space 
         b:torch.Tensor = None):
         """ 
             desc_embeddings : [B,S,D] 
             name_value_embeddings : [B,T,D] 
-            prior_Q (optional) : [B,H,S,S] (Var-Var prior from slots) Global node space affinity
-            DG (optional) : [B,H,K,K] Global slot space affinity
+            prior_Q (optional) : [B,M,S,S] (Var-Var prior from slots) Global node space affinity
+            DG (optional) : [B,M,K,K] Global slot space affinity
             b (optional) : [B,H,K]
         """
         B, new_seq, _ = name_value_embeddings.shape
@@ -554,14 +576,97 @@ class BasisGATLayer(nn.Module):
             deg_P = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
             a = deg_P / deg_P.sum(dim=-1, keepdim=True).clamp_min(eps)
 
-            # # Gw solve 
-            # with torch.no_grad():
-            #     _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
-            #     alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
             _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
             alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
-        
-            
+
+            self._dbg_step = getattr(self, "_dbg_step", 0)
+            if self.training and self._dbg_step % 50 == 0:
+                a_det  = alpha.detach()          # [B,H,M]
+                gw_det = gw_val.detach()
+
+                # --- α 엔트로피 ---
+                # H: [B,H]  (헤드별 엔트로피), H_mean: 스칼라 요약
+                H = -(a_det.clamp_min(1e-8) * a_det.clamp_min(1e-8).log()).sum(dim=-1)   # [B,H]
+                H_mean = H.mean().item()
+                H0 = H[0]                              # 배치 0의 각 헤드 엔트로피 [H]
+                q = torch.quantile(H0, torch.tensor([0.1, 0.5, 0.9], device=H0.device))
+                print(
+                    f"[dbg {self._dbg_step}] α-H per-head @b0: "
+                    f"min={H0.min().item():.3f} q10/50/90=({q[0].item():.3f},{q[1].item():.3f},{q[2].item():.3f}) "
+                    f"max={H0.max().item():.3f}"
+                )
+
+                # --- α 가장 큰 슬롯 인덱스 및 히스토그램(배치0) ---
+                top_idx = a_det[0].argmax(dim=-1)          # [H]
+                M_slots = a_det.size(-1)                    # M
+                hist = torch.bincount(top_idx, minlength=M_slots).tolist()
+
+                print(
+                    f"[dbg {self._dbg_step}] gw μ={gw_det.mean().item():.3f} σ={gw_det.std().item():.3f} | "
+                    f"α-entropy(mean)={H_mean:.2f} | α(top m @b0)={top_idx.tolist()} | α hist @b0={hist}"
+                )
+
+                # --- DP 통계 ---
+                DP_det = DP.detach()
+                print(
+                    f"[dbg {self._dbg_step}] DP: rng=({DP_det.min().item():.4f},{DP_det.max().item():.4f}) "
+                    f"mean={DP_det.mean().item():.4f} std={DP_det.std().item():.4f}"
+                )
+
+                # --- DG 통계 (대각 제외) ---
+                DG_det = DG.detach()                        # [B,M,K,K] or [B,H?,K,K] — 네 코드 기준 [B,M,K,K]
+                K_ = DG_det.shape[-1]
+                eye = torch.eye(K_, device=DG_det.device, dtype=torch.bool).view(1, 1, K_, K_)
+                DG_off = DG_det.masked_fill(eye, 0.0)
+                print(
+                    f"[dbg {self._dbg_step}] DG: rng=({DG_off.min().item():.6f},{DG_off.max().item():.6f}) "
+                    f"mean={DG_off.mean().item():.6f} std={DG_off.std().item():.6f}"
+                )
+
+                DG_flat = DG_off.flatten(2)                 # [B,M,K*K]
+                DG_std_per_m = DG_flat.std(dim=-1).mean().item()
+                print(f"[dbg {self._dbg_step}] DG per-slot std≈{DG_std_per_m:.6f}")
+
+                scale_ratio = (DP_det.std() / (DG_off.std() + 1e-8)).item()
+                print(f"[dbg {self._dbg_step}] scale ratio DP/DG ≈ {scale_ratio:.1f}")
+
+                # --- U 통계 (가능할 때만) ---
+                try:
+                    aff = getattr(self, "basis_affinity", None)
+                    if aff is None and hasattr(self, "model"):
+                        aff = getattr(self.model, "basis_affinity", None)
+
+                    if aff is None:
+                        print(f"[dbg {self._dbg_step}] U-stats skipped: basis_affinity not found on self/model")
+                    elif not hasattr(aff, "_current_U"):
+                        print(f"[dbg {self._dbg_step}] U-stats skipped: basis_affinity has no _current_U()")
+                    else:
+                        U = aff._current_U().detach()               # [H,K,R]
+                        Unorm = torch.norm(U, dim=-1)               # [H,K]
+                        print(
+                            f"[dbg {self._dbg_step}] U‖·‖: mean={Unorm.mean().item():.4f} "
+                            f"std={Unorm.std().item():.4f} min={Unorm.min().item():.4f} max={Unorm.max().item():.4f}"
+                        )
+
+                        Udir = F.normalize(U, p=2, dim=-1)
+                        cos_sim = torch.einsum("hkr,hjr->hkj", Udir, Udir)      # [H,K,K]
+                        cos_off = cos_sim - torch.diag_embed(torch.diagonal(cos_sim, dim1=-2, dim2=-1))
+                        print(
+                            f"[dbg {self._dbg_step}] U cos(offdiag): mean={cos_off.mean().item():.4f} "
+                            f"std={cos_off.std().item():.4f} max={cos_off.max().item():.4f}"
+                        )
+
+                        DG_from_U = (1.0 - cos_sim).clamp_min(0.0)
+                        DG_from_U = DG_from_U - torch.diag_embed(torch.diagonal(DG_from_U, dim1=-2, dim2=-1))
+                        print(
+                            f"[dbg {self._dbg_step}] 1-cos(U) offdiag: mean={DG_from_U.mean().item():.6f} "
+                            f"std={DG_from_U.std().item():.6f}"
+                        )
+                except Exception as e:
+                    print(f"[dbg {self._dbg_step}] U-stats skipped ({type(e).__name__}: {e})")
+
+            self._dbg_step += 1
+
             Q_var = prior_Q
             Q_hat = BasisSlotAffinityGAT.sharpen_Q(Q_var, alpha)
             bias_full = torch.zeros_like(logits_base)
@@ -680,8 +785,8 @@ class Model(nn.Module):
         for ln in self.basis_layer_norms:
             for p in ln.parameters():
                 p.requires_grad = True
-        # for p in self.thead.parameters():
-        #     p.requires_grad = True
+        for p in self.thead.parameters():
+            p.requires_grad = True
 
     @torch.no_grad()
     def get_coordinates(self, batch):

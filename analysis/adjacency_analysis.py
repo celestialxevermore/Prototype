@@ -176,7 +176,7 @@ class MVisualizer:
 
 
 
-            a = input()
+            #a = input()
             alpha    = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=0.3)    # [B,H,M]
             alpha_np = alpha[0].detach().cpu().numpy()
             Q_hat    = BasisSlotAffinityGAT.sharpen_Q(Q_slot, alpha)            # [B,H,S,S]

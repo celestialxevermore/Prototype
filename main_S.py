@@ -34,7 +34,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="4"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -104,7 +104,7 @@ def get_args():
     parser.add_argument('--anchor_kl_lambda', type=float, default=0.05, help = 'Weight of KL(anchor) regularizer during Few-shot.')
     parser.add_argument('--slot_align_kl_lambda', type = float, default = 0.1)
     parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
-    parser.add_argument('--slot_usage_lambda',type=float , default = 0.01)
+    parser.add_argument('--slot_usage_lambda',type=float , default = 0.05)
     parser.add_argument('--affinity_l2norm', type=bool, default=True)
     parser.add_argument('--slot_g_mode', type=str, default='gw', choices=['markov','kernel','gw'])
 
@@ -125,15 +125,15 @@ def get_args():
     parser.add_argument('--slot_g_temp', type=float, default=1.0)
     parser.add_argument('--slot_g_sparse_l1', type=float, default=0.0)
     parser.add_argument('--slot_g_ent_lambda', type=float, default=0.0)
-    parser.add_argument('--g_frob_div_lambda', type=float, default=0.02)   # ✅ 추천: 0.01~0.02
+    parser.add_argument('--g_frob_div_lambda', type=float, default=0.3)   # ✅ 추천: 0.01~0.02
 
     # kernel 전용
     parser.add_argument('--slot_kernel_rank', type=int, default=8)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
     parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--slot_dim", type=int, default=16, help="Global slot space latent dimension K")
-    parser.add_argument('--gw_eps', type=float, default = 0.05)
-    parser.add_argument("--gw_sigma", type = float, default = 0.3)
+    parser.add_argument('--gw_eps', type=float, default = 0.2)
+    parser.add_argument("--gw_sigma", type = float, default = 0.6)
     parser.add_argument("--alpha_scale", type = float, default = 1.0)
     parser.add_argument("--gw_outer_iters", type=int, default=10)
     parser.add_argument("--gw_sinkhorn_iters", type=int, default=30)
