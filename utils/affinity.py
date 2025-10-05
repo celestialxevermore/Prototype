@@ -28,10 +28,8 @@ class BasisSlotAffinityGAT(nn.Module):
         self.no_self_loop        = args.no_self_loop
         self.tau_aff             = args.slot_aff_temp          # (currently unused) sample affinity temperature
         self.tau_slot            = args.slot_graph_temp        # slot graph temperature
-        self.align_kl_lambda     = args.slot_align_kl_lambda   # (currently unused)
         self.slot_orth_lambda    = args.slot_orth_lambda
         self.scale               = 1.0 / math.sqrt(self.D)
-        self.use_l2norm          = args.affinity_l2norm
         self.slot_usage_lambda   = args.slot_usage_lambda
         # G constraints
         self.g_mode              = args.slot_g_mode            # "markov" | "kernel"
@@ -141,8 +139,38 @@ class BasisSlotAffinityGAT(nn.Module):
         # remove self-distance (diagonal = 0)
         DG = DG - torch.diag_embed(torch.diagonal(DG, dim1=-2, dim2=-1))
         DG = DG.clamp(0.0, 1.0)
-        # cosine distance
+        #cosine distance
         return DG
+    # @staticmethod
+    # def cosine_slot_cost_from_U(U: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    #     """
+    #     RBF 기반 슬롯 거리 DG 생성.
+    #     U: [H, K, R]
+    #     return DG: [H, K, K]  with zero diagonal (no hard clamp to 0/1)
+    #     """
+    #     H, K, R = U.shape
+    #     # pairwise squared Euclidean per head
+    #     # d2[h,i,j] = ||U[h,i]-U[h,j]||^2
+    #     Ui2 = (U ** 2).sum(dim=-1, keepdim=True)                      # [H,K,1]
+    #     d2 = Ui2 + Ui2.transpose(-2, -1) - 2 * (U @ U.transpose(-2,-1))  # [H,K,K]
+    #     d2 = d2.clamp_min(0.0)
+
+    #     # per-head bandwidth: tau_h^2 = median(offdiag d2)  (median heuristic)
+    #     eye = torch.eye(K, device=U.device, dtype=torch.bool).unsqueeze(0)  # [1,K,K]
+    #     d2_off = d2.masked_select(~eye.expand(H, -1, -1)).view(H, K*(K-1))  # [H, K*(K-1)]
+    #     tau2 = d2_off.median(dim=1).values.clamp_min(eps)                   # [H]
+
+    #     # RBF kernel with per-head tau; clamp exponent to avoid underflow
+    #     # DG = 1 - K,  K = exp(-d2 / (2*tau^2))
+    #     scale = (2.0 * tau2).view(H, 1, 1)                                   # [H,1,1]
+    #     x = (d2 / scale).clamp(max=30.0)                                     # stabilize
+    #     K = torch.exp(-x)                                                     # [H,K,K]
+    #     DG = 1.0 - K
+
+    #     # zero diagonal (no hard [0,1] clamp to keep gradients smooth)
+    #     DG = DG - torch.diag_embed(torch.diagonal(DG, dim1=-2, dim2=-1))
+    #     return DG
+
     @staticmethod
     def alpha_from_gw(gw_val: torch.Tensor, sigma: float) -> torch.Tensor:
         sigma = max(float(sigma), 1e-6)

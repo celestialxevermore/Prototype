@@ -575,100 +575,151 @@ class BasisGATLayer(nn.Module):
             eps = 1e-8 
             deg_P = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
             a = deg_P / deg_P.sum(dim=-1, keepdim=True).clamp_min(eps)
-
-            _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
+            # #with torch.no_grad():
+            # _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
+            
+            with torch.no_grad():
+                _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
+            
             alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
-
+            Q_var = prior_Q
+            Q_hat = BasisSlotAffinityGAT.sharpen_Q(Q_var, alpha)
             self._dbg_step = getattr(self, "_dbg_step", 0)
             if self.training and self._dbg_step % 50 == 0:
-                a_det  = alpha.detach()          # [B,H,M]
-                gw_det = gw_val.detach()
+                # ----- 준비 -----
+                a_det  = alpha.detach()        # [B,H,M]
+                gw_det = gw_val.detach()       # [B,H,M]
+                DP_det = DP.detach()           # [B,H,S,S]
+                DG_det = DG.detach()           # [B,M,K,K]
 
-                # --- α 엔트로피 ---
-                # H: [B,H]  (헤드별 엔트로피), H_mean: 스칼라 요약
-                H = -(a_det.clamp_min(1e-8) * a_det.clamp_min(1e-8).log()).sum(dim=-1)   # [B,H]
-                H_mean = H.mean().item()
-                H0 = H[0]                              # 배치 0의 각 헤드 엔트로피 [H]
-                q = torch.quantile(H0, torch.tensor([0.1, 0.5, 0.9], device=H0.device))
+                B, H, M = a_det.shape
+                S = DP_det.shape[-1]
+                K_ = DG_det.shape[-1]
+                device = a_det.device
+
+                # ===== 1) α 관련 진단 =====
+                # (1) 헤드별 엔트로피와 유효 슬롯 수 n_eff = exp(H)
+                eps = 1e-8
+                H_alpha = -(a_det.clamp_min(eps) * a_det.clamp_min(eps).log()).sum(dim=-1)   # [B,H]
+                n_eff   = torch.exp(H_alpha)                                                 # [B,H]
+
+                # 배치 0 통계(요약)
+                H0, n0 = H_alpha[0], n_eff[0]
+                qH = torch.quantile(H0, torch.tensor([0.1, 0.5, 0.9], device=device))
+                qN = torch.quantile(n0, torch.tensor([0.1, 0.5, 0.9], device=device))
+
+                # (2) top-k 질량(배치0)
+                a0 = a_det[0]                       # [H,M]
+                top1 = a0.topk(1, dim=-1).values.squeeze(-1)                     # [H]
+                top2 = a0.topk(2, dim=-1).values.sum(dim=-1)                     # [H]
+                top3 = a0.topk(3, dim=-1).values.sum(dim=-1) if M >= 3 else top2 # [H]
+                t1m, t2m, t3m = top1.mean().item(), top2.mean().item(), top3.mean().item()
+
+                # (3) 헤드 간 α 유사도(코사인) – 헤드가 같은 열에 몰리는지 측정
+                a0c = a0 / (a0.norm(dim=-1, keepdim=True) + eps)   # [H,M]
+                cos_hh = a0c @ a0c.t()                             # [H,H]
+                off = cos_hh - torch.diag_embed(torch.diagonal(cos_hh))
+                cos_mean_off = off.sum() / (H*(H-1) + eps)
+                cos_max_off  = off.max()
+
+                # (4) 슬롯 커버리지(배치0에서 각 슬롯이 top-1로 뽑힌 빈도)
+                top_idx = a0.argmax(dim=-1)                # [H]
+                hist = torch.bincount(top_idx, minlength=M).tolist()
+
+                # (5) α 분산(헤드별), 요약
+                var_alpha = a0.var(dim=-1, unbiased=False)  # [H]
+                qVar = torch.quantile(var_alpha, torch.tensor([0.1, 0.5, 0.9], device=device))
+
                 print(
-                    f"[dbg {self._dbg_step}] α-H per-head @b0: "
-                    f"min={H0.min().item():.3f} q10/50/90=({q[0].item():.3f},{q[1].item():.3f},{q[2].item():.3f}) "
-                    f"max={H0.max().item():.3f}"
+                    f"[dbg {self._dbg_step}] α-H@b0: "
+                    f"min={H0.min().item():.3f} q10/50/90=({qH[0].item():.3f},{qH[1].item():.3f},{qH[2].item():.3f}) "
+                    f"max={H0.max().item():.3f} | n_eff@b0: q10/50/90=({qN[0].item():.2f},{qN[1].item():.2f},{qN[2].item():.2f})"
                 )
-
-                # --- α 가장 큰 슬롯 인덱스 및 히스토그램(배치0) ---
-                top_idx = a_det[0].argmax(dim=-1)          # [H]
-                M_slots = a_det.size(-1)                    # M
-                hist = torch.bincount(top_idx, minlength=M_slots).tolist()
-
                 print(
-                    f"[dbg {self._dbg_step}] gw μ={gw_det.mean().item():.3f} σ={gw_det.std().item():.3f} | "
-                    f"α-entropy(mean)={H_mean:.2f} | α(top m @b0)={top_idx.tolist()} | α hist @b0={hist}"
+                    f"[dbg {self._dbg_step}] α(top-k mass)@b0: top1={t1m:.3f} top2={t2m:.3f} top3={t3m:.3f} | "
+                    f"head-α cos(mean_off)={cos_mean_off.item():.3f} max_off={cos_max_off.item():.3f} | "
+                    f"α var@b0 q10/50/90=({qVar[0].item():.4f},{qVar[1].item():.4f},{qVar[2].item():.4f})"
                 )
+                print(f"[dbg {self._dbg_step}] α top-1 slots @b0={top_idx.tolist()} | coverage={hist}")
+                
+                
+                Q_hat_det = Q_hat.detach()      # [B,H,S,S]
+                DP_det    = DP.detach()         # [B,H,S,S]
 
-                # --- DP 통계 ---
-                DP_det = DP.detach()
+                def _corr_prob(x, y, eps=1e-8):
+                    # x,y: [B,H,S,S]
+                    xf = x.flatten(2); yf = y.flatten(2)
+                    xf = xf - xf.mean(-1, keepdim=True)
+                    yf = yf - yf.mean(-1, keepdim=True)
+                    num = (xf * yf).sum(-1)
+                    den = (xf.norm(dim=-1) * yf.norm(dim=-1)).clamp_min(eps)
+                    return (num / den).mean().item()
+
+                print(f"[align] corr(P_norm, Q_hat) ≈ {_corr_prob(P_norm.detach(), Q_hat.detach()):.3f}")
+
+                # ===== 2) DP / DG 스케일 및 분산 =====
+                # DP 전역 통계 + 헤드별 표준편차
+                if not hasattr(self, "_dp_prev"):
+                    self._dp_prev = None
+                    self._dp_prev_shape = None
+
+                cur_shape = tuple(DP_det.shape)  # [B,H,S,S]
+                if (self._dp_prev is None) or (self._dp_prev_shape != cur_shape):
+                    # 첫 호출이거나, 소스 전환 등으로 S가 바뀐 경우
+                    old_shape = str(self._dp_prev_shape) if self._dp_prev_shape is not None else "none"
+                    print(f"[update] mean |DP_t - DP_(t-1)| = n/a (reset; shape {old_shape} -> {list(cur_shape)})")
+                    self._dp_prev = DP_det.detach().clone()
+                    self._dp_prev_shape = cur_shape
+                else:
+                    delta = (DP_det - self._dp_prev).abs().mean().item()
+                    print(f"[update] mean |DP_t - DP_(t-1)| = {delta:.3e}")
+                    self._dp_prev.copy_(DP_det)
+
+                # per-head std (배치0 기준 분위수)
+                dp_std_per_head = DP_det.flatten(2).std(dim=-1)        # [B,H]
+                qDP = torch.quantile(
+                    dp_std_per_head[0],
+                    torch.tensor([0.1, 0.5, 0.9], device=DP_det.device)
+                )
                 print(
                     f"[dbg {self._dbg_step}] DP: rng=({DP_det.min().item():.4f},{DP_det.max().item():.4f}) "
-                    f"mean={DP_det.mean().item():.4f} std={DP_det.std().item():.4f}"
+                    f"mean={DP_det.mean().item():.4f} std={DP_det.std().item():.4f} | "
+                    f"per-head std@b0 q10/50/90=({qDP[0].item():.4f},{qDP[1].item():.4f},{qDP[2].item():.4f})"
                 )
 
-                # --- DG 통계 (대각 제외) ---
-                DG_det = DG.detach()                        # [B,M,K,K] or [B,H?,K,K] — 네 코드 기준 [B,M,K,K]
-                K_ = DG_det.shape[-1]
-                eye = torch.eye(K_, device=DG_det.device, dtype=torch.bool).view(1, 1, K_, K_)
+                eye = torch.eye(K_, device=device, dtype=torch.bool).view(1,1,K_,K_)
                 DG_off = DG_det.masked_fill(eye, 0.0)
-                print(
-                    f"[dbg {self._dbg_step}] DG: rng=({DG_off.min().item():.6f},{DG_off.max().item():.6f}) "
-                    f"mean={DG_off.mean().item():.6f} std={DG_off.std().item():.6f}"
-                )
-
-                DG_flat = DG_off.flatten(2)                 # [B,M,K*K]
+                DG_flat = DG_off.flatten(2)                                # [B,M,K*K]
                 DG_std_per_m = DG_flat.std(dim=-1).mean().item()
-                print(f"[dbg {self._dbg_step}] DG per-slot std≈{DG_std_per_m:.6f}")
+                print(
+                    f"[dbg {self._dbg_step}] DG(offdiag): rng=({DG_off.min().item():.6f},{DG_off.max().item():.6f}) "
+                    f"mean={DG_off.mean().item():.6f} std={DG_off.std().item():.6f} | per-slot std≈{DG_std_per_m:.6f}"
+                )
 
                 scale_ratio = (DP_det.std() / (DG_off.std() + 1e-8)).item()
-                print(f"[dbg {self._dbg_step}] scale ratio DP/DG ≈ {scale_ratio:.1f}")
+                print(f"[dbg {self._dbg_step}] scale ratio DP/DG ≈ {scale_ratio:.2f}")
 
-                # --- U 통계 (가능할 때만) ---
+                # (선택) U 통계가 필요할 때만
                 try:
                     aff = getattr(self, "basis_affinity", None)
                     if aff is None and hasattr(self, "model"):
                         aff = getattr(self.model, "basis_affinity", None)
-
-                    if aff is None:
-                        print(f"[dbg {self._dbg_step}] U-stats skipped: basis_affinity not found on self/model")
-                    elif not hasattr(aff, "_current_U"):
-                        print(f"[dbg {self._dbg_step}] U-stats skipped: basis_affinity has no _current_U()")
-                    else:
-                        U = aff._current_U().detach()               # [H,K,R]
-                        Unorm = torch.norm(U, dim=-1)               # [H,K]
-                        print(
-                            f"[dbg {self._dbg_step}] U‖·‖: mean={Unorm.mean().item():.4f} "
-                            f"std={Unorm.std().item():.4f} min={Unorm.min().item():.4f} max={Unorm.max().item():.4f}"
-                        )
-
+                    if (aff is not None) and hasattr(aff, "_current_U"):
+                        U = aff._current_U().detach()                 # [H,K,R]
+                        Unorm = torch.norm(U, dim=-1)                 # [H,K]
+                        print(f"[dbg {self._dbg_step}] U‖·‖: mean={Unorm.mean().item():.4f} "
+                            f"std={Unorm.std().item():.4f} min={Unorm.min().item():.4f} max={Unorm.max().item():.4f}")
                         Udir = F.normalize(U, p=2, dim=-1)
-                        cos_sim = torch.einsum("hkr,hjr->hkj", Udir, Udir)      # [H,K,K]
+                        cos_sim = torch.einsum('hkr,hjr->hkj', Udir, Udir)
                         cos_off = cos_sim - torch.diag_embed(torch.diagonal(cos_sim, dim1=-2, dim2=-1))
-                        print(
-                            f"[dbg {self._dbg_step}] U cos(offdiag): mean={cos_off.mean().item():.4f} "
-                            f"std={cos_off.std().item():.4f} max={cos_off.max().item():.4f}"
-                        )
-
-                        DG_from_U = (1.0 - cos_sim).clamp_min(0.0)
-                        DG_from_U = DG_from_U - torch.diag_embed(torch.diagonal(DG_from_U, dim1=-2, dim2=-1))
-                        print(
-                            f"[dbg {self._dbg_step}] 1-cos(U) offdiag: mean={DG_from_U.mean().item():.6f} "
-                            f"std={DG_from_U.std().item():.6f}"
-                        )
+                        print(f"[dbg {self._dbg_step}] U cos(offdiag): mean={cos_off.mean().item():.4f} "
+                            f"std={cos_off.std().item():.4f} max={cos_off.max().item():.4f}")
                 except Exception as e:
                     print(f"[dbg {self._dbg_step}] U-stats skipped ({type(e).__name__}: {e})")
 
             self._dbg_step += 1
 
-            Q_var = prior_Q
-            Q_hat = BasisSlotAffinityGAT.sharpen_Q(Q_var, alpha)
+
             bias_full = torch.zeros_like(logits_base)
             bias_full[:, :, 1:, 1:] = self._logit_bias_from_prob(Q_hat) * self.gate_strength 
             logits = logits_base + bias_full + struct_mask 

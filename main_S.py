@@ -34,7 +34,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -98,15 +98,6 @@ def get_args():
     parser.add_argument('--coord_target_mode', type=str, default='soft', choices=['soft', 'hard'], help='Centroid target mode for coordinate regularization.')
     parser.add_argument('--coord_tau', type=float, default=0.3,help='Temperature for soft centroid mixing (soft target).')
 
-    # BasisGAT
-    # BasisGAT 스택 관련
-    parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
-    parser.add_argument('--anchor_kl_lambda', type=float, default=0.05, help = 'Weight of KL(anchor) regularizer during Few-shot.')
-    parser.add_argument('--slot_align_kl_lambda', type = float, default = 0.1)
-    parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
-    parser.add_argument('--slot_usage_lambda',type=float , default = 0.05)
-    parser.add_argument('--affinity_l2norm', type=bool, default=True)
-    parser.add_argument('--slot_g_mode', type=str, default='gw', choices=['markov','kernel','gw'])
 
     # booleans는 store_true / store_false로
     parser.add_argument('--slot_g_diag_zero', dest='slot_g_diag_zero', action='store_true')
@@ -121,19 +112,24 @@ def get_args():
     parser.add_argument('--no-slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_false')
     parser.set_defaults(slot_kernel_row_stoch=False)
 
-    # 스칼라/온도/정규화 계수
-    parser.add_argument('--slot_g_temp', type=float, default=1.0)
-    parser.add_argument('--slot_g_sparse_l1', type=float, default=0.0)
-    parser.add_argument('--slot_g_ent_lambda', type=float, default=0.0)
-    parser.add_argument('--g_frob_div_lambda', type=float, default=0.3)   # ✅ 추천: 0.01~0.02
-
     # kernel 전용
     parser.add_argument('--slot_kernel_rank', type=int, default=8)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
     parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--slot_dim", type=int, default=16, help="Global slot space latent dimension K")
-    parser.add_argument('--gw_eps', type=float, default = 0.2)
-    parser.add_argument("--gw_sigma", type = float, default = 0.6)
+        # 스칼라/온도/정규화 계수
+    parser.add_argument('--slot_g_temp', type=float, default=1.0)
+    parser.add_argument('--slot_g_sparse_l1', type=float, default=0.0)
+    parser.add_argument('--slot_g_ent_lambda', type=float, default=0.0)
+        # BasisGAT
+    # BasisGAT 스택 관련
+    parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
+    parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
+    parser.add_argument('--slot_usage_lambda',type=float , default = 0.1)
+    parser.add_argument('--slot_g_mode', type=str, default='gw', choices=['markov','kernel','gw'])
+    parser.add_argument('--g_frob_div_lambda', type=float, default=0.15)   # ✅ 추천: 0.01~0.02
+    parser.add_argument('--gw_eps', type=float, default = 0.08)
+    parser.add_argument("--gw_sigma", type = float, default = 1.2)
     parser.add_argument("--alpha_scale", type = float, default = 1.0)
     parser.add_argument("--gw_outer_iters", type=int, default=10)
     parser.add_argument("--gw_sinkhorn_iters", type=int, default=30)
@@ -150,8 +146,6 @@ def get_args():
     parser.add_argument('--relation_scorer_type', type=str, default='slot', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
     parser.add_argument('--rel_input_dim', type=int, default=512,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
     parser.add_argument('--rel_hidden_dim', type=int, default=256,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
-    
-
 
     # 마스크를 로짓에 더할 때 세기(γ)
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
