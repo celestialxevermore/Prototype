@@ -32,7 +32,7 @@ class BasisSlotAffinityGAT(nn.Module):
         self.scale               = 1.0 / math.sqrt(self.D)
         self.slot_usage_lambda   = args.slot_usage_lambda
         # G constraints
-        self.g_mode              = args.slot_g_mode            # "markov" | "kernel"
+        self.g_mode              = args.slot_g_mode
         self.g_diag_zero         = args.slot_g_diag_zero
         self.g_sparse_l1         = args.slot_g_sparse_l1
         self.g_ent_lambda        = args.slot_g_ent_lambda
@@ -64,14 +64,10 @@ class BasisSlotAffinityGAT(nn.Module):
         self.slot_proj = nn.Linear(self.D, self.M)
         nn_init.xavier_uniform_(self.slot_proj.weight)
         nn_init.zeros_(self.slot_proj.bias)
-
         # Global slot–slot matrix params
-        if self.g_mode in ("kernel", "gw"):
-            self.U_param = nn.Parameter(torch.empty(self.M, self.K, self.kernel_rank))
-            nn_init.xavier_uniform_(self.U_param)
-            self.G_param = None
-        else:
-            raise ValueError(f"Unknown slot_g_mode: {self.g_mode}")
+        self.U_param = nn.Parameter(torch.empty(self.M, self.K, self.kernel_rank))
+        nn_init.xavier_uniform_(self.U_param)
+        self.G_param = None
 
     # ---------------- utils ----------------
     @staticmethod
