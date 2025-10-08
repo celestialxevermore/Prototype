@@ -387,17 +387,16 @@ class SharedGraphAttention(nn.Module):
 
 
 
+
 class BasisGATLayer(nn.Module):
     """
-    - gat_v1 / gat_v2 / gate 분기만 지원
-    - edge_type: normal / mlp / no_use 지원 (mlp면 edge_update MLP 사용)
-    - CLS->Var on, Var->CLS off, Var-Var는 (self_loop 옵션 반영) 구조 마스크 적용
-    - 선택적 mask_M를 pre-softmax logit bias로 주입(A안):
-        mask_M: [B, n_heads, seq_len, seq_len]  (seq_len = new_seq - 1, Var-Var 블록)
-        logits[:, :, 1:, 1:] += logit(mask_M) * gamma
+    entropic_gw, prior_Q, DG, b 모두 제거한 버전.
+    - gat_v1 / gat_v2 / gate 지원
+    - edge_type: normal / mlp / no_use 지원
+    - CLS->Var on, Var->CLS off, Var-Var 구조 마스크 적용
     반환:
-      basis_outputs: [B, new_seq, n_heads, head_dim]
-      attn_weights : [B, n_heads, new_seq, new_seq]
+        basis_outputs: [B, new_seq, n_heads, head_dim]
+        attn_weights : [B, n_heads, new_seq, new_seq]
     """
     def __init__(self, args, input_dim: int, hidden_dim: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
@@ -405,123 +404,133 @@ class BasisGATLayer(nn.Module):
         assert args.attn_type in ['gat_v1', 'gat_v2', 'gate'], "attn_type must be one of {gat_v1,gat_v2,gate}"
 
         self.args = args
-        self.input_dim  = input_dim
+        self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.n_heads    = n_heads
-        self.head_dim   = input_dim // n_heads
+        self.n_heads = n_heads
+        self.head_dim = input_dim // n_heads
         self.attn_dropout = nn.Dropout(dropout)
 
-        self.gw_eps = self.args.gw_eps 
-        self.gw_sigma = self.args.gw_sigma 
-        self.gw_outer_iters = self.args.gw_outer_iters 
-        self.gw_sink_iters = self.args.gw_sinkhorn_iters 
-        self.gw_tol = self.args.gw_sinkhorn_eps 
-
-        # V
+        # === Q/K/V projection ===
+        self.q_proj = nn.Linear(input_dim, input_dim)
+        self.k_proj = nn.Linear(input_dim, input_dim)
         self.v_proj = nn.Linear(input_dim, input_dim)
 
-        # branch-specific projections
-        if self.args.attn_type in ['gat_v1', 'gat_v2']:
-            if self.args.edge_type in ['normal', 'mlp']:
+        # === Attention branch ===
+        if args.attn_type in ['gat_v1', 'gat_v2']:
+            if args.edge_type in ['normal', 'mlp']:
                 self.attn_proj = nn.Linear(self.head_dim * 3, 1)
-                if self.args.edge_type == 'mlp':
+                if args.edge_type == 'mlp':
                     self.edge_update = nn.Sequential(
                         nn.Linear(input_dim * 2, input_dim),
                         nn.LayerNorm(input_dim),
                         nn.ReLU(),
                         nn.Linear(input_dim, input_dim)
                     )
-            elif self.args.edge_type == 'no_use':
+            elif args.edge_type == 'no_use':
                 self.attn_proj = nn.Linear(self.head_dim * 2, 1)
 
-        elif self.args.attn_type == 'gate':
-            if self.args.edge_type in ['normal', 'mlp']:
-                self.gate_proj    = nn.Linear(self.head_dim * 3, 1)
+        elif args.attn_type == 'gate':
+            if args.edge_type in ['normal', 'mlp']:
+                self.gate_proj = nn.Linear(self.head_dim * 3, 1)
                 self.content_proj = nn.Linear(self.head_dim * 3, 1)
-                if self.args.edge_type == 'mlp':
+                if args.edge_type == 'mlp':
                     self.edge_update = nn.Sequential(
                         nn.Linear(input_dim * 2, input_dim),
                         nn.LayerNorm(input_dim),
                         nn.ReLU(),
                         nn.Linear(input_dim, input_dim)
                     )
-            elif self.args.edge_type == 'no_use':
-                self.gate_proj    = nn.Linear(self.head_dim * 2, 1)
+            elif args.edge_type == 'no_use':
+                self.gate_proj = nn.Linear(self.head_dim * 2, 1)
                 self.content_proj = nn.Linear(self.head_dim * 2, 1)
 
-        # === initialization: xavier_uniform with gain=1/sqrt(2) (bias는 기본값 유지/0으로 초기화) ===
-        nn_init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
-
-        if hasattr(self, 'attn_proj'):
-            nn_init.xavier_uniform_(self.attn_proj.weight, gain=1 / math.sqrt(2))
-        if hasattr(self, 'gate_proj'):
-            nn_init.xavier_uniform_(self.gate_proj.weight, gain=1 / math.sqrt(2))
-        if hasattr(self, 'content_proj'):
-            nn_init.xavier_uniform_(self.content_proj.weight, gain=1 / math.sqrt(2))
-        if hasattr(self, 'edge_update'):
-            for m in self.edge_update:
-                if isinstance(m, nn.Linear):
-                    nn_init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+        # === Initialization ===
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn_init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+                if m.bias is not None:
+                    nn_init.zeros_(m.bias)
 
     @staticmethod
     def _no_self_interaction(adj: torch.Tensor) -> torch.Tensor:
-        # adj: [B, S, S]
         B, S, _ = adj.shape
         diag = torch.eye(S, device=adj.device).unsqueeze(0)
         return adj * (1.0 - diag)
-    @staticmethod
-    def _attn_from_Qhat(Q_hat: torch.Tensor, new_adjacency: torch.Tensor) -> torch.Tensor:
-        """
-        Q_hat: [B,H,S,S] (Var-Var 확률)
-        new_adjacency: [B, new_seq, new_seq] (CLS 포함 구조마스크)
-        return: [B,H,new_seq,new_seq] (행-확률합=1)
-        """
-        B, H, S, _ = Q_hat.shape
-        new_seq = new_adjacency.size(-1)
 
-        A = Q_hat.new_zeros(B, H, new_seq, new_seq)
-        A[:, :, 1:, 1:] = Q_hat                 # Var-Var
-        A[:, :, 0, 1:]  = 1.0                   # CLS->Var
-        A[:, :, 1:, 0]  = 0.0                   # Var->CLS
+    def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor):
+        
+        seq_len = new_seq - 1
 
-        A = A * new_adjacency.unsqueeze(1)      # 구조 마스크 적용
-        row_sum = A.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-        A = A / row_sum
-        return A
-
-    def forward(
-        self,
-        desc_embeddings: torch.Tensor,         # [B,S,D] (API 호환용, 내부 사용 X)
-        name_value_embeddings: torch.Tensor,   # [B,new_seq,D], new_seq = S+1 (CLS 포함)
-        prior_Q: torch.Tensor                  # [B,H,S,S]  (이미 외부에서 GW/α로 혼합·정규화된 Var-Var 확률)
-    ):
-        B, new_seq, _ = name_value_embeddings.shape
-        seq_len = new_seq - 1  # S
-
-        # ----- 구조 마스크 구성 -----
-        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device,
-                             dtype=name_value_embeddings.dtype)
-        if getattr(self.args, "no_self_loop", False):
+        # === Adjacency (CLS->Var on / Var->CLS off) ===
+        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
+        if self.args.no_self_loop:
             var_adj = self._no_self_interaction(var_adj)
 
-        new_adjacency = torch.zeros(B, new_seq, new_seq,
-                                    device=name_value_embeddings.device,
-                                    dtype=name_value_embeddings.dtype)
-        new_adjacency[:, 1:, 1:] = var_adj   # Var-Var
-        new_adjacency[:, 0, 1:]  = 1.0       # CLS->Var
-        new_adjacency[:, 1:, 0]  = 0.0       # Var->CLS
+        new_adj = torch.zeros(B, new_seq, new_seq, device=name_value_embeddings.device)
+        new_adj[:, 1:, 1:] = var_adj
+        new_adj[:, 0, 1:] = 1.0
+        new_adj[:, 1:, 0] = 0.0
+        self.new_adjacency = new_adj
 
-        # ----- prior_Q로부터 attention 가중치 생성 -----
-        Q_hat = prior_Q.clamp_min(1e-8)      # [B,H,S,S]
-        attn_weights = self._attn_from_Qhat(Q_hat, new_adjacency)  # [B,H,new_seq,new_seq]
+        # === Q/K/V ===
+        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+
+        q_exp = q.unsqueeze(3)
+        k_exp = k.unsqueeze(2)
+
+        # === Edge attributes (optional) ===
+        if self.args.edge_type in ['normal', 'mlp']:
+            seq_len = new_seq - 1
+            node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+            node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+            var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim=-1)
+            cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+            edge_dim = var_edge_attr.size(-1)
+
+            edge_attr = torch.zeros(B, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+            edge_attr[:, 1:, 1:] = var_edge_attr
+            edge_attr[:, 0, 1:] = cls_edge_attr
+            edge_attr[:, 1:, 0] = cls_edge_attr
+
+            if self.args.edge_type == 'mlp' and hasattr(self, 'edge_update'):
+                edge_attr = self.edge_update(edge_attr)
+
+            edge_attr = edge_attr.view(B, new_seq, new_seq, self.n_heads, self.head_dim).permute(0, 3, 1, 2, 4)
+            edge_attr = edge_attr * new_adj.unsqueeze(1).unsqueeze(-1)
+        else:
+            edge_attr = None
+
+        # === Attention logits ===
+        q_expanded = q_exp.expand(-1, -1, -1, new_seq, -1)
+        k_expanded = k_exp.expand(-1, -1, new_seq, -1, -1)
+
+        if self.args.attn_type in ['gat_v1', 'gat_v2']:
+            qke = torch.cat([q_expanded, k_expanded, edge_attr], dim=-1) if edge_attr is not None else torch.cat([q_expanded, k_expanded], dim=-1)
+            if self.args.attn_type == 'gat_v2':
+                qke = F.leaky_relu(qke)
+            logits = self.attn_proj(qke).squeeze(-1)
+
+        elif self.args.attn_type == 'gate':
+            qke = torch.cat([q_expanded, k_expanded, edge_attr], dim=-1) if edge_attr is not None else torch.cat([q_expanded, k_expanded], dim=-1)
+            gate_values = torch.sigmoid(self.gate_proj(qke))
+            content_values = torch.tanh(self.content_proj(qke))
+            logits = (gate_values * content_values).squeeze(-1)
+
+        else:
+            logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        # === Structure mask ===
+        mask = (new_adj.unsqueeze(1) == 0).float() * -1e9
+        logits = logits + mask
+
+        # === Attention & Output ===
+        attn_weights = F.softmax(logits, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)
 
-        # ----- V 투영 및 컨텍스트 산출 -----
-        v = self.v_proj(name_value_embeddings)                               # [B,new_seq,D]
-        v = v.view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,new_seq,head_dim]
-        context = torch.matmul(attn_weights, v)                               # [B,H,new_seq,head_dim]
-        basis_outputs = context.transpose(1, 2).contiguous()                  # [B,new_seq,H,head_dim]
-
+        context = torch.matmul(attn_weights, v)
+        basis_outputs = context.transpose(1, 2).contiguous()  # [B, new_seq, H, head_dim]
         return basis_outputs, attn_weights
     
 class Model(nn.Module):
@@ -540,11 +549,13 @@ class Model(nn.Module):
         self.num_classes  = args.num_classes
         self.n_slots = self.args.n_slots
         self.slot_dim = self.args.slot_dim
-        self.num_shared_layers = self.args.num_shared_layers
-        self.num_basis_layers = self.args.num_basis_layers
         # CLS
         self.cls = nn.Parameter(Tensor(1, 1, self.input_dim))
         nn.init.uniform_(self.cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
+
+        self.num_basis_layers = int(getattr(args, 'num_basis_layers', 3))
+        self.num_shared_layers = int(getattr(args, 'num_shared_layers', 3))
+
 
         self.shared_layers = nn.ModuleList([ 
             SharedGraphAttention(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim,
@@ -567,6 +578,7 @@ class Model(nn.Module):
             nn.LayerNorm(self.input_dim) for _ in range(self.num_basis_layers)
         ])
 
+        # Experts (one per basis head)
         self.expert_predictors = nn.ModuleList([
             nn.Linear(self.input_dim // args.n_heads, output_dim) for _ in range(args.n_heads)
         ])
@@ -599,6 +611,8 @@ class Model(nn.Module):
 
         # Loss
         self.criterion = nn.BCEWithLogitsLoss() if self.num_classes == 2 else nn.CrossEntropyLoss()
+
+        # init (Linear only)
         self._init_weights()
 
     def _init_weights(self):
@@ -665,19 +679,6 @@ class Model(nn.Module):
         pred = self.predict(batch)
         loss = self.criterion(pred, target)
 
-        # (1) 슬롯 규제(겹침/사용량) 그냥 더하기
-        if self.training and hasattr(self, "_last_slot_loss") and (self._last_slot_loss is not None):
-            loss = loss + self._last_slot_loss
-        z_student = pred 
-        z_teacher = self._last_logits_shared.detach() 
-        if self.num_classes == 2:
-            z_student = torch.stack([torch.zeros_like(z_student), z_student], dim=-1)
-            z_teacher = torch.stack([torch.zeros_like(z_teacher), z_teacher], dim=-1)
-        logQ = F.log_softmax(z_student,dim=-1)
-        P = F.softmax(z_teacher, dim=-1)
-        kd_loss = F.kl_div(logQ, P, reduction='batchmean')
-        loss = loss + kd_loss 
-
         # (2) 기존 Few-shot coord KL 유지 (타깃 에피소드에서 좌표 분포 정렬)
         lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
         if (self.mode == 'Few') and (lam > 0.0) and hasattr(self, "centroids"):
@@ -715,37 +716,13 @@ class Model(nn.Module):
 
         # ---- shared blocks -> coordinator ----
         x_shared = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim=1)
-        last_attn_shared = None 
-
         for l in range(self.num_shared_layers):
             nx = self.shared_layer_norms[l](x_shared)
-            out, attn_shared = self.shared_layers[l](desc, nx)
+            out, _ = self.shared_layers[l](desc, nx)
             x_shared = x_shared + out
-            last_attn_shared = attn_shared 
-
-        shared_cls = x_shared[:, 0, :]
-        self._last_coordinates = self.coordinator(shared_cls.detach())
-
-        if 'src_idx' in batch:
-            logits_shared = self.heads[int(batch['src_idx'])](shared_cls)
-        elif getattr(self.args, 'use_target_head', False):
-            logits_shared = self.thead(shared_cls)
-        else:
-            logits_shared = self.thead(shared_cls)
-        self._last_logits_shared = logits_shared
-
-
-        # ---- global/slot prior Q and regularizers ----
-        bias_log, Q_slot, slot_loss, DG, b = self.basis_affinity(desc, nv)
-        self._last_bias_log  = bias_log          # log Q (기록용)
-        self._last_Q_slot    = Q_slot            # [B,M,S,S]
-        self._last_slot_loss = (slot_loss if self.training else None)
-
-        # ---- SharedGAT 마지막 attention에서 Var–Var만 떼고 detach ----
-        # last_attn_shared: [B,H,new_seq,new_seq]
-        P_var = last_attn_shared[:, :, 1:, 1:].detach()         # [B,H,S,S]
-        P_norm = BasisSlotAffinityGAT.normalize_affinity(P_var, sym=True)
-        DP     = BasisSlotAffinityGAT.affinity_to_distance(P_norm)
+        cls_for_coord = x_shared[:, 0, :]
+        coordinates = self.coordinator(cls_for_coord)
+        self._last_coordinates = coordinates
 
         # 행/열 degree로 a 만들기
         eps   = 1e-8
@@ -769,16 +746,122 @@ class Model(nn.Module):
         last_att = None
         for l in range(self.num_basis_layers):
             norm_x = self.basis_layer_norms[l](x_basis)
-            basis_outputs, att = self.basis_layers[l](desc, norm_x, prior_Q=Q_hat)  # <<<<<< 변경
+            basis_outputs, att = self.basis_layers[l](desc, norm_x)
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
             last_att = att
 
         if last_att is not None:
-            self._last_P_basis = last_att[:, :, 1:, 1:]   # [B,H,S,S]
+            # Var-Var 블록만 저장: [B,H,S,S]
+            self._last_P_basis = last_att[:, :, 1:, 1:]
 
         # ---- experts & mixture ----
         expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,head_dim]
         preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.n_heads)]
-        expert_predictions = torch.stack(preds, dim=1)                      # [B,H,C]
-        logits_basis_mix  = torch.sum(self._last_coordinates.unsqueeze(-1) * expert_predictions, dim=1)  # [B,C]
-        return logits_basis_mix
+        expert_predictions = torch.stack(preds, dim=1)  # [B,H,C]
+        pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim=1)  # [B,C]
+
+        # residual heads
+        if 'src_idx' in batch:
+            pred = pred + self.heads[int(batch['src_idx'])](cls_for_coord)
+        elif getattr(self.args, 'use_target_head', False):
+            pred = pred + self.thead(cls_for_coord)
+
+        return pred
+
+
+    
+    def set_attention_save_dir(self, experiment_id, mode):
+        base_viz_dir = f"/storage/personal/eungyeop/experiments/visualization/{self.args.llm_model}/{self.args.source_data}/{mode}/{experiment_id}"
+        self.attention_save_dir = os.path.join(base_viz_dir, 'attention_maps')
+        os.makedirs(self.attention_save_dir, exist_ok=True)
+        logger.info(f"Attention maps will be saved to: {self.attention_save_dir}")
+
+    def extract_feature_names(self, batch):
+        feature_names = []
+        if 'cat_desc_texts' in batch:
+            for feature in batch['cat_desc_texts']:
+                if isinstance(feature, tuple):
+                    clean_name = str(feature[0])
+                else:
+                    try:
+                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                        clean_name = clean_name.split(',')[0]
+                    except:
+                        clean_name = str(feature)
+                feature_names.append(clean_name)
+        if 'num_desc_texts' in batch:
+            for feature in batch['num_desc_texts']:
+                if isinstance(feature, tuple):
+                    clean_name = str(feature[0])
+                else:
+                    try:
+                        clean_name = feature.split("'")[1] if "'" in feature else feature
+                        clean_name = clean_name.split(',')[0]
+                    except:
+                        clean_name = str(feature)
+                feature_names.append(clean_name)
+        seen = set()
+        unique_features = []
+        for feat in feature_names:
+            if feat not in seen:
+                seen.add(feat)
+                unique_features.append(feat)
+        return unique_features
+
+    def save_attention_maps_to_file(self, attention_weights, batch, labels=None, sample_ids=None):
+        if not hasattr(self, 'attention_save_dir') or self.attention_save_dir is None:
+            logger.warning("Attention save directory not set. Skipping attention map saving.")
+            return
+        feature_names = self.extract_feature_names(batch)
+        all_node_names = ["CLS"] + feature_names
+        for layer_idx, layer_attention in enumerate(attention_weights):
+            batch_size = layer_attention.shape[0]
+            for batch_idx in range(batch_size):
+                attention_map = layer_attention[batch_idx].mean(dim=0)
+                attention_numpy = attention_map.detach().cpu().numpy()
+                sample_id = sample_ids[batch_idx] if sample_ids is not None else self.attention_counter
+                label = labels[batch_idx].item() if labels is not None else "unknown"
+                filename = f"layer_{layer_idx}_sample_{sample_id}_label_{label}.npz"
+                filepath = os.path.join(self.attention_save_dir, filename)
+                np.savez(filepath,
+                         attention_map=attention_numpy,
+                         feature_names=np.array(all_node_names),
+                         layer_idx=layer_idx,
+                         sample_id=sample_id,
+                         label=label)
+                self.attention_counter += 1
+        logger.info(f"Attention maps saved for {batch_size} samples across {len(attention_weights)} layers to {self.attention_save_dir}")
+
+    def remove_feature(self, batch, desc_embeddings, name_value_embeddings):
+        removed = getattr(self.args, 'del_feat', [])
+        if not removed:
+            return desc_embeddings, name_value_embeddings
+        removed_set = set(removed)
+        filtered_desc_embeddings = []
+        filtered_name_value_embeddings = []
+
+        if 'cat_desc_texts' in batch:
+            cat_feature_names = [feature_tuple[0] if isinstance(feature_tuple, tuple) else str(feature_tuple)
+                                 for feature_tuple in batch['cat_desc_texts']]
+            keep_indices = [i for i, name in enumerate(cat_feature_names) if name not in removed_set]
+            if len(keep_indices) != len(cat_feature_names):
+                batch['cat_desc_texts'] = [batch['cat_desc_texts'][i] for i in keep_indices]
+                batch['cat_desc_embeddings'] = batch['cat_desc_embeddings'][:, keep_indices, :]
+                batch['cat_name_value_embeddings'] = batch['cat_name_value_embeddings'][:, keep_indices, :]
+            if keep_indices:
+                filtered_desc_embeddings.append(batch['cat_desc_embeddings'].to(self.device))
+                filtered_name_value_embeddings.append(batch['cat_name_value_embeddings'].to(self.device))
+
+        if 'num_desc_texts' in batch:
+            num_feature_names = [feature_tuple[0] if isinstance(feature_tuple, tuple) else str(feature_tuple)
+                                 for feature_tuple in batch['num_desc_texts']]
+            keep_indices = [i for i, name in enumerate(num_feature_names) if name not in removed_set]
+            if len(keep_indices) != len(num_feature_names):
+                batch['num_desc_texts'] = [batch['num_desc_texts'][i] for i in keep_indices]
+                batch['num_desc_embeddings'] = batch['num_desc_embeddings'][:, keep_indices, :]
+                batch['num_prompt_embeddings'] = batch['num_prompt_embeddings'][:, keep_indices, :]
+            if keep_indices:
+                filtered_desc_embeddings.append(batch['num_desc_embeddings'].to(self.device))
+                filtered_name_value_embeddings.append(batch['num_prompt_embeddings'].to(self.device))
+
+        return filtered_desc_embeddings, filtered_name_value_embeddings
