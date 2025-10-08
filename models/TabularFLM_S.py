@@ -469,78 +469,59 @@ class BasisGATLayer(nn.Module):
         B, S, _ = adj.shape
         diag = torch.eye(S, device=adj.device).unsqueeze(0)
         return adj * (1.0 - diag)
-    @staticmethod 
-    def _attn_from_Qhat(Q_hat: torch.tensor, new_adjacency: torch.Tensor) -> torch.Tensor:
-        """
-        Q_hat: [B,H,N,N] (Var-Var 확률행렬)
-        new_adjacency: [B, N+1, N+1] (CLS 포함 구조마스크; CLS->Var=1, Var->CLS=0, Var-Var=1)
-        return attn [B,H,N,N] (각 행 확률합=1)
-        """
-        B, H, S, _ = Q_hat.shape 
-        S_one = S + 1 
-        slot_adjacency = Q_hat.new_zeros(B, H, S_one, S_one)
-        slot_adjacency[:, :, 1:, 1:] = Q_hat 
-        slot_adjacency[:, :, 0, 1:] = 1.0 
-        slot_adjacency[:, :, 1:, 0] = 0.0
-        slot_adjacency = slot_adjacency * new_adjacency.unsqueeze(1) 
-        row_sum = slot_adjacency.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-        slot_adjacency = slot_adjacency / row_sum 
-        return slot_adjacency     
     @staticmethod
-    def _logit_bias_from_prob(prob: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-        p = prob.clamp(min=eps, max=1.0 - eps)
-        return torch.log(p) - torch.log(1.0 - p)
-
-    def forward(self, 
-        desc_embeddings:torch.Tensor, 
-        name_value_embeddings:torch.Tensor,
-        shared_attn:torch.Tensor,
-        prior_Q:torch.Tensor = None, # [B,M,S,S] Global node space affinity
-        DG:torch.Tensor = None, # [B,M,K,K] distance on slot space 
-        b:torch.Tensor = None):
-        """ 
-            desc_embeddings : [B,S,D] 
-            name_value_embeddings : [B,T,D] 
-            prior_Q (optional) : [B,M,S,S] (Var-Var prior from slots) Global node space affinity
-            DG (optional) : [B,M,K,K] Global slot space affinity
-            b (optional) : [B,H,K]
+    def _attn_from_Qhat(Q_hat: torch.Tensor, new_adjacency: torch.Tensor) -> torch.Tensor:
         """
+        Q_hat: [B,H,S,S] (Var-Var 확률)
+        new_adjacency: [B, new_seq, new_seq] (CLS 포함 구조마스크)
+        return: [B,H,new_seq,new_seq] (행-확률합=1)
+        """
+        B, H, S, _ = Q_hat.shape
+        new_seq = new_adjacency.size(-1)
+
+        A = Q_hat.new_zeros(B, H, new_seq, new_seq)
+        A[:, :, 1:, 1:] = Q_hat                 # Var-Var
+        A[:, :, 0, 1:]  = 1.0                   # CLS->Var
+        A[:, :, 1:, 0]  = 0.0                   # Var->CLS
+
+        A = A * new_adjacency.unsqueeze(1)      # 구조 마스크 적용
+        row_sum = A.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        A = A / row_sum
+        return A
+
+    def forward(
+        self,
+        desc_embeddings: torch.Tensor,         # [B,S,D] (API 호환용, 내부 사용 X)
+        name_value_embeddings: torch.Tensor,   # [B,new_seq,D], new_seq = S+1 (CLS 포함)
+        prior_Q: torch.Tensor                  # [B,H,S,S]  (이미 외부에서 GW/α로 혼합·정규화된 Var-Var 확률)
+    ):
         B, new_seq, _ = name_value_embeddings.shape
-        seq_len = new_seq - 1
-         
-        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
-        if self.args.no_self_loop:
+        seq_len = new_seq - 1  # S
+
+        # ----- 구조 마스크 구성 -----
+        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device,
+                             dtype=name_value_embeddings.dtype)
+        if getattr(self.args, "no_self_loop", False):
             var_adj = self._no_self_interaction(var_adj)
-        new_adjacency = torch.zeros(B, new_seq, new_seq, device = name_value_embeddings.device)
-        new_adjacency[:,1:,1:] = var_adj
-        new_adjacency[:,0,1:] = 1.0 
-        new_adjacency[:,1:,0] = 0.0
-        self.new_adjacency = new_adjacency 
-        # SharedGAT에서 받은 attention에서 Var–Var 블록만 추출
-        if shared_attn.dim() == 4 and shared_attn.size(2) == new_seq:
-            P_var = shared_attn[:, :, 1:, 1:]         # [B,H,S,S]
-        else:
-            # 이미 Var–Var로만 넘어온 경우라고 보고 그대로 사용
-            P_var = shared_attn                       # [B,H,S,S]
-        P_var = P_var.detach()
-        P_norm = BasisSlotAffinityGAT.normalize_affinity(P_var, sym=True)
-        DP = BasisSlotAffinityGAT.affinity_to_distance(P_norm)
 
-        eps = 1e-8 
-        deg_P = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
-        a = deg_P / deg_P.sum(dim=-1, keepdim=True).clamp_min(eps)
+        new_adjacency = torch.zeros(B, new_seq, new_seq,
+                                    device=name_value_embeddings.device,
+                                    dtype=name_value_embeddings.dtype)
+        new_adjacency[:, 1:, 1:] = var_adj   # Var-Var
+        new_adjacency[:, 0, 1:]  = 1.0       # CLS->Var
+        new_adjacency[:, 1:, 0]  = 0.0       # Var->CLS
 
-        _, gw_val = BasisSlotAffinityGAT._entropic_gw(DP,DG,a,b,eps=self.gw_eps,outer_iters=self.gw_outer_iters,sinkhorn_iters=self.gw_sink_iters,tol=self.gw_tol)
-        alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.gw_sigma)
-        Q_hat = BasisSlotAffinityGAT.sharpen_Q(prior_Q, alpha)
-        attn_weights = self._attn_from_Qhat(Q_hat, new_adjacency)
-        attn_weights = self.attn_dropout(attn_weights) 
+        # ----- prior_Q로부터 attention 가중치 생성 -----
+        Q_hat = prior_Q.clamp_min(1e-8)      # [B,H,S,S]
+        attn_weights = self._attn_from_Qhat(Q_hat, new_adjacency)  # [B,H,new_seq,new_seq]
+        attn_weights = self.attn_dropout(attn_weights)
 
-        # final attention
-        v = self.v_proj(name_value_embeddings) 
-        v = v.view(B, new_seq, self.n_heads, self.head_dim).transpose(1,2)
-        context = torch.matmul(attn_weights, v)
-        basis_outputs = context.transpose(1,2).contiguous()
+        # ----- V 투영 및 컨텍스트 산출 -----
+        v = self.v_proj(name_value_embeddings)                               # [B,new_seq,D]
+        v = v.view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,new_seq,head_dim]
+        context = torch.matmul(attn_weights, v)                               # [B,H,new_seq,head_dim]
+        basis_outputs = context.transpose(1, 2).contiguous()                  # [B,new_seq,H,head_dim]
+
         return basis_outputs, attn_weights
     
 class Model(nn.Module):
@@ -636,7 +617,7 @@ class Model(nn.Module):
             p.requires_grad = True
         for ln in self.basis_layer_norms:
             for p in ln.parameters():
-                p.requires_grad = False
+                p.requires_grad = True
         for p in self.thead.parameters():
             p.requires_grad = True
 
@@ -756,28 +737,48 @@ class Model(nn.Module):
 
         # ---- global/slot prior Q and regularizers ----
         bias_log, Q_slot, slot_loss, DG, b = self.basis_affinity(desc, nv)
-        self._last_bias_log  = bias_log          # log Q  (시각화/기록용)
-        self._last_Q_slot    = Q_slot            # Q      (확률) [B,M,S,S]
+        self._last_bias_log  = bias_log          # log Q (기록용)
+        self._last_Q_slot    = Q_slot            # [B,M,S,S]
         self._last_slot_loss = (slot_loss if self.training else None)
 
-        # === 핵심: GAT의 pre-softmax bias로 넣을 프라이어 확률 ===
-        mask_M = torch.clamp(self._last_Q_slot, min=1e-6, max=1.0 - 1e-6)  # [B,M,S,S]
+        # ---- SharedGAT 마지막 attention에서 Var–Var만 떼고 detach ----
+        # last_attn_shared: [B,H,new_seq,new_seq]
+        P_var = last_attn_shared[:, :, 1:, 1:].detach()         # [B,H,S,S]
+        P_norm = BasisSlotAffinityGAT.normalize_affinity(P_var, sym=True)
+        DP     = BasisSlotAffinityGAT.affinity_to_distance(P_norm)
 
-        # ---- basis GAT stack (Q를 pre-softmax logit bias로 사용) ----
+        # 행/열 degree로 a 만들기
+        eps   = 1e-8
+        deg_P = 0.5 * (P_norm.sum(dim=-1) + P_norm.sum(dim=-2))
+        a     = deg_P / deg_P.sum(dim=-1, keepdim=True).clamp_min(eps)   # [B,H,S]
+
+        # ---- GW 한 번만: DP vs DG → α → Q_hat ----
+        # no torch.no_grad(): G/U가 학습되게 그대로 두는 게 맞음 (Shared는 detach로 고정됨)
+        _, gw_val = BasisSlotAffinityGAT._entropic_gw(
+            DP, DG, a, b,
+            eps=self.args.gw_eps,
+            outer_iters=self.args.gw_outer_iters,
+            sinkhorn_iters=self.args.gw_sinkhorn_iters,
+            tol=self.args.gw_sinkhorn_eps
+        )                                                # gw_val: [B,H,M]
+        alpha = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=self.args.gw_sigma)  # [B,H,M]
+        Q_hat = BasisSlotAffinityGAT.sharpen_Q(Q_slot, alpha)                          # [B,H,S,S]
+
+        # ---- basis GAT stack: prior_Q=Q_hat만 사용 ----
         x_basis  = torch.cat([self.cls.expand(nv.size(0), 1, self.input_dim), nv], dim=1)
         last_att = None
         for l in range(self.num_basis_layers):
             norm_x = self.basis_layer_norms[l](x_basis)
-            basis_outputs, att = self.basis_layers[l](desc, norm_x,shared_attn = last_attn_shared, prior_Q=mask_M, DG=DG,b=b)
+            basis_outputs, att = self.basis_layers[l](desc, norm_x, prior_Q=Q_hat)  # <<<<<< 변경
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
             last_att = att
+
         if last_att is not None:
-            # Var-Var 블록만 저장: [B,M,S,S]
-            self._last_P_basis = last_att[:, :, 1:, 1:]
+            self._last_P_basis = last_att[:, :, 1:, 1:]   # [B,H,S,S]
 
         # ---- experts & mixture ----
         expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,head_dim]
         preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.n_heads)]
-        expert_predictions = torch.stack(preds, dim=1)  # [B,H,C]
+        expert_predictions = torch.stack(preds, dim=1)                      # [B,H,C]
         logits_basis_mix  = torch.sum(self._last_coordinates.unsqueeze(-1) * expert_predictions, dim=1)  # [B,C]
         return logits_basis_mix

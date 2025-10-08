@@ -113,7 +113,7 @@ def get_args():
     parser.set_defaults(slot_kernel_row_stoch=False)
 
     # kernel 전용
-    parser.add_argument('--slot_kernel_rank', type=int, default=8)  # None이면 K로 세팅
+    parser.add_argument('--slot_kernel_rank', type=int, default=512)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
     parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--slot_dim", type=int, default=16, help="Global slot space latent dimension K")
@@ -151,7 +151,7 @@ def get_args():
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
     # 재샘플링(한 seed 내에서 support set 여러 번 뽑아 평균)
-    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,
