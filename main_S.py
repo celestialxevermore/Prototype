@@ -34,7 +34,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="4"
+os.environ["CUDA_VISIBLE_DEVICES"]="2"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -99,28 +99,14 @@ def get_args():
     parser.add_argument('--coord_tau', type=float, default=0.3,help='Temperature for soft centroid mixing (soft target).')
 
 
-    # booleans는 store_true / store_false로
-    parser.add_argument('--slot_g_diag_zero', dest='slot_g_diag_zero', action='store_true')
-    parser.add_argument('--no-slot_g_diag_zero', dest='slot_g_diag_zero', action='store_false')
-    #parser.set_defaults(slot_g_diag_zero=True)
-
-    parser.add_argument('--slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_true')
-    parser.add_argument('--no-slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_false')
-    parser.set_defaults(slot_g_sinkhorn=True)
-
-    parser.add_argument('--slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_true')
-    parser.add_argument('--no-slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_false')
-    parser.set_defaults(slot_kernel_row_stoch=False)
-
     # kernel 전용
     parser.add_argument('--slot_kernel_rank', type=int, default=512)  # None이면 K로 세팅
     parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
     parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--slot_dim", type=int, default=16, help="Global slot space latent dimension K")
-        # 스칼라/온도/정규화 계수
+    # 스칼라/온도/정규화 계수
     parser.add_argument('--slot_g_temp', type=float, default=1.0)
     parser.add_argument('--slot_g_sparse_l1', type=float, default=0.0)
-    parser.add_argument('--slot_g_ent_lambda', type=float, default=0.0)
         # BasisGAT
     # BasisGAT 스택 관련
     parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')

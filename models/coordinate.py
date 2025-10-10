@@ -8,6 +8,8 @@ import torch.nn.init as nn_init
 import logging 
 import os 
 
+logger = logging.getLogger(__name__)
+
 class CoordinatorMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, k_basis: int, dropout: float = 0.1, temperature: float = 1.0):
         super().__init__()

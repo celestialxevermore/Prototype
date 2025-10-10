@@ -134,8 +134,8 @@ class MVisualizer:
         A_slot_np = A_slot[0].detach().cpu().numpy()
 
         # ---- Build P0, DP ----
-        cls     = self.model.cls.expand(B, 1, D)
-        x_basis = torch.cat([cls, nv], dim=1)                 # [B,S+1,D]
+        basis_cls     = self.model.basis_cls.expand(B, 1, D)
+        x_basis = torch.cat([basis_cls, nv], dim=1)                 # [B,S+1,D]
         new_adj = torch.zeros(B, S+1, S+1, device=nv.device)
         new_adj[:, 1:, 1:] = 1.0
         new_adj[:, 0, 1:]  = 1.0
@@ -161,7 +161,7 @@ class MVisualizer:
             tol=float(getattr(self.args, "gw_sinkhorn_eps", 1e-6)),
         )
 
-        alpha    = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=float(getattr(self.args, "gw_sigma", 0.6)))
+        alpha    = BasisSlotAffinityGAT.alpha_from_gw(gw_val, sigma=0.6)
         Q_hat    = BasisSlotAffinityGAT.sharpen_Q(Q_slot, alpha)
 
         # numpy로 변환 (0번째 배치만 저장)
@@ -175,7 +175,7 @@ class MVisualizer:
 
         # ---- Basis / Shared attention (기존 유지) ----
         Ms, ATTs, ADJs = [], [], []
-        x_basis = torch.cat([cls, nv], dim=1)
+        x_basis = torch.cat([basis_cls, nv], dim=1)
         mask_M  = bias_log.exp().clamp(1e-6, 1.0 - 1.0e-6)   # [B,M,S,S]
 
         for l in range(self.num_layers):
@@ -194,7 +194,8 @@ class MVisualizer:
             ADJs.append(new_adj_l[0].cpu().numpy())
 
         Shared_ATTs, Shared_ADJs = [], []
-        x_shared = torch.cat([cls, nv], dim=1)
+        shared_cls     = self.model.shared_cls.expand(B, 1, D)
+        x_shared = torch.cat([shared_cls, nv], dim=1)
         for l in range(self.model.num_shared_layers):
             norm_x = self.model.shared_layer_norms[l](x_shared)
             out, att = self.model.shared_layers[l](desc, norm_x)
@@ -727,7 +728,7 @@ class MVisualizer:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--checkpoint_dir', required=True, type=str)
-    ap.add_argument('--max_samples', type=int, default=2)
+    ap.add_argument('--max_samples', type=int, default=10)
     ap.add_argument('--output_dir', type=str, default=None)
     ap.add_argument('--alpha_summary_all', action='store_true',
                     help="전체 데이터셋에 대해 α 집계 요약도 생성")
