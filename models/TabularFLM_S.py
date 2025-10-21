@@ -321,7 +321,7 @@ class Model(nn.Module):
                     c, self.centroids,
                     tau=float(getattr(self.args, "coord_tau", 0.3)),
                     mode=str(getattr(self.args, "coord_target_mode", "soft"))
-                ).to(c.device)
+                )
                 eps = 1e-8
                 c_safe = c.clamp_min(eps)
                 temp = float(getattr(self.args, "coord_softmax_temp",1.0))
