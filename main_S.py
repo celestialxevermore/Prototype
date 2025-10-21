@@ -151,7 +151,7 @@ def get_args():
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
     # 재샘플링(한 seed 내에서 support set 여러 번 뽑아 평균)
-    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,
