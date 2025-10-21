@@ -317,16 +317,18 @@ class Model(nn.Module):
             c = getattr(self, "_last_coordinates", None)
             if c is not None:
                 from utils.coord_Kmeans import build_centroid_target
-                q = build_centroid_target(
+                recon_coords, assign_q = build_centroid_target(
                     c, self.centroids,
                     tau=float(getattr(self.args, "coord_tau", 0.3)),
                     mode=str(getattr(self.args, "coord_target_mode", "soft"))
                 ).to(c.device)
                 eps = 1e-8
                 c_safe = c.clamp_min(eps)
-                q_safe = q.clamp_min(eps)
-                kl = torch.sum(q_safe * (q_safe.log() - c_safe.log()), dim=1).mean()
-                loss = loss + lam * kl
+                temp = float(getattr(self.args, "coord_softmax_temp",1.0))
+                recon_logprob = F.log_sfotmax(recon_coords / max(temp,1e-6),dim=1)
+                coord_reg = F.kl_div(recon_logprob, c_safe, reduction='batchmean')
+                loss = loss + lam * coord_reg
+                self._last_assign_q = assign_q.detach()
 
         return loss
 

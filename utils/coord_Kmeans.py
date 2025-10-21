@@ -95,8 +95,8 @@ def _normalize_simplex(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x = torch.clamp(x, min=eps)
     return x / x.sum(dim=-1, keepdim=True)
     
-@torch.no_grad()
-def build_centroid_target(c: torch.Tensor,
+#@torch.no_grad()
+def build_centroid_target(target_coords: torch.Tensor,
                           centroids: torch.Tensor,
                           tau: float = 0.3,
                           mode: str = "soft") -> torch.Tensor:
@@ -105,18 +105,19 @@ def build_centroid_target(c: torch.Tensor,
     centroids: [K*, K]
     return q: [B, K*]
     """
-    device = c.device
-    c = c.to(device=device, dtype=torch.float32)
+    device = target_coords.device
+    target_coords = target_coords.to(device=device, dtype=torch.float32)
     centroids = centroids.to(device=device, dtype=torch.float32)
 
     # 거리 기반 할당
-    dists = torch.cdist(c, centroids, p=2)  # [B, K*]
-
+    dists = torch.cdist(target_coords, centroids, p=2)  # [B, K*]
+    
     if mode == "hard":
         idx = torch.argmin(dists, dim=1)               # [B]
         q = torch.zeros_like(dists)                    # [B, K*]
         q.scatter_(1, idx.unsqueeze(1), 1.0)
-        return q
     else:
         # soft assignment
-        return F.softmax(-dists / max(tau, 1e-6), dim=1)
+        q = F.softmax(-dists / max(tau, 1e-6), dim=1)
+    recon_coords = torch.matmul(q, centroids)
+    return recon_coords, q
