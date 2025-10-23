@@ -188,7 +188,7 @@ class Model(nn.Module):
                 coord_reg = F.kl_div(recon_logprob, c_safe, reduction='batchmean')
                 loss = loss + lam * coord_reg
                 self._last_assign_q = assign_q.detach()
-        # ---- Disentanglement Loss (λ=0.1, margin=2 고정) ----
+        # ---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
         if hasattr(self, "_last_P_basis"):
             A = self._last_P_basis  # [B, H, S, S]
             B, H, S, _ = A.shape
@@ -199,7 +199,6 @@ class Model(nn.Module):
             dis_loss = F.relu(2 - mean_dist)
             loss = loss + 0.3 * dis_loss
         #     self._last_dis_loss = dis_loss.detach()
-
         return loss
 
 
@@ -243,8 +242,8 @@ class Model(nn.Module):
             self._last_P_basis = last_att[:, :, 1:, 1:]
 
         # ---- experts & mixture ----
-        expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,head_dim]
-        preds = [self.expert_predictors[i](expert_outputs[:, i, :]) for i in range(self.args.n_heads)]
+        self.expert_outputs = basis_outputs[:, 0, :, :]  # [B,H,head_dim]
+        preds = [self.expert_predictors[i](self.expert_outputs[:, i, :]) for i in range(self.args.n_heads)]
         expert_predictions = torch.stack(preds, dim=1)  # [B,H,C]
         pred = torch.sum(coordinates.unsqueeze(-1) * expert_predictions, dim=1)  # [B,C]
 

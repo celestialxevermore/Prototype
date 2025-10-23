@@ -49,7 +49,7 @@ def get_args():
     parser.add_argument('--output_dim', type=int, default=1)
     parser.add_argument('--num_shared_layers', type=int, default=2)
     parser.add_argument('--dropout_rate', type=float, default=0.1)
-    parser.add_argument('--n_heads', type=int, default=8)
+    parser.add_argument('--n_heads', type=int, default=6)
     parser.add_argument('--k_basis', type=int, default=8)
     parser.add_argument('--model', type=str, default='NORM_GNN')
     parser.add_argument('--source_data', nargs='+',
@@ -78,6 +78,7 @@ def get_args():
     parser.add_argument('--enc_type', type=str, choices=['ind','shared'], default='ind')
     parser.add_argument('--meta_type', type=str, choices=['meta_attn','meta_mlp'], default='meta_attn')
     parser.add_argument('--aggr_type', type=str, choices=['flatten','mean','attn'], default='attn')
+    parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--frozen', type=bool, default=False)
     parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
@@ -151,7 +152,7 @@ def get_args():
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
     # 재샘플링(한 seed 내에서 support set 여러 번 뽑아 평균)
-    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,

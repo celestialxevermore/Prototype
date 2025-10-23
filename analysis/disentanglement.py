@@ -267,56 +267,119 @@ class MVisualizer:
             plt.savefig(save_dir / f"{kind}_Average_Heads_LastLayer.png", dpi=250, bbox_inches='tight')
             plt.close(fig)
 
+    def visualize_label_conditioned_heads(self, label0_shared, label0_basis, label1_shared, label1_basis, var_names, save_dir):
+        ensure_dir(save_dir)
+        n_heads = self.num_heads
+        n_vars  = len(var_names) + 1
+
+        # numpy 변환
+        label0_shared = np.stack(label0_shared, axis=0)
+        label0_basis  = np.stack(label0_basis, axis=0)
+        label1_shared = np.stack(label1_shared, axis=0)
+        label1_basis  = np.stack(label1_basis, axis=0)
+
+        # 마지막 layer만 선택
+        l0_shared = label0_shared[:, -1, :, :, :].mean(axis=0)
+        l0_basis  = label0_basis[:, -1, :, :, :].mean(axis=0)
+        l1_shared = label1_shared[:, -1, :, :, :].mean(axis=0)
+        l1_basis  = label1_basis[:, -1, :, :, :].mean(axis=0)
+
+        # Shared / Basis 각각 2행(label), n_heads열
+        for kind, (m0, m1) in zip(["Shared", "Basis"], [(l0_shared, l1_shared), (l0_basis, l1_basis)]):
+            fig, axes = plt.subplots(2, n_heads, figsize=(3.2*n_heads, 6.4))
+            if n_heads == 1:
+                axes = np.expand_dims(axes, 1)
+            for row, (lbl, mean_map) in enumerate([(0, m0), (1, m1)]):
+                for h in range(n_heads):
+                    ax = axes[row, h]
+                    M = mean_map[h]
+                    im = ax.imshow(M, cmap='viridis', vmin=M.min(), vmax=M.max())
+                    ax.set_title(f"{kind} Head {h} (label={lbl})", fontsize=8)
+                    ax.set_xticks(range(n_vars)); ax.set_yticks(range(n_vars))
+                    ax.set_xticklabels(["CLS"] + var_names, rotation=90, fontsize=6)
+                    ax.set_yticklabels(["CLS"] + var_names, fontsize=6)
+                    add_cb(ax, im)
+            plt.suptitle(f"{kind} Attention (Label 0↑, Label 1↓, Last Layer avg)", fontsize=12)
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            plt.savefig(save_dir / f"Label_Conditioned_LastLayer_Avg_{kind}.png", dpi=250, bbox_inches='tight')
+            plt.close(fig)
+
+
     # -------- per-dataset 시각화(기존) --------
+        # -------- per-dataset 시각화(기존 + label conditioned) --------
     def visualize_dataset(self, dataset_name: str, role: str, out_root: Path, max_samples=2):
         loader = self._make_loader(dataset_name)
         base = out_root / role / dataset_name
         ensure_dir(base)
-        count = 0
 
-        # === 전체 샘플 누적용 리스트 ===
-        all_shared_ATTs = []   # [num_samples, num_layers, num_heads, T, T]
-        all_basis_ATTs  = []   # [num_samples, num_layers, num_heads, T, T]
+        # === Label-conditioned용 폴더 ===
+        label_conditioned_dir = base / "Label_conditioned"
+        ensure_dir(label_conditioned_dir)
+
+        # === 누적용 ===
+        label_dict = {0: {"shared": [], "basis": []}, 1: {"shared": [], "basis": []}}
         feat_names_ref = None
 
-        for batch in loader:
+        for count, batch in enumerate(loader):
             Ms, ATTs, ADJs, var_names, Shared_ATTs, Shared_ADJs = self._forward_collect(batch)
+            label = int(batch["y"].item()) if "y" in batch else -1
+
+            # --- 기존 sample 폴더 ---
             sample_dir = base / f"sample_{count}"
             ensure_dir(sample_dir)
 
-            # --- per-sample 저장 (기존) ---
+            # --- Label_conditioned/sample 폴더 ---
+            sample_dir_label = label_conditioned_dir / f"sample_{count}"
+            ensure_dir(sample_dir_label)
+
+            # ===== Basis Attention heatmap =====
             grid_M = [Ms[l*self.num_heads + h] for l in range(self.num_layers) for h in range(self.num_heads)]
             self._grid_plot(
                 grid_M, var_names,
-                f"{role.capitalize()} • {dataset_name} • Sample {count} • Basis Attention (Var-Var)",
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • Basis Attention",
                 sample_dir / "Basis_Attention_grid.png"
             )
+            self._grid_plot(
+                grid_M, var_names,
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • Basis Attention",
+                sample_dir_label / "Basis_Attention_grid.png"
+            )
 
+            # ===== SharedGAT Attention heatmap =====
             names_all = ["CLS"] + var_names
             grid_shared = []
             for l in range(len(Shared_ATTs)):
-                att = Shared_ATTs[l]
                 for h in range(self.num_heads):
-                    grid_shared.append(att[h])
+                    grid_shared.append(Shared_ATTs[l][h])
+
             self._grid_plot(
                 grid_shared, names_all,
                 f"{role.capitalize()} • {dataset_name} • Sample {count} • SharedGAT Attention",
                 sample_dir / "SharedGAT_Attn_grid.png"
             )
+            self._grid_plot(
+                grid_shared, names_all,
+                f"{role.capitalize()} • {dataset_name} • Sample {count} • SharedGAT Attention",
+                sample_dir_label / "SharedGAT_Attn_grid.png"
+            )
 
-            # --- 누적 ---
-            all_shared_ATTs.append(np.stack(Shared_ATTs, axis=0))  # [L,H,T,T]
-            all_basis_ATTs.append(np.stack(ATTs, axis=0))          # [L,H,T,T]
+            # --- label-conditioned 평균 누적 ---
+            if label in label_dict:
+                label_dict[label]["shared"].append(np.stack(Shared_ATTs, axis=0))
+                label_dict[label]["basis"].append(np.stack(ATTs, axis=0))
+
             feat_names_ref = var_names
-
-            count += 1
             if count >= max_samples:
                 break
 
-        # === 모든 샘플 평균 heatmap ===
-        if count > 0:
-            avg_dir = base / "average"
-            self.visualize_average_heads(all_shared_ATTs, all_basis_ATTs, feat_names_ref, avg_dir)
+        # === label-conditioned 평균 (한 장으로 합침) ===
+        if len(label_dict[0]["shared"]) > 0 and len(label_dict[1]["shared"]) > 0:
+            self.visualize_label_conditioned_heads(
+                label_dict[0]["shared"], label_dict[0]["basis"],
+                label_dict[1]["shared"], label_dict[1]["basis"],
+                feat_names_ref, label_conditioned_dir
+            )
+
 
 
 # ---------------- main ----------------
