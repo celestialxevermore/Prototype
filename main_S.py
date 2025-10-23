@@ -53,11 +53,11 @@ def get_args():
     parser.add_argument('--k_basis', type=int, default=8)
     parser.add_argument('--model', type=str, default='NORM_GNN')
     parser.add_argument('--source_data', nargs='+',
-                        default=['heart_target_1', 'heart_target_2', 'heart_target_3', 'heart_target_4'],
+                        default=['Heart_disease_statlog', 'Cardiovascular_Disease_Dataset', 'heart_target_3', 'heart_target_4'],
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
                                  'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
-                                 'forest_covertype_sampled','higgs_sampled'])
+                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -151,7 +151,7 @@ def get_args():
     parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
 
     # 재샘플링(한 seed 내에서 support set 여러 번 뽑아 평균)
-    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,
