@@ -188,6 +188,17 @@ class Model(nn.Module):
                 coord_reg = F.kl_div(recon_logprob, c_safe, reduction='batchmean')
                 loss = loss + lam * coord_reg
                 self._last_assign_q = assign_q.detach()
+        
+        # ---- Diversifying Loss (P-Space Coordinate Constraint) ----
+        if hasattr(self, "_last_coordinates"):
+            coordinates = self._last_coordinates
+            labels = y.to(self.device)
+            distance = (coordinates.unsqueeze(1) - coordinates.unsqueeze(0)).abs().sum(dim=2)
+            label_similarity = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()
+            positive_mask = label_similarity
+            div_loss = torch.sum(distance * positive_mask) / (torch.sum(distance) + 1e-8)
+            loss = loss + 0.3 * div_loss
+        
         # ---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
         if hasattr(self, "_last_P_basis"):
             A = self._last_P_basis  # [B, H, S, S]

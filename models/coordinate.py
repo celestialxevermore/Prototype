@@ -17,9 +17,10 @@ class CoordinatorMLP(nn.Module):
         self.dropout = dropout
         self.temperature = float(temperature)
 
-        # 경로/인덱스 유지: 0:Linear, 1:LayerNorm, 2:ReLU, 3:Dropout, 4:Linear
+        # desc + nv 결합 후 projection
+        concat_dim = self.input_dim * 2  # [cls, desc, nv]
         self.coordinate_mlp = nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.Linear(concat_dim, self.hidden_dim),
             nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout),
@@ -34,6 +35,15 @@ class CoordinatorMLP(nn.Module):
                 if m.bias is not None:
                     nn_init.zeros_(m.bias)
 
-    def forward(self, cls_emb: torch.Tensor) -> torch.Tensor:
-        logits = self.coordinate_mlp(cls_emb)                # [B, K]
+    def forward(self, desc: torch.Tensor, nv: torch.Tensor) -> torch.Tensor:
+        """
+        cls_emb: [B, D]
+        desc:    [B, S, D]
+        nv:      [B, S, D]
+        """
+        # desc와 nv의 평균을 사용하여 요약 (feature-wise mean pooling)
+        # CLS, desc_mean, nv_mean 결합
+        fused = torch.cat([desc, nv], dim=-1)  # [B, 3D]
+
+        logits = self.coordinate_mlp(fused)  # [B, K]
         return F.softmax(logits / max(self.temperature, 1e-6), dim=-1)
