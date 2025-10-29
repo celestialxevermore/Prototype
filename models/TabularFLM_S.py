@@ -198,7 +198,6 @@ class Model(nn.Module):
             mean_dist = (2 * torch.triu(avg_dists, diagonal=1).sum(dim=(1, 2)) / (H * (H - 1))).mean()
             dis_loss = F.relu(2 - mean_dist)
             loss = loss + 0.3 * dis_loss
-        #     self._last_dis_loss = dis_loss.detach()
         return loss
 
 
@@ -254,100 +253,3 @@ class Model(nn.Module):
             pred = pred + self.thead(cls_for_coord)
 
         return pred
-
-    
-    def set_attention_save_dir(self, experiment_id, mode):
-        base_viz_dir = f"/storage/personal/eungyeop/experiments/visualization/{self.args.llm_model}/{self.args.source_data}/{mode}/{experiment_id}"
-        self.attention_save_dir = os.path.join(base_viz_dir, 'attention_maps')
-        os.makedirs(self.attention_save_dir, exist_ok=True)
-        logger.info(f"Attention maps will be saved to: {self.attention_save_dir}")
-
-    def extract_feature_names(self, batch):
-        feature_names = []
-        if 'cat_desc_texts' in batch:
-            for feature in batch['cat_desc_texts']:
-                if isinstance(feature, tuple):
-                    clean_name = str(feature[0])
-                else:
-                    try:
-                        clean_name = feature.split("'")[1] if "'" in feature else feature
-                        clean_name = clean_name.split(',')[0]
-                    except:
-                        clean_name = str(feature)
-                feature_names.append(clean_name)
-        if 'num_desc_texts' in batch:
-            for feature in batch['num_desc_texts']:
-                if isinstance(feature, tuple):
-                    clean_name = str(feature[0])
-                else:
-                    try:
-                        clean_name = feature.split("'")[1] if "'" in feature else feature
-                        clean_name = clean_name.split(',')[0]
-                    except:
-                        clean_name = str(feature)
-                feature_names.append(clean_name)
-        seen = set()
-        unique_features = []
-        for feat in feature_names:
-            if feat not in seen:
-                seen.add(feat)
-                unique_features.append(feat)
-        return unique_features
-
-    def save_attention_maps_to_file(self, attention_weights, batch, labels=None, sample_ids=None):
-        if not hasattr(self, 'attention_save_dir') or self.attention_save_dir is None:
-            logger.warning("Attention save directory not set. Skipping attention map saving.")
-            return
-        feature_names = self.extract_feature_names(batch)
-        all_node_names = ["CLS"] + feature_names
-        for layer_idx, layer_attention in enumerate(attention_weights):
-            batch_size = layer_attention.shape[0]
-            for batch_idx in range(batch_size):
-                attention_map = layer_attention[batch_idx].mean(dim=0)
-                attention_numpy = attention_map.detach().cpu().numpy()
-                sample_id = sample_ids[batch_idx] if sample_ids is not None else self.attention_counter
-                label = labels[batch_idx].item() if labels is not None else "unknown"
-                filename = f"layer_{layer_idx}_sample_{sample_id}_label_{label}.npz"
-                filepath = os.path.join(self.attention_save_dir, filename)
-                np.savez(filepath,
-                         attention_map=attention_numpy,
-                         feature_names=np.array(all_node_names),
-                         layer_idx=layer_idx,
-                         sample_id=sample_id,
-                         label=label)
-                self.attention_counter += 1
-        logger.info(f"Attention maps saved for {batch_size} samples across {len(attention_weights)} layers to {self.attention_save_dir}")
-
-    def remove_feature(self, batch, desc_embeddings, name_value_embeddings):
-        removed = getattr(self.args, 'del_feat', [])
-        if not removed:
-            return desc_embeddings, name_value_embeddings
-        removed_set = set(removed)
-        filtered_desc_embeddings = []
-        filtered_name_value_embeddings = []
-
-        if 'cat_desc_texts' in batch:
-            cat_feature_names = [feature_tuple[0] if isinstance(feature_tuple, tuple) else str(feature_tuple)
-                                 for feature_tuple in batch['cat_desc_texts']]
-            keep_indices = [i for i, name in enumerate(cat_feature_names) if name not in removed_set]
-            if len(keep_indices) != len(cat_feature_names):
-                batch['cat_desc_texts'] = [batch['cat_desc_texts'][i] for i in keep_indices]
-                batch['cat_desc_embeddings'] = batch['cat_desc_embeddings'][:, keep_indices, :]
-                batch['cat_name_value_embeddings'] = batch['cat_name_value_embeddings'][:, keep_indices, :]
-            if keep_indices:
-                filtered_desc_embeddings.append(batch['cat_desc_embeddings'].to(self.device))
-                filtered_name_value_embeddings.append(batch['cat_name_value_embeddings'].to(self.device))
-
-        if 'num_desc_texts' in batch:
-            num_feature_names = [feature_tuple[0] if isinstance(feature_tuple, tuple) else str(feature_tuple)
-                                 for feature_tuple in batch['num_desc_texts']]
-            keep_indices = [i for i, name in enumerate(num_feature_names) if name not in removed_set]
-            if len(keep_indices) != len(num_feature_names):
-                batch['num_desc_texts'] = [batch['num_desc_texts'][i] for i in keep_indices]
-                batch['num_desc_embeddings'] = batch['num_desc_embeddings'][:, keep_indices, :]
-                batch['num_prompt_embeddings'] = batch['num_prompt_embeddings'][:, keep_indices, :]
-            if keep_indices:
-                filtered_desc_embeddings.append(batch['num_desc_embeddings'].to(self.device))
-                filtered_name_value_embeddings.append(batch['num_prompt_embeddings'].to(self.device))
-
-        return filtered_desc_embeddings, filtered_name_value_embeddings
