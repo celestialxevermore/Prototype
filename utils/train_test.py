@@ -13,16 +13,6 @@ def binary_train(model, train_loader, criterion, optimizer, device):
         loss = model(batch, batch['y'])
         #output = model(data.x, data.edge_index, data.edge_attr, data.batch)
         loss.backward()
-        # u_params = [p for n,p in model.basis_affinity.named_parameters()
-        #     if ('U_param' in n) and (p.grad is not None)]
-        # if u_params:
-        #     import torch
-        #     g_norm = torch.linalg.vector_norm(
-        #         torch.cat([p.grad.reshape(-1) for p in u_params])
-        #     ).item()
-        # else:
-        #     g_norm = 0.0
-        # print(f"[grad] ||dL/dU_param|| = {g_norm:.3e}")
         optimizer.step()
         total_loss += loss.item() * len(batch['y'])
         #print(f"Step [{step+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
@@ -44,8 +34,6 @@ def binary_evaluate(model, loader, criterion, device):
             
             y_true.extend(batch['y'].cpu().numpy())
             y_pred.extend(torch.sigmoid(pred).cpu().numpy())
-            
-            #print(f"Current batch - y_true: {len(y_true)}, y_pred: {len(y_pred)}")
     
     test_loss /= len(loader.dataset)
     return test_loss, np.array(y_true), np.array(y_pred)

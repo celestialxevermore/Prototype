@@ -41,7 +41,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         self.label_embedding = self._transform_label()
         self.n_components = args.input_dim
         n_jobs: int = 1
-        
+
         # 컬럼 정보를 저장할 변수들 초기화
         self.cat_col_names = None
         self.num_col_names = None
@@ -383,6 +383,7 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         cat_name_embeddings = torch.stack(cat_name_embeddings, dim= 0)
         cat_desc_embeddings = torch.stack(cat_desc_embeddings, dim= 0)
         cat_value_embeddings = torch.stack(cat_value_embeddings, dim = 0)
+
         return cat_name_embeddings, cat_desc_embeddings, cat_value_embeddings, cat_desc_texts 
 
     def _transform_num(self, data_num, num_name_to_description):
@@ -498,8 +499,9 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     따라서, 기본 형태에서는 반드시 --use_desc_attr를 써야 한다. 
                 '''
                 data.update({
-                    'cat_name_value_embeddings' : cat_value_embeddings,
-                    'cat_desc_embeddings' : cat_name_embeddings,
+                    'cat_name_embeddings' : cat_name_embeddings,
+                    'cat_value_embeddings' : cat_value_embeddings,
+                    'cat_desc_embeddings' : cat_desc_embeddings,
                     'cat_desc_texts' : cat_desc_texts 
                 })
         if len(X_numerical.columns) > 0: 
@@ -521,8 +523,9 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 
                 data.update({
                     'num_prompt_embeddings': num_prompt_embeddings,  # 수치값 × name embedding
-                    'num_desc_embeddings': num_name_embeddings,     # description embedding (edge attribute용)
+                    'num_name_embeddings': num_name_embeddings,     # description embedding (edge attribute용)
+                    'num_desc_embeddings' : num_desc_embeddings,
                     'num_desc_texts': num_desc_texts
                 })
-        #pdb.set_trace()
+        pdb.set_trace()
         return data

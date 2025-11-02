@@ -34,7 +34,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="4"
+#os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -47,11 +47,7 @@ def get_args():
     parser.add_argument('--input_dim', type=int, default=768)
     parser.add_argument('--hidden_dim', type=int, default=192)
     parser.add_argument('--output_dim', type=int, default=1)
-    parser.add_argument('--num_shared_layers', type=int, default=2)
     parser.add_argument('--dropout_rate', type=float, default=0.1)
-    parser.add_argument('--n_heads', type=int, default=6)
-    parser.add_argument('--k_basis', type=int, default=8)
-    parser.add_argument('--model', type=str, default='NORM_GNN')
     parser.add_argument('--source_data', nargs='+',
                         default=['Heart_disease_statlog', 'Cardiovascular_Disease_Dataset', 'heart_target_3', 'heart_target_4'],
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
@@ -72,87 +68,40 @@ def get_args():
     parser.add_argument('--baseline', nargs='*', default=[], choices=['Logistic_Regression', 'XGBoost'],
                         help='List of baselines to use. Leave empty to use only our model.')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")
-    parser.add_argument('--model_type', type=str, default='TabularFLM',
-                        choices=['NORM_GNN','GAT_edge','GAT_edge_2','GAT_edge_3','GAT_edge_4','GAT_edge_5','TabularFLM'])
-    parser.add_argument('--label', type=str, choices=['add','no'], default='add')
-    parser.add_argument('--enc_type', type=str, choices=['ind','shared'], default='ind')
-    parser.add_argument('--meta_type', type=str, choices=['meta_attn','meta_mlp'], default='meta_attn')
-    parser.add_argument('--aggr_type', type=str, choices=['flatten','mean','attn'], default='attn')
-    parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
-    parser.add_argument('--threshold', type=float, default=0.5)
-    parser.add_argument('--frozen', type=bool, default=False)
-    parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
-    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2'])
-    parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
     parser.add_argument('--del_feat', nargs='+', default=[],
                         help='Features to remove from the model. Usage: --del_feat feature1 feature2 feature3')
     parser.add_argument('--del_exp', default="You did not entered the exp type", choices=['exp1','exp2','exp3','exp4','exp5'])
     parser.add_argument('--no_self_loop', action='store_true', help="activate the self loop of the Graph attention network")
-    parser.add_argument('--viz_heatmap', action='store_true', help='Visualize heatmap')
-    parser.add_argument('--viz_graph', action='store_true', help='Visualize graph')
     parser.add_argument('--use_target_head', type=bool, default=False)
-    parser.add_argument('--sim_threshold', type=float, default=0.5, help='Subgraph attention similarity threshold')
-
-    # coord_kmeans
+    # MODELS : coord_kmeans
     parser.add_argument('--coord_softmax_temp', type=float, default=0.5, help='Coordinator softmax temperature (lower = sharper).')
     parser.add_argument('--coord_reg_lambda', type=float, default=0.2, help='Weight of KL(coord) regularizer during Few-shot.')
     parser.add_argument('--coord_target_mode', type=str, default='soft', choices=['soft', 'hard'], help='Centroid target mode for coordinate regularization.')
     parser.add_argument('--coord_tau', type=float, default=0.3,help='Temperature for soft centroid mixing (soft target).')
+    # MODELS : latent Composite Graph specs
+    '''
+        Latent Composite Graph Configuration
+    '''
+    parser.add_argument("--n_graphs", type=int, default=8, help="Global slot space number M")
+    parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
+    parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
+    parser.add_argument('--fgw_alpha', type = float, default =0.5)
+    parser.add_argument('--vq_beta', type = float, default = 0.3)
+    parser.add_argument('--diversifying_loss', action='store_true')
+    '''
+        Basis GAT Configuration
+    '''
+    parser.add_argument('--num_shared_layers', type=int, default=2, help = "Number of SharedGAT layers")
+    parser.add_argument('--num_basis_heads', type=int, default=6, help = "Number of BasisGAT Heads")
+    parser.add_argument('--num_basis_layers', type=int, default=2, help= 'Number of stacked BasisGAT layers.')
+    parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
+    parser.add_argument('--threshold', type=float, default=0.5)
+    parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
+    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2'])
+    parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
 
-
-    # booleans는 store_true / store_false로
-    parser.add_argument('--slot_g_diag_zero', dest='slot_g_diag_zero', action='store_true')
-    parser.add_argument('--no-slot_g_diag_zero', dest='slot_g_diag_zero', action='store_false')
-    #parser.set_defaults(slot_g_diag_zero=True)
-
-    parser.add_argument('--slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_true')
-    parser.add_argument('--no-slot_g_sinkhorn', dest='slot_g_sinkhorn', action='store_false')
-    parser.set_defaults(slot_g_sinkhorn=True)
-
-    parser.add_argument('--slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_true')
-    parser.add_argument('--no-slot_kernel_row_stoch', dest='slot_kernel_row_stoch', action='store_false')
-    parser.set_defaults(slot_kernel_row_stoch=False)
-
-    # kernel 전용
-    parser.add_argument('--slot_kernel_rank', type=int, default=512)  # None이면 K로 세팅
-    parser.add_argument('--slot_laplacian_lambda', type=float, default=0.0)
-    parser.add_argument("--n_slots", type=int, default=8, help="Global slot space number M")
-    parser.add_argument("--slot_dim", type=int, default=16, help="Global slot space latent dimension K")
-        # 스칼라/온도/정규화 계수
-    parser.add_argument('--slot_g_temp', type=float, default=1.0)
-    parser.add_argument('--slot_g_sparse_l1', type=float, default=0.0)
-    parser.add_argument('--slot_g_ent_lambda', type=float, default=0.0)
-        # BasisGAT
-    # BasisGAT 스택 관련
-    parser.add_argument('--num_basis_layers', type=int, default=2, help='Number of stacked BasisGAT layers.')
-    parser.add_argument('--slot_orth_lambda',type=float, default = 0.1)
-    parser.add_argument('--slot_usage_lambda',type=float , default = 0.1)
-    parser.add_argument('--slot_g_mode', type=str, default='gw', choices=['markov','kernel','gw'])
-    parser.add_argument('--g_frob_div_lambda', type=float, default=0.15)   # ✅ 추천: 0.01~0.02
-    parser.add_argument('--gw_eps', type=float, default = 0.08)
-    parser.add_argument("--gw_sigma", type = float, default = 1.2)
-    parser.add_argument("--alpha_scale", type = float, default = 1.0)
-    parser.add_argument("--gw_outer_iters", type=int, default=10)
-    parser.add_argument("--gw_sinkhorn_iters", type=int, default=30)
-    parser.add_argument("--gw_sinkhorn_eps", type=float, default=1e-6)
-    # temperatures
-    parser.add_argument('--slot_aff_temp', type=float, default=0.5)   # P의 softmax 온도(Attention)
-    parser.add_argument('--slot_graph_temp', type=float, default=0.5) # Q의 softmax 온도
-
-    # Sinkhorn 세부
-    parser.add_argument('--slot_g_sinkhorn_iters', type=int, default=20)
-    parser.add_argument('--slot_g_sinkhorn_eps', type=float, default=1e-6)
-
-    # 관계 마스크 스코어러
-    parser.add_argument('--relation_scorer_type', type=str, default='slot', choices=['pair_mlp', 'query'],help='How to build per-head Var-Var mask M: pairwise MLP or relation queries.')
-    parser.add_argument('--rel_input_dim', type=int, default=512,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
-    parser.add_argument('--rel_hidden_dim', type=int, default=256,help='Hidden size for relation scorer MLP. If -1, set to max(64, input_dim//2).')
-
-    # 마스크를 로짓에 더할 때 세기(γ)
-    parser.add_argument('--affinity_gate_gamma', type=float, default=2.0,help='Strength of pre-softmax logit bias from mask M.')
-
-    # 재샘플링(한 seed 내에서 support set 여러 번 뽑아 평균)
-    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
+    # Experiments Resampling
+    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,
@@ -264,7 +213,7 @@ def init_kmeans_centroids_from_sources(args, model, device):
     src_train_loaders = [load_one(args, s)[0] for s in src_names]  # [train_loader_i, ...]
 
     # k를 고정하려면 k_min=k_max=K
-    K = max(2, int(args.k_basis))
+    K = max(2, int(args.num_basis_heads))
     centroids, best_k, _scores = compute_coordinate_centroids_auto(
         model, src_train_loaders, device,
         k_min=K, k_max=K,         # 고정
@@ -311,7 +260,18 @@ def train_and_validate(args, model, train_loader, val_loader,
     # 경로용 태그(리스트 방어)
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
 
-    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_num_shared_layers_{args.num_shared_layers}_num_basis_layers_{args.num_basis_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}"
+    model_sig = (
+        f"ngraphs-{args.n_graphs}"
+        f"_nnodes-{args.n_nodes}"
+        f"_gdim-{args.graph_dim}"
+        f"_nheads-{args.num_basis_heads}"
+        f"_nbasis-{args.num_basis_layers}"
+        f"_basis-{args.basis_type}"
+        f"_attn-{args.attn_type}"
+        f"_fgw_alpha-{args.fgw_alpha}"
+        f"_vq_beta-{args.vq_beta}"
+        f"_description-{args.des}"
+    )
     checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -493,7 +453,18 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
 
     # === 체크포인트 디렉토리 & 파일명 (고정 이름 + 히스토리) ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_num_shared_layers_{args.num_shared_layers}_num_basis_layers_{args.num_basis_layers}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}"
+    model_sig = (
+        f"ngraphs-{args.n_graphs}"
+        f"_nnodes-{args.n_nodes}"
+        f"_gdim-{args.graph_dim}"
+        f"_nheads-{args.num_basis_heads}"
+        f"_nbasis-{args.num_basis_layers}"
+        f"_basis-{args.basis_type}"
+        f"_attn-{args.attn_type}"
+        f"_fgw_alpha-{args.fgw_alpha}"
+        f"_vq_beta-{args.vq_beta}"
+        f"_description-{args.des}"
+    )
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     os.makedirs(ckpt_dir, exist_ok=True)
     ckpt_latest = os.path.join(ckpt_dir, "best.pt")  # ← 고정 이름(재사용용)
@@ -740,8 +711,19 @@ def main():
 
     # 2) 프리트레인 체크포인트 로드 시도 (고정 best.pt 우선, 없으면 최신 best_*.pt)
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = f"{args.model_type}_attn-{args.attn_type}_num_basis_{args.num_basis_layers}_rel_id_{args.rel_input_dim}_rel_hd_{args.rel_hidden_dim}_scorer_{args.relation_scorer_type}_no_self_loop_{args.no_self_loop}"
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints__/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
+    model_sig = (
+        f"ngraphs-{args.n_graphs}"
+        f"_nnodes-{args.n_nodes}"
+        f"_gdim-{args.graph_dim}"
+        f"_nheads-{args.num_basis_heads}"
+        f"_nbasis-{args.num_basis_layers}"
+        f"_basis-{args.basis_type}"
+        f"_attn-{args.attn_type}"
+        f"_fgw_alpha-{args.fgw_alpha}"
+        f"_vq_beta-{args.vq_beta}"
+        f"_description-{args.des}"
+    )
+    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
 
     loaded_pretrain = False
     full_metrics = None
@@ -859,7 +841,7 @@ def main():
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
         ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+                               optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
         # ---- 테스트 ----
         (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,

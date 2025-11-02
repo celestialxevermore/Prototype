@@ -187,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument('--llm_model', type = str, default='gpt2_mean', choices=['gpt2_mean','gpt2_auto','sentence-bert', 'bio-bert', 'bio-clinical-bert', 'LLAMA_mean', 'LLAMA_auto'],
                         help='Name of the language model to use')
     parser.add_argument('--embed_type', default = 'carte', choices = ['carte', 'carte_desc','ours','ours2'])
+    parser.add_argument('--dataset', type = str, required=True, help = "Dataset name to process (e.g., heart_disease..)")
     args = parser.parse_args()
     
     # 재현성을 위한 설정
@@ -204,35 +205,36 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.random_seed)
         torch.cuda.manual_seed_all(args.random_seed)
     
+    ''' 
+        1. heart (yes encoding)
+        2. heart_target_1 (No encoding)
+        3. heart_target_2 (No encoding)
+        4. heart_target_3 (yes encoding)
+        5. heart_target_4 (yes encoding)
+        6. Cardiovasular_Disease_Dataset (yes encoding)
+        7. heart_disease (yes encoding)
+        8. Heart_disease_statlog (yes encoding)
+        9. Medicaldataset (yes encoding)
+    '''
+
+
     converter = TabularToEmbeddingDataset(args)
-    datasets_to_process = [
-        #'blood',
-        #'cleveland'
-        #'credit-g',
-        #"communities",
-        #"forest_covertype_sampled",
-        #'magic_telescope',
-        #'higgs_sampled',
-        #'car',
-        #'bank',
-        #"breast"
-        #"heart",
-        #"heart_target_1",
-        #"heart_target_2",
-        #"heart_target_3",
-        #"heart_target_4",
-        #"diabetes",
-        #"adult"
-        #'hungarian',
-        #"Cardiovascular_Disease_Dataset",
-        "heart_disease",
-        #"cleveland",
-        #"Heart_disease_statlog"
-        #"Medicaldataset"
-        #'heart_statlog',
-        #"heart1"
-    ]
+    converter.convert_to_embedding(data_name = args.dataset)
     
-    for dataset_name in datasets_to_process:
-        print(f"\nProcessing {dataset_name}")
-        converter.convert_to_embedding(data_name=dataset_name)
+    # datasets_to_process = [
+    #     #"heart",
+    #     #"heart_target_1",
+    #     #"heart_target_2",
+    #     #"heart_target_3",
+    #     #"heart_target_4",
+    #     #"diabetes",
+    #     #"Cardiovascular_Disease_Dataset",
+    #     "heart_disease",
+    #     #"Heart_disease_statlog"
+    #     #"Medicaldataset"
+    #     #'heart_statlog',
+    # ]
+    
+    # for dataset_name in datasets_to_process:
+    #     print(f"\nProcessing {dataset_name}")
+    #     converter.convert_to_embedding(data_name=dataset_name)

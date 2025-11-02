@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import torch.nn.init as nn_init 
 import math 
-
+import pdb
 class FGWUtils:
     """ 
         Differentiable Fused Gromov-Wasserstein utilities.
@@ -31,64 +31,122 @@ class FGWUtils:
 
             KTu = torch.einsum("bhmnk,bhmn->bhmk", Kmat, u) + tolerance 
             v = b.unsqueeze(1) / KTu 
-        Pi = (u.unsqueeze(-1) * Kmat) * v.unsqueeze(-2) # Transport Plan Heed H x Latent composite M 
+        Pi = (u.unsqueeze(-1) * Kmat) * v.unsqueeze(-2) # Transport Plan Head H x Latent composite M 
         return Pi
+
     @staticmethod 
-    def _Gromov_Wasserstein_cost(Dx : torch.Tensor, Dy : torch.Tensor, Pi : torch.Tensor) -> torch.Tensor:
-        Dx2, Dy2 = Dx ** 2, Dy ** 2 
-        # (1) sum over K dimension -> mass_j : [B, H, M, N]
-        mass_j = Pi.sum(dim=-1)
-        term1 = torch.einsum("bhnj,bhmj,bhmn", Dx2, mass_j).unsqueeze(-1)
+    def _pairwise_feature_cost(Fx, Fy):
+        """
+            Fx : [B, H, N, D]
+            Fy : [M, K, D]
+            Return : C_feat [B, H, M, N, K]
+        """
+        if Fy.dim() == 3 : # global dictionary (assign)
+            B, H, N, D = Fx.shape
+            M, K, _ = Fy.shape
+            # Broadcast feature tensors 
+            Fx_ = Fx.unsqueeze(2).unsqueeze(-2) #[B, H, 1, N, 1, D]
+            Fy_ = Fy.unsqueeze(0).unsqueeze(0).unsqueeze(3) # [1, 1, M, 1, K, D]
+            return ((Fx_ - Fy_) ** 2).sum(dim=-1) #[B, H, M, N, K]
+        else: # [B, H, K ,D] (reconstruct)
+            B, H, N, D = Fx.shape
+            _, _, K, _ = Fy.shape 
+            Fx_ = Fx.unsqueeze(-2) # [B, H, N, 1, D]
+            Fy_ = Fy.unsqueeze(2) # [B, H, 1, K ,D]
+            return ((Fx_ - Fy_) ** 2).sum(-1) # [B, H, N, K]
 
-        # (2) sum over N dimension -> mass_l : [B, H, M, K]
-        mass_l = Pi.sum(dim=-2)
-        term2 = torch.einsum("bmkl,bhml->bhmk", Dy2, mass_l).unsqueeze(-2)
-
-        # (3) cross term 
-        cross = torch.einsum("bhij,bmkl,bhmjl->bhmik", Dx, Dy, Pi)
-        C = term1 + term2 - 2.0 * cross 
-        return C.clamp_min(0.0)
     @staticmethod 
-    def _fused_Gromov_Wasserstein(Fx : torch.Tensor, Fy: torch.Tensor, Dx: torch.Tensor, Dy: torch.Tensor, a : torch.Tensor, b : torch.Tensor, alpha : float = 0.5, eps : float = 0.05, sinkhorn_iters : int = 20):
+    def _Gromov_Wasserstein_cost(Dx, Dy, Pi):
         """
-            Fx : [B, H, N, D] Source node features 
-            Fy : [M, K, D] Latent composite node embeddings 
-            Dx : [B, H, N, N] Source structure distances
-            Dy : [M, K, K] Target (latent composite) structure distances
-            a : [B, H, S] Source marginal distribution 
-            b : [B, M, K] Target marginal distribution 
+        Dx : [B, H, N, N]
+        Dy : [M, K, K] (assign) or [B, H, K, K]
+        Pi : [B, H, M, N, K] (assign - current transport plan) or [B, H, N, K] (reconstruct - current transport plan)
+        Returns:
+            C_gw : [B, H, M, N, K]
         """
-        # (1) Feature-level cost 
-        C_feat = torch.cdist(Fx.unsqueeze(2), Fy.unsqueeze(0).unsqueeze(0), p=2) ** 2 # [B, H, M, N, K]
-
-        # (2) Initial Transport Plan Pi 
-        Pi_init = torch.ones_like(C_feat) / (C_feat.size(-2) * C_feat.size(-1))
-
-        # (3) Gromov Wasserstein structure term 
-        C_gw = LatentCompositeGraph._Gromov_Wasserstein_cost(Dx, Dy, Pi_init)
-        
-        # (4) Fused cost
-        C_fused = (1 - alpha) * C_feat + alpha * C_gw 
-        return C_fused 
+        if Dy.dim() == 3: # (assign)
+            B, H, M, N, K = Pi.shape 
+            Dx_ = Dx.unsqueeze(2).unsqueeze(-1).unsqueeze(-1) # [B, H, 1, N, N, 1, 1]
+            Dy_ = Dy.unsqueeze(0).unsqueeze(0).unsqueeze(3).unsqueeze(3) # [1, 1, M, 1, 1, K, K]
+            diff2 = (Dx_ - Dy_) ** 2 
+            return torch.einsum("bhmnNkK,bhmnK->bhmnK", diff2, Pi)
+        else: # (reconstruct)
+            B, H, N, K = Pi.shape 
+            Dx_ = Dx.unsqueeze(-1).unsqueeze(-1) # [B, H, N, N, 1, 1]
+            Dy_ = Dy.unsqueeze(2).unsqueeze(2) # [B, H, 1, 1, K, K]
+            diff2 = (Dx_ - Dy_) ** 2 
+            return torch.einsum("bhnNkK,bhnK->bhnK", diff2, Pi)
+    
+    # ---- 1. assign (no_grad) ---- 
     @staticmethod 
-    def entropic_FGW(Fx, Fy, Dx, Dy, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30):
+    def assign_FGW(Fx, Fy, Dx, Dy, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30):
         """
-            Iteratively refine the Fused Gromov Wasserstein Transport Plan 
-            Returns:
-                Pi : optimal Transport Plan
-                loss_values : scalar FGW discrepancies
+            assign phase : Select the nearest latent composite graph on each (B, H)
+            Fx : [B, H, N, D]
+            Fy : [M, K, D]
+            Dx : [B, H, N, N]
+            Dy : [M, K, K]
+            Return : 
+            fgw_values : [B, H, M]
+            Pi : [B, H, M, N, K]
         """
-        Pi = torch.einsum("bhn, bmk->bhmnk",a,b)
+        with torch.no_grad():
+            Pi = torch.einsum("bhn,bmk->bhmnk",a,b)
+            for _ in range(outer_iters):
+                C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy)
+                C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy, Pi)
+                C = (1 - alpha) * C_feat + alpha * C_gw 
+                Pi = FGWUtils._sinkhorn_ot(a, b, C, eps = eps, iters = sinkhorn_iters)
+            fgw_values = (C * Pi).sum((-2, -1))
+        return Pi, fgw_values
+    # ---- 2. reconstruct (grad_on) ---- 
+    @staticmethod 
+    def reconstruct_FGW(Fx, Fy_sel, Dx, Dy_sel, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30):
+        """
+            reconstruction phase : update assigned latent composite graphs on node-level
+            Fx : [B, H, N, D]
+            Fy_sel : [B, H, K, D]
+            Dx : [B, H, N, N]
+            Dy_sel : [B, H, K, K]
+            Return : 
+                Fy_res : [B, H, K, D] : (updated latent composite graph node embeddings)
+                Dy_res : [D, H, K, K] : (updated latent composite graph affinity matrices)
+                fgw_loss : scalar
+        """
+        Pi = torch.einsum("bhn,bhk->bhnk", a, b)
         for _ in range(outer_iters):
-            C = FGWUtils._fused_Gromov_Wasserstein(Fx, Fy, Dx, Dy, a, b, alpha, eps)
-            Pi = FGWUtils._sinkhorn_ot(a, b, C, eps = eps, iters= sinkhorn_iters)
-        fgw_values = (C * Pi).sum(dim=[-2, -1])
-        return Pi, fgw_values 
+            C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy_sel)
+            C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy_sel, Pi)
+            C = (1 - alpha) * C_feat + alpha * C_gw 
+            Pi = FGWUtils._sinkhorn_ot(a, b, C.unsqueeze(2), eps = eps, iters = sinkhorn_iters)[:, :, 0]
+        # residual update 
+        Fy_res = Fy_sel #+ torch.einsum("bhnk,bhnd->bhkd",Pi,Fx)
+        Dy_res = LatentCompositeGraph.cosine_slot_cost_from_U(Fy_res)
+        fgw_loss = (C * Pi).sum((-2, -1)).mean() 
+        return Fy_res, Dy_res, fgw_loss 
 
 
+    @staticmethod
+    def _fused_Gromov_Wasserstein(Fx, Fy, Dx, Dy, alpha=0.5):
+        """
+        Compute fused cost C_fused = (1 - α)*C_feat + α*C_gw
+        Fx: [B, H, N, D]
+        Fy: [M, K, D]
+        Dx: [B, H, N, N]
+        Dy: [M, K, K]
+        Return: C_fused [B, H, M, N, K]
+        """
+        # 1. Feature-level cost
+        C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy)
+        # 2. Uniform initial Pi
+        Pi_init = torch.ones_like(C_feat) / (C_feat.size(-2) * C_feat.size(-1))
+        # 3. Structure-level cost
+        C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy, Pi_init)
+        # 4. Combine
+        C_fused = (1 - alpha) * C_feat + alpha * C_gw
+        return C_fused 
 
-
-class LatentCompositeGraph(nn.Modlue):
+class LatentCompositeGraph(nn.Module):
     """
         Learnable dictionary of latent composite graphs. 
         - Stores M latent graphs, each with K nodes and D-dimensional node embeddings. 
@@ -106,11 +164,11 @@ class LatentCompositeGraph(nn.Modlue):
         """
         super().__init__()
         self.args = args 
-        self.D = int(input_dim)
-        self.H = int(args.n_heads)
+        self.H = int(args.num_basis_heads)
         self.M = int(n_graphs)
         self.K = int(n_nodes)
-        self.node_embeddings = nn.Parameter(torch.empty(self.M, self.K, self.input_dim))
+        self.D = self.args.input_dim // self.args.num_basis_heads
+        self.node_embeddings = nn.Parameter(torch.empty(self.M, self.K, self.D))
         nn_init.xavier_uniform_(self.node_embeddings)
 
     @staticmethod 
@@ -150,21 +208,30 @@ class LatentCompositeGraph(nn.Modlue):
         M = (1.0 - cosG).clamp_min(0.0)
         M = M - torch.diag_embed(torch.diagonal(M, dim1=-2, dim2=-1))
         return M 
-    @staticmethod 
-    def cosine_slot_cost_from_U(U: torch.Tensor, eps : float = 1e-8) -> torch.Tensor:
-        """ 
-            Compute cosine-based intra-graph distance matrix for each latent graph.
-
-            Args:
-                U : [M, K, D] M latent node embeddings 
-            Returns:
-            Dy : [M, K, K] cosine distance matrix per graph 
+    @staticmethod
+    def cosine_slot_cost_from_U(U):
         """
-        U_norm = F.normalize(U, p=2, dim=-1, eps = eps)
-        cosine_similarity = torch.einsum("mkr,mjr->mkj", U_norm, U_norm).clamp(-1.0, 1.0)
-        Dy = 0.5 * (1.0 - cosine_similarity) 
-        Dy = Dy - torch.diag_embed(torch.diagonal(Dy, dim1=-2, dim2=-1)).clamp(0.0,1.0)
-        return Dy
+        Compute cosine-based affinity matrix from node embeddings U
+        Supports both:
+            U [M, K, D]  (no batch/head)
+            U [B, H, K, D] (with batch & head)
+        Returns:
+            Dy [M, K, K] or [B, H, K, K]
+        """
+        U_norm = F.normalize(U, p=2, dim=-1)
+
+        if U.dim() == 3:
+            # [M, K, D]
+            cosine_similarity = torch.einsum("mrd,mjd->mrj", U_norm, U_norm)
+        elif U.dim() == 4:
+            # [B, H, K, D]
+            cosine_similarity = torch.einsum("bhkd,bhjd->bhkj", U_norm, U_norm)
+        else:
+            raise ValueError(f"Unexpected input shape for cosine_slot_cost_from_U: {U.shape}")
+
+        # enforce symmetry
+        cosine_similarity = 0.5 * (cosine_similarity + cosine_similarity.transpose(-1, -2))
+        return cosine_similarity.clamp(-1.0, 1.0)
 
     def forward(self):
         """ 
@@ -185,7 +252,7 @@ class GraphQuantizer(nn.Module):
         super().__init__() 
         self.args = args 
         self.alpha = alpha 
-        self.vq_beta = self.vq_beta 
+        self.vq_beta = self.args.vq_beta 
         self.eps = eps 
         self.outer_iters = outer_iters 
         self.sinkhorn_iters = sinkhorn_iters 
@@ -205,6 +272,7 @@ class GraphQuantizer(nn.Module):
         
         # (1) Source graph & affinity
         Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3) #[B, H, N, D/H]
+
         Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
         # (2) Latent composite graph & affinity 
         Fy, Dy = latent_graph()
@@ -215,22 +283,36 @@ class GraphQuantizer(nn.Module):
 
         # ---- Step 1. Fused Gromov-Wasserstein distance computation for selection ---- 
         with torch. no_grad():
-            C_fused = FGWUtils._fused_Gromov_Wasserstein(Fx, Fy, Dx, Dy, a, b, alpha = self.alpha, eps = self.eps)
-            fgw_dist = C_fused.mean(dim=[-1,-2])
-            assign_idx = torch.argmin(fgw_dist, dim=-1)
+            Pi_all, fgw_values = FGWUtils.assign_FGW(
+                Fx, Fy, Dx, Dy, a, b,
+                alpha = self.alpha, eps = self.eps, 
+                outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
+            )
+            assign_idx = torch.argmin(fgw_values, dim=-1)
         
         # ---- Step 2. Gather selected latent graphs ---- 
         Fy_sel = Fy[assign_idx] # [B, H, K, D]
         Dy_sel = Dy[assign_idx] # [B, H, K, K]
+        b_sel = b[torch.arange(B).unsqueeze(1), assign_idx]
+        #Pi_sel = Pi_all[torch.arange(B)[:, None], torch.arange(H)[None, :], assign_idx] # [B,H,N,K]
 
-        # ---- (3) FGW reconstruction update (stop-gradient) ---- 
-        loss_dict = FGWUtils._fused_Gromov_Wasserstein(
-            Fx.detach(), Fy_sel, Dx.detach(), Dy_sel,
-            a, b, alpha = self.alpha, eps = self.eps
-        ).mean() 
-        loss_enc = FGWUtils._fused_Gromov_Wasserstein(
-            Fx, Dy_sel.detach(), Dx, Dy_sel.detach(),
-            a, b, alpha = self.alpha, eps = self.eps 
-        ).mean() 
-        loss_fgw = loss_dict + self.vq_beta * loss_enc 
-        return loss_fgw         
+        # ---- Step 3. FGW-based reconstruction 
+        # (a) dictionary update (encoder frozen)
+        Fy_res, Dy_res, loss_dict = FGWUtils.reconstruct_FGW(
+            Fx.detach(), Fy_sel, Dx.detach(), Dy_sel, a, b_sel, 
+            alpha = self.alpha, eps = self.eps, 
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
+        )
+        # (b) encoder update (dictionary frozen)
+        _, _, loss_enc = FGWUtils.reconstruct_FGW(
+            Fx, Fy_sel.detach(), Dx, Dy_sel.detach(), a, b_sel, 
+            alpha = self.alpha, eps = self.eps, 
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
+        )
+
+        # Affinity to Adjacency 
+        Ay_sel = 1.0 - Dy_sel.clamp(0.0, 1.0)
+
+        # --- Step 5. FGW-VQ loss ---- 
+        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean() 
+        return Fy_res, Ay_sel, fgw_loss

@@ -25,16 +25,16 @@ class BasisGATLayer_MUL(nn.Module):
         basis_outputs: [B, new_seq, n_heads, head_dim]
         attn_weights : [B, n_heads, new_seq, new_seq]
     """
-    def __init__(self, args, input_dim: int, hidden_dim: int, n_heads: int, dropout: float = 0.1):
+    def __init__(self, args, input_dim: int, hidden_dim: int, num_basis_heads: int, dropout: float = 0.1):
         super().__init__()
-        assert input_dim % n_heads == 0, "input_dim must be divisible by n_heads"
+        assert input_dim % num_basis_heads == 0, "input_dim must be divisible by n_heads"
         assert args.attn_type in ['gat_v1', 'gat_v2', 'gate'], "attn_type must be one of {gat_v1,gat_v2,gate}"
 
         self.args = args
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.n_heads = n_heads
-        self.head_dim = input_dim // n_heads
+        self.num_basis_heads = num_basis_heads
+        self.head_dim = input_dim // num_basis_heads
         self.attn_dropout = nn.Dropout(dropout)
 
         # === Q/K/V projection ===
@@ -104,9 +104,9 @@ class BasisGATLayer_MUL(nn.Module):
         self.new_adjacency = new_adj
 
         # === Q/K/V ===
-        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(name_value_embeddings).view(B, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
 
         q_exp = q.unsqueeze(3)
         k_exp = k.unsqueeze(2)
@@ -127,7 +127,7 @@ class BasisGATLayer_MUL(nn.Module):
             if self.args.edge_type == 'mlp' and hasattr(self, 'edge_update'):
                 edge_attr = self.edge_update(edge_attr)
 
-            edge_attr = edge_attr.view(B, new_seq, new_seq, self.n_heads, self.head_dim).permute(0, 3, 1, 2, 4)
+            edge_attr = edge_attr.view(B, new_seq, new_seq, self.num_basis_heads, self.head_dim).permute(0, 3, 1, 2, 4)
             edge_attr = edge_attr * new_adj.unsqueeze(1).unsqueeze(-1)
         else:
             edge_attr = None
@@ -174,36 +174,36 @@ class BasisGATLayer_IND(nn.Module):
         basis_outputs: [B, new_seq, n_heads, head_dim]
         attn_weights : [B, n_heads, new_seq, new_seq]
     """
-    def __init__(self, args, input_dim: int, hidden_dim: int, n_heads: int, dropout: float = 0.1):
+    def __init__(self, args, input_dim: int, hidden_dim: int, num_basis_heads: int, dropout: float = 0.1):
         super().__init__()
-        assert input_dim % n_heads == 0, "input_dim must be divisible by n_heads"
+        assert input_dim % num_basis_heads == 0, "input_dim must be divisible by n_heads"
         assert args.attn_type in ['gat_v1', 'gat_v2', 'gate'], "attn_type must be one of {gat_v1,gat_v2,gate}"
 
         self.args = args
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.n_heads = n_heads
-        self.head_dim = input_dim // n_heads
+        self.num_basis_heads = num_basis_heads
+        self.head_dim = self.input_dim // self.num_basis_heads
         self.attn_dropout = nn.Dropout(dropout)
 
         # === 각 head별 독립적 Q/K/V/attn_proj 생성 ===
-        self.q_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(n_heads)])
-        self.k_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(n_heads)])
-        self.v_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(n_heads)])
+        self.q_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(num_basis_heads)])
+        self.k_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(num_basis_heads)])
+        self.v_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(num_basis_heads)])
 
         if args.attn_type in ['gat_v1', 'gat_v2']:
             self.attn_proj_list = nn.ModuleList([
                 nn.Linear(self.head_dim * 3 if args.edge_type in ['normal', 'mlp'] else self.head_dim * 2, 1)
-                for _ in range(n_heads)
+                for _ in range(num_basis_heads)
             ])
         elif args.attn_type == 'gate':
             self.gate_proj_list = nn.ModuleList([
                 nn.Linear(self.head_dim * 3 if args.edge_type in ['normal', 'mlp'] else self.head_dim * 2, 1)
-                for _ in range(n_heads)
+                for _ in range(num_basis_heads)
             ])
             self.content_proj_list = nn.ModuleList([
                 nn.Linear(self.head_dim * 3 if args.edge_type in ['normal', 'mlp'] else self.head_dim * 2, 1)
-                for _ in range(n_heads)
+                for _ in range(num_basis_heads)
             ])
 
         if args.edge_type == 'mlp':
@@ -227,16 +227,16 @@ class BasisGATLayer_IND(nn.Module):
         diag = torch.eye(S, device=adj.device).unsqueeze(0)
         return adj * (1.0 - diag)
 
-    def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor):
-        B, new_seq, _ = name_value_embeddings.shape
+    def forward(self, name_embeddings: torch.Tensor, value_embeddings: torch.Tensor):
+        B, new_seq, _ = value_embeddings.shape
         seq_len = new_seq - 1
 
         # === Adjacency (CLS->Var on / Var->CLS off) ===
-        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
+        var_adj = torch.ones(B, seq_len, seq_len, device=value_embeddings.device)
         if getattr(self.args, "no_self_loop", False):
             var_adj = self._no_self_interaction(var_adj)
 
-        new_adj = torch.zeros(B, new_seq, new_seq, device=name_value_embeddings.device)
+        new_adj = torch.zeros(B, new_seq, new_seq, device=value_embeddings.device)
         new_adj[:, 1:, 1:] = var_adj
         new_adj[:, 0, 1:] = 1.0
         new_adj[:, 1:, 0] = 0.0
@@ -244,13 +244,13 @@ class BasisGATLayer_IND(nn.Module):
 
         # === Edge attributes (optional) ===
         if self.args.edge_type in ['normal', 'mlp']:
-            node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
-            node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+            node_i_desc = name_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+            node_j_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
             var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim=-1)
-            cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+            cls_edge_attr = torch.cat([name_embeddings, name_embeddings], dim=-1)
             edge_dim = var_edge_attr.size(-1)
 
-            edge_attr = torch.zeros(B, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+            edge_attr = torch.zeros(B, new_seq, new_seq, edge_dim, device=name_embeddings.device)
             edge_attr[:, 1:, 1:] = var_edge_attr
             edge_attr[:, 0, 1:] = cls_edge_attr
             edge_attr[:, 1:, 0] = cls_edge_attr
@@ -259,7 +259,7 @@ class BasisGATLayer_IND(nn.Module):
                 edge_attr = self.edge_update(edge_attr)
 
             # edge_dim(=input_dim*2)을 head_dim에 맞게 투사
-            edge_attr = edge_attr.view(B, new_seq, new_seq, self.n_heads, -1)
+            edge_attr = edge_attr.view(B, new_seq, new_seq, self.num_basis_heads, -1)
             edge_attr = edge_attr[..., :self.head_dim]  # 간단한 head_dim matching (trim or project)
             edge_attr = edge_attr * new_adj.unsqueeze(-1).unsqueeze(-1)
             edge_attr = edge_attr.permute(0, 3, 1, 2, 4)  # [B, H, new_seq, new_seq, head_dim]
@@ -268,10 +268,10 @@ class BasisGATLayer_IND(nn.Module):
 
         # === Head별 독립 계산 ===
         head_outputs, head_attns = [], []
-        for h in range(self.n_heads):
-            q = self.q_proj_list[h](name_value_embeddings)  # [B, new_seq, head_dim]
-            k = self.k_proj_list[h](name_value_embeddings)
-            v = self.v_proj_list[h](name_value_embeddings)
+        for h in range(self.num_basis_heads):
+            q = self.q_proj_list[h](value_embeddings)  # [B, new_seq, head_dim]
+            k = self.k_proj_list[h](value_embeddings)
+            v = self.v_proj_list[h](value_embeddings)
 
             q_exp = q.unsqueeze(2)
             k_exp = k.unsqueeze(1)

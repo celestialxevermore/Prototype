@@ -387,21 +387,32 @@ def prepare_results_ss(full_ours_results, few_ours_results):
     return results
 
 def save_results_(args, results):
+    # exp_dir = os.path.join(
+    #     f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
+    #     args.source_data,f"args_seed:{args.random_seed}",
+    #     #args.model_type, f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
+    #     args.model_type, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}"
+    # )
     exp_dir = os.path.join(
         f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
-        args.source_data,f"args_seed:{args.random_seed}",
-        #args.model_type, f"A:{args.aggr_type}_L:{args.label}_E:{args.enc_type}_M:{args.meta_type}"
-        args.model_type, f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}"
+        args.source_data,
+        f"args_seed:{args.random_seed}",
+        f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nheads-{args.num_basis_heads}_nbasis-{args.num_basis_layers}_{args.basis_type}_{args.attn_type}_fgw_alpha_{args.fgw_alpha}_vqbeta_{args.vq_beta}_des_{args.des}"
     )
     os.makedirs(exp_dir, exist_ok=True)
-    # 데이터셋 파일 경로 구성
     dataset_file_path = os.path.join(
         args.table_path,  # 이미 완전한 경로가 구성되어 있음
         f"{args.source_data}.pkl"
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_h{args.n_heads}_{timestamp}.json"
+    #filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_h{args.num_basis_heads}_{timestamp}.json"
+    filename = (
+        f"f{args.few_shot}_b{args.batch_size}"
+        f"_ngraphs{args.n_graphs}_nnodes{args.n_nodes}_gdim{args.graph_dim}"
+        f"_nheads{args.num_basis_heads}_nbasis{args.num_basis_layers}"
+        f"_{args.basis_type}_{args.attn_type}_fgwalpha{args.fgw_alpha}_vqbeta{args.vq_beta}_{timestamp}.json"
+    )
     filepath = os.path.join(exp_dir, filename)
 
     data = {
@@ -420,24 +431,22 @@ def save_results_(args, results):
             "hidden_dim": args.hidden_dim,
             "num_shared_layers": args.num_shared_layers,
             "num_basis_layers": args.num_basis_layers,
-            "num_heads": args.n_heads,
+            "num_heads": args.num_basis_heads,
             "few_shot": args.few_shot,
-            "threshold": args.threshold,
+            "n_graphs":args.n_graphs,
+            "n_nodes":args.n_nodes, 
+            "basis_type":args.basis_type,
+            "attn_type":args.attn_type,
+            "fgw_alpha":args.fgw_alpha,
+            "vq_beta":args.vq_beta
         },
-        "model_type": args.model_type,
-        "label": args.label,
         "embed_type": args.embed_type,
         "edge_type": args.edge_type,
         "attn_type" : args.attn_type,
         "del_feature" : args.del_feat,
         "no_self_loop" : args.no_self_loop,
-        "del_exp": getattr(args, 'del_exp', 'unknown'),
+        "del_exp": args.del_exp,
         "results": results['Best_results'], 
-        "slot_g_mode" : args.slot_g_mode , 
-        #"relation_scorer_type" : args.relation_scorer_type,
-        #"mask_share_across_layers" : args.mask_share_across_layers,
-        #"rel_symmetric" : args.rel_symmetric,
-        #"num_basis_layers" : args.num_basis_layers,
         "source_data" : args.source_data,
         "target_data" : args.target_data,
     }
@@ -473,7 +482,7 @@ def save_results_A(args, results):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # 🔥 파일명에 시나리오 정보 추가
     scenario_id = results.get('scenario_info', {}).get('scenario_id', 'unknown')
-    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.n_heads}_scenario{scenario_id}_{timestamp}.json"
+    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.num_basis_heads}_scenario{scenario_id}_{timestamp}.json"
     filepath = os.path.join(exp_dir, filename)
 
     data = {
@@ -491,7 +500,7 @@ def save_results_A(args, results):
             "dropout_rate": args.dropout_rate,
             "hidden_dim": args.hidden_dim,
             "num_layers": args.num_layers,
-            "num_heads": args.n_heads,
+            "num_heads": args.num_basis_heads,
             "few_shot": args.few_shot,
             "threshold": args.threshold,
         },

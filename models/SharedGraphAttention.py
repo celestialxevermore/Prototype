@@ -91,11 +91,11 @@ class SharedGraphAttention(nn.Module):
         diag_mask = 1.0 - torch.eye(seq_len, device=adjacency_matrix.device).unsqueeze(0)
         return adjacency_matrix * diag_mask
 
-    def forward(self, desc_embeddings, name_value_embeddings):
-        batch_size, new_seq, _ = name_value_embeddings.shape
+    def forward(self, name_embeddings, value_embeddings):
+        batch_size, new_seq, _ = value_embeddings.shape
         seq_len = new_seq - 1
 
-        self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=name_value_embeddings.device)
+        self.adjacency = torch.ones(batch_size, seq_len, seq_len, device=value_embeddings.device)
         if self.args.no_self_loop:
             self.adjacency = self._no_self_interaction(self.adjacency)
 
@@ -109,19 +109,19 @@ class SharedGraphAttention(nn.Module):
         '''
             Attention
         '''
-        q = self.q_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(name_value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(value_embeddings).view(batch_size, new_seq, self.n_heads, self.head_dim).transpose(1, 2)
         
         # Attention 계산 방식 선택
         if self.args.attn_type == 'gat_v1':
             # GAT-style attention (concat + MLP)
             if self.args.edge_type == "normal":
                 # Case 1: GAT with edge attributes - MLP([q | k | edge_attr])
-                target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
-                cls_edge_attr = desc_embeddings
+                target_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                cls_edge_attr = name_embeddings
 
-                edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, name_embeddings.size(-1), device=name_embeddings.device)
                 edge_attr[:, 1:, 1:] = target_desc  # 변수 노드 간
                 edge_attr[:, 0, 1:] = cls_edge_attr  # CLS->변수
                 
@@ -139,12 +139,12 @@ class SharedGraphAttention(nn.Module):
                 
                 attn_weights = self.attn_proj(qke_expanded).squeeze(-1)
             elif self.args.edge_type == "mlp":
-                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
-                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                node_i_desc = name_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+                node_j_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
                 var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
-                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+                cls_edge_attr = torch.cat([name_embeddings, name_embeddings], dim=-1)
                 edge_dim = var_edge_attr.size(-1)
-                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=name_embeddings.device)
                 edge_attr[:, 1:, 1:] = var_edge_attr  # 변수 노드 간
                 edge_attr[:, 0, 1:] = cls_edge_attr   # CLS->변수
                 edge_attr[:, 1:, 0] = cls_edge_attr   # 변수->CLS
@@ -178,10 +178,10 @@ class SharedGraphAttention(nn.Module):
         elif self.args.attn_type == 'gat_v2':
            # GAT-v2 style attention (LeakyReLU before attention)
            if self.args.edge_type == "normal":
-               target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
-               cls_edge_attr = desc_embeddings
+               target_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+               cls_edge_attr = name_embeddings
 
-               edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+               edge_attr = torch.zeros(batch_size, new_seq, new_seq, name_embeddings.size(-1), device=name_embeddings.device)
                edge_attr[:, 1:, 1:] = target_desc
                edge_attr[:, 0, 1:] = cls_edge_attr
                
@@ -201,12 +201,12 @@ class SharedGraphAttention(nn.Module):
                activated_features = F.leaky_relu(qke_expanded)
                attn_weights = self.attn_proj(activated_features).squeeze(-1)
            elif self.args.edge_type == "mlp":
-               node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
-               node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+               node_i_desc = name_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+               node_j_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
                var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
-               cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+               cls_edge_attr = torch.cat([name_embeddings, name_embeddings], dim=-1)
                edge_dim = var_edge_attr.size(-1)
-               edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+               edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=name_embeddings.device)
                edge_attr[:, 1:, 1:] = var_edge_attr
                edge_attr[:, 0, 1:] = cls_edge_attr
                edge_attr[:, 1:, 0] = cls_edge_attr
@@ -242,10 +242,10 @@ class SharedGraphAttention(nn.Module):
             # Gate attention mechanism
             if self.args.edge_type == "normal":
                 # Edge attributes 준비
-                target_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
-                cls_edge_attr = desc_embeddings
+                target_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                cls_edge_attr = name_embeddings
 
-                edge_attr = torch.zeros(batch_size, new_seq, new_seq, desc_embeddings.size(-1), device=desc_embeddings.device)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, name_embeddings.size(-1), device=name_embeddings.device)
                 edge_attr[:, 1:, 1:] = target_desc
                 edge_attr[:, 0, 1:] = cls_edge_attr
                 
@@ -267,12 +267,12 @@ class SharedGraphAttention(nn.Module):
                 attn_weights = (gate_values * content_values).squeeze(-1)  # [batch, n_heads, seq, seq]
                 
             elif self.args.edge_type == "mlp":
-                node_i_desc = desc_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
-                node_j_desc = desc_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                node_i_desc = name_embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1)
+                node_j_desc = name_embeddings.unsqueeze(1).expand(-1, seq_len, -1, -1)
                 var_edge_attr = torch.cat([node_i_desc, node_j_desc], dim = -1)
-                cls_edge_attr = torch.cat([desc_embeddings, desc_embeddings], dim=-1)
+                cls_edge_attr = torch.cat([name_embeddings, name_embeddings], dim=-1)
                 edge_dim = var_edge_attr.size(-1)
-                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=desc_embeddings.device)
+                edge_attr = torch.zeros(batch_size, new_seq, new_seq, edge_dim, device=name_embeddings.device)
                 edge_attr[:, 1:, 1:] = var_edge_attr
                 edge_attr[:, 0, 1:] = cls_edge_attr
                 edge_attr[:, 1:, 0] = cls_edge_attr
