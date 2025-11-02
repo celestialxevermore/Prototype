@@ -42,15 +42,15 @@ class Model(nn.Module):
 
         # ---- Latent Composite Graph Components ---- 
         # (1) LatentCompositeGraph : learnable latent composite graphs (codebook)
-        self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
+        # self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
 
-        # (2) GraphQuantizer : FGW-based quantization module 
-        self.graph_quantizer = GraphQuantizer(args, alpha = args.fgw_alpha)
+        # # (2) GraphQuantizer : FGW-based quantization module 
+        # self.graph_quantizer = GraphQuantizer(args, alpha = args.fgw_alpha)
 
-        # (3) LatentCompositeGNN : Head-wise message passing + readout 
-        self.gnn_experts = LatentCompositeGNN(
-            args,input_dim = self.input_dim // args.num_basis_heads, hidden_dim = self.hidden_dim, num_basis_heads = args.num_basis_heads, dropout = self.dropout_rate
-        ) 
+        # # (3) LatentCompositeGNN : Head-wise message passing + readout 
+        # self.gnn_experts = LatentCompositeGNN(
+        #     args,input_dim = self.input_dim // args.num_basis_heads, hidden_dim = self.hidden_dim, num_basis_heads = args.num_basis_heads, dropout = self.dropout_rate
+        # ) 
 
         if args.basis_type == 'mul':
             self.basis_layers = nn.ModuleList([ 
@@ -66,8 +66,8 @@ class Model(nn.Module):
             nn.LayerNorm(self.input_dim) for _ in range(self.num_basis_layers)
         ])
 
-        # Coordinator (weights over heads/bases)
-        self.coordinator = CoordinatorMLP(self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
+        # # Coordinator (weights over heads/bases)
+        # self.coordinator = CoordinatorMLP(self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
 
         # Source/Target residual heads (on CLS)
         self.n_src = len(args.source_data) if isinstance(args.source_data, (list, tuple)) else 1
@@ -88,15 +88,6 @@ class Model(nn.Module):
             nn.Dropout(self.dropout_rate),
             nn.Linear(hid, self.output_dim),
         )
-
-        self.ghead = nn.Sequential(
-            nn.LayerNorm(self.input_dim),
-            nn.Linear(self.input_dim, hid),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-            nn.Linear(hid, self.output_dim),
-        )
-
         # Loss
         self.criterion = nn.BCEWithLogitsLoss() if self.num_classes == 2 else nn.CrossEntropyLoss()
 
@@ -114,43 +105,38 @@ class Model(nn.Module):
     def set_freeze_target(self):
         for p in self.parameters():
             p.requires_grad = False
-        for p in self.coordinator.parameters():
-            p.requires_grad = True
+        # for p in self.coordinator.parameters():
+        #     p.requires_grad = True
         for ln in self.basis_layer_norms:
             for p in ln.parameters():
                 p.requires_grad = True
         for p in self.thead.parameters():
             p.requires_grad = True
-        for p in self.latent_graph.parameters():
-            p.requires_grad = True 
-        for p in self.graph_quantizer.parameters():
-            p.requires_grad = True 
-        for p in self.gnn_experts.parameters():
-            p.requires_grad = True
 
-    @torch.no_grad()
-    def get_coordinates(self, batch):
-        self.eval()
-        # gather
-        desc_list, n_list, v_list = [], [], []
-        if all(k in batch for k in ['cat_name_embeddings', 'cat_value_embeddings', 'cat_desc_embeddings']):
-            n_list.append(batch['cat_name_embeddings'].to(self.device))
-            v_list.append(batch['cat_value_embeddings'].to(self.device))
-            desc_list.append(batch['cat_desc_embeddings'].to(self.device))
+
+    # @torch.no_grad()
+    # def get_coordinates(self, batch):
+    #     self.eval()
+    #     # gather
+    #     desc_list, n_list, v_list = [], [], []
+    #     if all(k in batch for k in ['cat_name_embeddings', 'cat_value_embeddings', 'cat_desc_embeddings']):
+    #         n_list.append(batch['cat_name_embeddings'].to(self.device))
+    #         v_list.append(batch['cat_value_embeddings'].to(self.device))
+    #         desc_list.append(batch['cat_desc_embeddings'].to(self.device))
             
-        if all(k in batch for k in ['num_name_embeddings', 'num_prompt_embeddings','num_desc_embeddings']):
-            n_list.append(batch['num_name_embeddings'].to(self.device))
-            v_list.append(batch['num_prompt_embeddings'].to(self.device))
-            desc_list.append(batch['num_desc_embeddings'].to(self.device))
-        if not desc_list or not n_list or not v_list:
-            raise ValueError("No categorical or numerical features found in batch")
+    #     if all(k in batch for k in ['num_name_embeddings', 'num_prompt_embeddings','num_desc_embeddings']):
+    #         n_list.append(batch['num_name_embeddings'].to(self.device))
+    #         v_list.append(batch['num_prompt_embeddings'].to(self.device))
+    #         desc_list.append(batch['num_desc_embeddings'].to(self.device))
+    #     if not desc_list or not n_list or not v_list:
+    #         raise ValueError("No categorical or numerical features found in batch")
 
-        desc = torch.cat(desc_list, dim=1)  # [B,S,D]
-        name = torch.cat(n_list , dim=1)
-        value   = torch.cat(v_list , dim=1)    # [B,S,D]
+    #     desc = torch.cat(desc_list, dim=1)  # [B,S,D]
+    #     name = torch.cat(n_list , dim=1)
+    #     value   = torch.cat(v_list , dim=1)    # [B,S,D]
 
-        coordinates = self.coordinator(desc, name, value).mean(dim=1)
-        return coordinates 
+    #     coordinates = self.coordinator(desc, name, value).mean(dim=1)
+    #     return coordinates 
 
     def set_kmeans_centroids(self, centroids: torch.Tensor):
         self.register_buffer("centroids", centroids.detach(), persistent=False)
@@ -168,7 +154,7 @@ class Model(nn.Module):
 
 
         # === Predict ===
-        global_pred = self.predict(batch)
+        local_pred = self.predict(batch)
 
         # === Local output ===
         local_output = self.x_basis[:, 0, :]
@@ -181,18 +167,18 @@ class Model(nn.Module):
             local_pred = self.thead(local_output)
         
         # === 3. Base Classification losses === 
-        global_loss = self.criterion(global_pred, target)
+        #global_loss = self.criterion(global_pred, target)
         local_loss = self.criterion(local_pred, target)
-        task_loss = 0.5 * (global_loss + local_loss)
-        total_loss += task_loss 
+        #task_loss = 0.5 * (global_loss + local_loss)
+        total_loss += local_loss 
         # === 4. KL consistency loss === 
-        p_local = F.log_softmax(local_pred.detach(), dim=-1)
-        p_global = F.softmax(global_pred, dim=-1)
-        kl_loss = F.kl_div(p_local, p_global, reduction='batchmean')
-        total_loss += 0.2 * kl_loss 
+        # p_local = F.log_softmax(local_pred.detach(), dim=-1)
+        # p_global = F.softmax(global_pred, dim=-1)
+        # kl_loss = F.kl_div(p_local, p_global, reduction='batchmean')
+        # total_loss += 0.2 * kl_loss 
 
-        # === 5. FGW loss (distribution alignment between Multiple source <-> Latent Composite Graph) ===
-        total_loss += self.args.fgw_alpha * self.fgw_loss 
+        # # === 5. FGW loss (distribution alignment between Multiple source <-> Latent Composite Graph) ===
+        # total_loss += self.args.fgw_alpha * self.fgw_loss 
 
         # (2) 기존 Few-shot coord KL 유지 (타깃 에피소드에서 좌표 분포 정렬)
         lam = float(getattr(self.args, "coord_reg_lambda", 0.0))
@@ -215,26 +201,26 @@ class Model(nn.Module):
         
         # ---- Diversifying Loss (P-Space Coordinate Constraint) ----
         
-        if hasattr(self, "_last_coordinates") and self.args.diversifying_loss is True:
-            coordinates = self._last_coordinates
-            labels = y.to(self.device)
-            distance = (coordinates.unsqueeze(1) - coordinates.unsqueeze(0)).abs().sum(dim=2)
-            label_similarity = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()
-            positive_mask = label_similarity
-            div_loss = torch.sum(distance * positive_mask) / (torch.sum(distance) + 1e-8)
-            total_loss += 0.3 * div_loss
+        # if hasattr(self, "_last_coordinates") and self.args.diversifying_loss is True:
+        #     coordinates = self._last_coordinates
+        #     labels = y.to(self.device)
+        #     distance = (coordinates.unsqueeze(1) - coordinates.unsqueeze(0)).abs().sum(dim=2)
+        #     label_similarity = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()
+        #     positive_mask = label_similarity
+        #     div_loss = torch.sum(distance * positive_mask) / (torch.sum(distance) + 1e-8)
+        #     total_loss += 0.3 * div_loss
         
-        # #---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
-        if hasattr(self, "_last_P_basis"):
-            A = self._last_P_basis  # [B, H, S, S]
-            B, H, S, _ = A.shape
-            A_cols = A.permute(0, 2, 1, 3)  # [B, S, H, S]
-            dists = torch.cdist(A_cols, A_cols, p=1)  # [B, S, H, H]
-            avg_dists = torch.mean(dists, 1)          # [B, H, H]
-            mean_dist = (2 * torch.triu(avg_dists, diagonal=1).sum(dim=(1, 2)) / (H * (H - 1))).mean()
-            dis_loss = F.relu(2 - mean_dist)
-            total_loss = total_loss + 0.3 * dis_loss
-            total_loss += 0.3 * dis_loss
+        # # #---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
+        # if hasattr(self, "_last_P_basis"):
+        #     A = self._last_P_basis  # [B, H, S, S]
+        #     B, H, S, _ = A.shape
+        #     A_cols = A.permute(0, 2, 1, 3)  # [B, S, H, S]
+        #     dists = torch.cdist(A_cols, A_cols, p=1)  # [B, S, H, H]
+        #     avg_dists = torch.mean(dists, 1)          # [B, H, H]
+        #     mean_dist = (2 * torch.triu(avg_dists, diagonal=1).sum(dim=(1, 2)) / (H * (H - 1))).mean()
+        #     dis_loss = F.relu(2 - mean_dist)
+        #     total_loss = total_loss + 0.3 * dis_loss
+        #     total_loss += 0.3 * dis_loss
         return total_loss
 
 
@@ -257,9 +243,9 @@ class Model(nn.Module):
         name   = torch.cat(name_embeddings, dim = 1)
         value = torch.cat(value_embeddings, dim = 1)
 
-        # (2) coordinator weights (desc + nv -> coord) ----
-        coordinates = self.coordinator(desc, name, value).mean(dim=1)
-        self._last_coordinates = coordinates
+        # # (2) coordinator weights (desc + nv -> coord) ----
+        # coordinates = self.coordinator(desc, name, value).mean(dim=1)
+        # self._last_coordinates = coordinates
 
         # (3) basis GAT stack ---- 
         
@@ -273,22 +259,20 @@ class Model(nn.Module):
         self.x_basis = x_basis
         if last_att is not None:
             self._last_P_basis = last_att[:, :, 1:, 1:] # P_affinity 
-        # (4) FGW-based quantization ---- 
-        pdb.set_trace()
-        Fy_res, Ay_sel, fgw_loss = self.graph_quantizer(
-            self._last_P_basis, 
-            basis_outputs, self.latent_graph
-        )
-        self.fgw_loss = fgw_loss
-        # (5) Head-wise GNN message passing & readout ---- 
-        expert_outputs = self.gnn_experts(Fy_res, Ay_sel) # [B, H, D]
-        # (6) Coordinator-weighted combination ----
-
-        #global_output = torch.sum(coordinates.unsqueeze(-1) * expert_outputs, dim = 1) #[B, D]
-        weighted = coordinates.unsqueeze(-1) * expert_outputs 
-        global_output = weighted.flatten(1)
-        # # (7) Global prediction
-        global_pred = self.ghead(global_output)
+        # # (4) FGW-based quantization ---- 
+        # Fy_res, Ay_sel, fgw_loss = self.graph_quantizer(
+        #     self._last_P_basis, 
+        #     basis_outputs, self.latent_graph
+        # )
+        # self.fgw_loss = fgw_loss
+        # # (5) Head-wise GNN message passing & readout ---- 
+        # expert_outputs = self.gnn_experts(Fy_res, Ay_sel) # [B, H, D]
+        # # (6) Coordinator-weighted combination ----
+        # #global_output = torch.sum(coordinates.unsqueeze(-1) * expert_outputs, dim = 1) #[B, D]
+        # weighted = coordinates.unsqueeze(-1) * expert_outputs 
+        # global_output = weighted.flatten(1)
+        # # # (7) Global prediction
+        # global_pred = self.ghead(global_output)
 
         # (8) Classificaion heads ---- 
         local_output = x_basis[:, 0, :]
@@ -300,4 +284,4 @@ class Model(nn.Module):
             local_pred = self.thead(local_output)
         self._last_local_pred = local_pred
 
-        return global_pred
+        return local_pred

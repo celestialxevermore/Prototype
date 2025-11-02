@@ -75,12 +75,12 @@ class LatentCompositeGNN(nn.Module):
         self.args = args 
         self.n_heads = num_basis_heads
         self.input_dim = self.args.input_dim // self.args.num_basis_heads
-
+        self.output_dim = self.args.output_dim
         self.head_gnns = nn.ModuleList([
             lightGraphNeuralNet(self.input_dim, hidden_dim, dropout) for _ in range(num_basis_heads)
         ])
         self.readouts = nn.ModuleList([
-            GraphReadout(self.input_dim, hidden_dim, self.input_dim, dropout) for _ in range(num_basis_heads)
+            GraphReadout(self.input_dim, hidden_dim, self.output_dim, dropout) for _ in range(num_basis_heads)
         ])
 
     def forward(self, Fy_res: torch.Tensor, Ay_sel: torch.Tensor):
