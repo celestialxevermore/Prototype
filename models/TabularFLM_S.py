@@ -67,7 +67,7 @@ class Model(nn.Module):
         ])
 
         # Coordinator (weights over heads/bases)
-        self.coordinator = CoordinatorMLP(self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
+        self.coordinator = CoordinatorMLP(args, self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
 
         # Source/Target residual heads (on CLS)
         self.n_src = len(args.source_data) if isinstance(args.source_data, (list, tuple)) else 1
@@ -126,6 +126,8 @@ class Model(nn.Module):
         for p in self.graph_quantizer.parameters():
             p.requires_grad = True 
         for p in self.gnn_experts.parameters():
+            p.requires_grad = True
+        for p in self.ghead.parameters():
             p.requires_grad = True
 
     @torch.no_grad()
@@ -224,17 +226,17 @@ class Model(nn.Module):
             div_loss = torch.sum(distance * positive_mask) / (torch.sum(distance) + 1e-8)
             total_loss += 0.3 * div_loss
         
-        # #---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
-        if hasattr(self, "_last_P_basis"):
-            A = self._last_P_basis  # [B, H, S, S]
-            B, H, S, _ = A.shape
-            A_cols = A.permute(0, 2, 1, 3)  # [B, S, H, S]
-            dists = torch.cdist(A_cols, A_cols, p=1)  # [B, S, H, H]
-            avg_dists = torch.mean(dists, 1)          # [B, H, H]
-            mean_dist = (2 * torch.triu(avg_dists, diagonal=1).sum(dim=(1, 2)) / (H * (H - 1))).mean()
-            dis_loss = F.relu(2 - mean_dist)
-            total_loss = total_loss + 0.3 * dis_loss
-            total_loss += 0.3 * dis_loss
+        # # #---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
+        # if hasattr(self, "_last_P_basis"):
+        #     A = self._last_P_basis  # [B, H, S, S]
+        #     B, H, S, _ = A.shape
+        #     A_cols = A.permute(0, 2, 1, 3)  # [B, S, H, S]
+        #     dists = torch.cdist(A_cols, A_cols, p=1)  # [B, S, H, H]
+        #     avg_dists = torch.mean(dists, 1)          # [B, H, H]
+        #     mean_dist = (2 * torch.triu(avg_dists, diagonal=1).sum(dim=(1, 2)) / (H * (H - 1))).mean()
+        #     dis_loss = F.relu(2 - mean_dist)
+        #     total_loss = total_loss + 0.3 * dis_loss
+        #     total_loss += 0.3 * dis_loss
         return total_loss
 
 
@@ -274,20 +276,23 @@ class Model(nn.Module):
         if last_att is not None:
             self._last_P_basis = last_att[:, :, 1:, 1:] # P_affinity 
         # (4) FGW-based quantization ---- 
-        pdb.set_trace()
-        Fy_res, Ay_sel, fgw_loss = self.graph_quantizer(
+
+        Fy_res, Ay_res, fgw_loss = self.graph_quantizer(
             self._last_P_basis, 
             basis_outputs, self.latent_graph
         )
         self.fgw_loss = fgw_loss
         # (5) Head-wise GNN message passing & readout ---- 
-        expert_outputs = self.gnn_experts(Fy_res, Ay_sel) # [B, H, D]
+        expert_outputs = self.gnn_experts(Fy_res, Ay_res) # [B, H, D]
         # (6) Coordinator-weighted combination ----
 
         #global_output = torch.sum(coordinates.unsqueeze(-1) * expert_outputs, dim = 1) #[B, D]
-        weighted = coordinates.unsqueeze(-1) * expert_outputs 
-        global_output = weighted.flatten(1)
+        #weighted = coordinates.unsqueeze(-1) * expert_outputs 
+        #global_output = weighted.flatten(1)
         # # (7) Global prediction
+        #global_pred = self.ghead(global_output)    
+        expert_outputs = (coordinates.unsqueeze(1).unsqueeze(-1) * expert_outputs).sum(dim = 2)
+        global_output = expert_outputs.reshape(expert_outputs.size(0), -1)
         global_pred = self.ghead(global_output)
 
         # (8) Classificaion heads ---- 

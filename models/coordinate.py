@@ -9,9 +9,11 @@ import logging
 import os 
 
 class CoordinatorMLP(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, n_heads: int, dropout: float = 0.1, temperature: float = 1.0):
+    def __init__(self, args, input_dim: int, hidden_dim: int, n_heads: int, dropout: float = 0.1, temperature: float = 1.0):
         super().__init__()
+        self.args = args
         self.n_heads = n_heads
+        self.n_graphs = self.args.n_graphs
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.dropout = dropout
@@ -30,7 +32,7 @@ class CoordinatorMLP(nn.Module):
             nn.ReLU(),
             nn.Dropout(self.dropout),
 
-            nn.Linear(self.hidden_dim, self.n_heads),
+            nn.Linear(self.hidden_dim, self.n_graphs),
         )
         self._init_weights()
 
@@ -43,7 +45,6 @@ class CoordinatorMLP(nn.Module):
 
     def forward(self, desc: torch.Tensor, name: torch.Tensor, value : torch.Tensor) -> torch.Tensor:
         """
-        cls_emb: [B, D]
         desc:    [B, S, D]
         name:      [B, S, D]
         value:      [B, S, D]

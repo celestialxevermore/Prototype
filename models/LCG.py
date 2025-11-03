@@ -298,7 +298,7 @@ class GraphQuantizer(nn.Module):
 
         # ---- Step 3. FGW-based reconstruction 
         # (a) dictionary update (encoder frozen)
-        Fy_res, Dy_res, loss_dict = FGWUtils.reconstruct_FGW(
+        Fy_res_sel, Dy_res_sel, loss_dict = FGWUtils.reconstruct_FGW(
             Fx.detach(), Fy_sel, Dx.detach(), Dy_sel, a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
             outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
@@ -310,9 +310,42 @@ class GraphQuantizer(nn.Module):
             outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
         )
 
-        # Affinity to Adjacency 
-        Ay_sel = 1.0 - Dy_sel.clamp(0.0, 1.0)
+        # ---- Step 4. SOM regularizaion for unselected Latent Composite Graphs 
+        B, H = assign_idx.shape 
+        M, K, D = Fy.shape
+        mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
+        mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
+        unsel_idx = mask.nonzero(as_tuple = True)
 
-        # --- Step 5. FGW-VQ loss ---- 
-        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean() 
-        return Fy_res, Ay_sel, fgw_loss
+        Fy_unsel = Fy[unsel_idx[2]]
+        Dy_unsel = Dy[unsel_idx[2]]
+        
+        Fy_unsel = Fy_unsel.view(B, H, M-1, K, D)
+        Dy_unsel = Dy_unsel.view(B, H, M-1, K, K)
+        Fy_res_unsel_list, Dy_res_unsel_list, loss_som_list = [], [] , [] 
+
+        for m in range(M - 1):
+            Fy_u = Fy_unsel[:, :, m, :, :].squeeze(2)
+            Dy_u = Dy_unsel[:, :, m, :, :].squeeze(2)
+            Fy_res_u, Dy_res_u, loss_u = FGWUtils.reconstruct_FGW(
+                Fx.detach(), Fy_u, Dx.detach(), Dy_u, a, 
+                torch.ones_like(b_sel), 
+                alpha = self.alpha, eps = self.eps, 
+                outer_iters = self.outer_iters, sinkhorn_iters =self.sinkhorn_iters 
+            )
+            Fy_res_unsel_list.append(Fy_res_u.unsqueeze(2))
+            Dy_res_unsel_list.append(Dy_res_u.unsqueeze(2))
+            loss_som_list.append(loss_u.unsqueeze(0))
+
+        # --- Step 5. Merge all Latent Composite Graphs 
+        Fy_res_sel = Fy_res_sel.unsqueeze(2)
+        Dy_res_sel = Dy_res_sel.unsqueeze(2)
+        Fy_res_unsel = torch.cat(Fy_res_unsel_list, dim = 2)
+        Dy_res_unsel = torch.cat(Dy_res_unsel_list, dim = 2)
+        loss_som = torch.cat(loss_som_list, dim = 0).mean() 
+        Fy_res_all = torch.cat([Fy_res_sel, Fy_res_unsel], dim = 2)
+        Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
+        Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
+
+        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean() + self.vq_beta * loss_som
+        return Fy_res_all, Ay_res_all, fgw_loss 

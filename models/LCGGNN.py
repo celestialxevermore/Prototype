@@ -1,6 +1,7 @@
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
+import pdb 
 
 class lightGraphNeuralNet(nn.Module):
     """
@@ -65,39 +66,44 @@ class GraphReadout(nn.Module):
 
 class LatentCompositeGNN(nn.Module):
     """
-    Head별로 독립적인 lightGraphNeuralNet + Readout을 수행하는 GNN 모듈.
+    Head x Latent Composite Graph (M개) GNN projection independently
     Args:
-        Fy_res: [B, H, K, D]
-        Ay_sel: [B, H, K, K]
+        Fy_res: [B, H, M, K, D]
+        Ay_sel: [B, H, M, K, K]
+    Returns:
+        expert_outputs : [B, H, M, D]
     """
     def __init__(self, args, input_dim: int, hidden_dim: int, num_basis_heads: int, dropout: float = 0.1):
         super().__init__()
         self.args = args 
         self.n_heads = num_basis_heads
+        self.n_graphs = self.args.n_graphs
         self.input_dim = self.args.input_dim // self.args.num_basis_heads
 
-        self.head_gnns = nn.ModuleList([
-            lightGraphNeuralNet(self.input_dim, hidden_dim, dropout) for _ in range(num_basis_heads)
+        self.graph_gnns = nn.ModuleList([
+            lightGraphNeuralNet(self.input_dim, hidden_dim, dropout) for _ in range(self.n_graphs)
         ])
         self.readouts = nn.ModuleList([
-            GraphReadout(self.input_dim, hidden_dim, self.input_dim, dropout) for _ in range(num_basis_heads)
+            GraphReadout(self.input_dim, hidden_dim, self.input_dim, dropout) for _ in range(self.n_graphs)
         ])
 
     def forward(self, Fy_res: torch.Tensor, Ay_sel: torch.Tensor):
         """
         Args:
-            Fy_res: [B, H, K, D]
-            Ay_sel: [B, H, K, K]
+            Fy_res: [B, H, M, K, D]
+            Ay_sel: [B, H, M, K, K]
         Returns:
-            node_outputs: [B, H, K, D]
-            graph_outputs: [B, H, D]
+            graph_outputs: [B, H, M, K, D]
+            graph_outputs: [B, H, M, D]
         """
-        B, H, K, D = Fy_res.shape
+        B, H, M, K, D = Fy_res.shape
         expert_outputs = []
 
-        for h in range(self.n_heads):
-            node_out = self.head_gnns[h](Fy_res[:, h], Ay_sel[:, h])  # [B, K, D]
-            expert_output = self.readouts[h](node_out)                    # [B, D]
-            expert_outputs.append(expert_output.unsqueeze(1))
-        expert_outputs = torch.cat(expert_outputs, dim=1)  # [B, H, D]
+        for m in range(self.n_graphs):
+            node_out = self.graph_gnns[m](Fy_res[:, :, m].reshape(B * H, K, D), Ay_sel[:, :, m].reshape(B * H, K, K))  # [B, K, D]
+            graph_output = self.readouts[m](node_out)                    # [B, D]
+            graph_output = graph_output.view(B, H, -1)
+            expert_outputs.append(graph_output.unsqueeze(2))
+        expert_outputs = torch.cat(expert_outputs, dim=2)  # [B, H, D]
+
         return expert_outputs
