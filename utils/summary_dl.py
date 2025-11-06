@@ -98,8 +98,18 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
     
     for dataset in datasets_to_process:
         results_by_config = {}
-        dataset_path = os.path.join(directory_path, dataset)
         
+        # ✅ base_dir이 이미 dataset 수준이거나 더 깊은 경우 그대로 사용
+        if os.path.isdir(directory_path) and any(name.startswith("args_seed:") for name in os.listdir(directory_path)):
+            # 이미 args_seed: 폴더가 포함된 경로일 경우
+            dataset_path = directory_path
+        elif os.path.isdir(directory_path) and "ngraphs-" in directory_path:
+            # ngraphs- 폴더 내부 경로인 경우
+            dataset_path = os.path.dirname(directory_path)
+        else:
+            # 기존 구조 (base_dir + dataset)
+            dataset_path = os.path.join(directory_path, dataset)
+            
         if not os.path.exists(dataset_path):
             print(f"경로를 찾을 수 없음: {dataset_path}")
             continue
@@ -122,7 +132,8 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                     print(f"시드 {seed}의 경로가 존재하지 않음: {seed_path}")
         else:
             # 모든 시드 처리 (기존 방식) - 패턴 수정
-            json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/*/f*.json")
+            #json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/*/f*.json")
+            json_pattern = os.path.join(dataset_path, "args_seed:*/ngraphs-*/f*.json")
             json_files = glob.glob(json_pattern, recursive=True)
         
         if not json_files:

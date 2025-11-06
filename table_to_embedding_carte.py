@@ -527,5 +527,5 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                     'num_desc_embeddings' : num_desc_embeddings,
                     'num_desc_texts': num_desc_texts
                 })
-        pdb.set_trace()
+
         return data

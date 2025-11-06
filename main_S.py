@@ -87,7 +87,7 @@ def get_args():
     parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
     parser.add_argument('--fgw_alpha', type = float, default =0.5)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
-    parser.add_argument('--diversifying_loss', action='store_true')
+    parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     '''
         Basis GAT Configuration
     '''
@@ -101,7 +101,7 @@ def get_args():
     parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
 
     # Experiments Resampling
-    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,

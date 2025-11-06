@@ -39,7 +39,8 @@ class TabularToEmbeddingDataset:
             "Medicaldataset" : ['target_binary', ['no', 'yes']],
             "heart1" : ['target_binary', ['no', 'yes']],
             "Heart_disease_statlog" : ['target_binary', ['no','yes']],
-            "heart_disease" : ['target_binary', ['no','yes']]
+            "heart_disease" : ['target_binary', ['no','yes']],
+            "heart_disease_clean" : ['target_binary', ['no','yes']]
 
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)

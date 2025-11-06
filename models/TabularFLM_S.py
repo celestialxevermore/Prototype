@@ -127,7 +127,7 @@ class Model(nn.Module):
             p.requires_grad = True 
         for p in self.gnn_experts.parameters():
             p.requires_grad = True
-        for p in self.ghead.parameters():
+        for p in self.ghead.parameters(): # ghead unfreeze 시켜주는게 성능에는 더 좋고 Computational Cost도 적음. 
             p.requires_grad = True
 
     @torch.no_grad()
@@ -290,7 +290,7 @@ class Model(nn.Module):
         #weighted = coordinates.unsqueeze(-1) * expert_outputs 
         #global_output = weighted.flatten(1)
         # # (7) Global prediction
-        #global_pred = self.ghead(global_output)    
+        #global_pred = self.ghead(global_output)   
         expert_outputs = (coordinates.unsqueeze(1).unsqueeze(-1) * expert_outputs).sum(dim = 2)
         global_output = expert_outputs.reshape(expert_outputs.size(0), -1)
         global_pred = self.ghead(global_output)

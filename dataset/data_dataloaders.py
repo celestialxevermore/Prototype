@@ -382,6 +382,16 @@ def prepare_embedding_dataloaders(args, dataset_name):
     labels = [emb['y'].item() for emb in embeddings]
     num_classes = data['num_classes']
     
+
+
+    if dataset_name == "heart_disease_clean":
+        print("Using custom sampling : 100 random samples (60/20/20 split)")
+        total_indices = np.arange(len(embeddings))
+        np.random.shuffle(total_indices)
+        selected_indices = total_indices[:100]
+        embeddings = [embeddings[i] for i in selected_indices]
+        labels = [labels[i] for i in selected_indices]
+        
     # Train/Val/Test Split (60/20/20)
     indices = list(range(len(embeddings)))
     train_val_idx, test_idx = train_test_split(
