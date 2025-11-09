@@ -34,7 +34,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-#os.environ["CUDA_VISIBLE_DEVICES"]="4"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -87,6 +87,7 @@ def get_args():
     parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
     parser.add_argument('--fgw_alpha', type = float, default =0.5)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
+    parser.add_argument('--additional_FGW',action = 'store_true')
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     '''
         Basis GAT Configuration
@@ -270,6 +271,7 @@ def train_and_validate(args, model, train_loader, val_loader,
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
         f"_vq_beta-{args.vq_beta}"
+        f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
     checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
@@ -463,6 +465,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
         f"_vq_beta-{args.vq_beta}"
+        f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
@@ -721,6 +724,7 @@ def main():
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
         f"_vq_beta-{args.vq_beta}"
+        f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
