@@ -263,26 +263,32 @@ class GraphQuantizer(nn.Module):
                 P_affinity : [B, H, N, N]
                 basis_outputs : [B, N+1, H, D/H]
                 latent_graph : LatentCompositeGraph instance 
-                detach_encoder : bool (True -> encoder stopgrad, False -> dictionary stopgrad)       
             Returns:
-                assign_idx : [B, H] index of selected latent composite graph per head
+                Fy_res_all, Ay_res_all, fgw_loss
         """
         # (0) dimension 
         B, H, N, _ = P_affinity.shape 
         
         # (1) Source graph & affinity
         Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3) #[B, H, N, D/H]
-
         Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
+        
         # (2) Latent composite graph & affinity 
         Fy, Dy = latent_graph()
-
+        
+        print(f"\n{'='*70}")
+        print(f"🔍 [DEBUG] After latent_graph()")
+        print(f"{'='*70}")
+        print(f"  Fy.requires_grad: {Fy.requires_grad}")
+        print(f"  Fy.grad_fn: {Fy.grad_fn}")
+        print(f"  Fy is node_embeddings: {Fy is latent_graph.node_embeddings}")
+        
         # (3) Uniform marginals 
         a = torch.ones(B, H, N, device = Fx.device) / N 
         b = torch.ones(B, latent_graph.M, latent_graph.K, device=Fx.device) / latent_graph.K 
 
-        # ---- Step 1. Fused Gromov-Wasserstein distance computation for selection ---- 
-        with torch. no_grad():
+        # ---- Step 1. Assignment (VQ-VAE style: no gradient for selection) ----
+        with torch.no_grad():
             Pi_all, fgw_values = FGWUtils.assign_FGW(
                 Fx, Fy, Dx, Dy, a, b,
                 alpha = self.alpha, eps = self.eps, 
@@ -290,55 +296,104 @@ class GraphQuantizer(nn.Module):
             )
             assign_idx = torch.argmin(fgw_values, dim=-1)
         
-        # ---- Step 2. Gather selected latent graphs ---- 
-        Fy_sel = Fy[assign_idx] # [B, H, K, D]
-        Dy_sel = Dy[assign_idx] # [B, H, K, K]
-        b_sel = b[torch.arange(B).unsqueeze(1), assign_idx]
-        #Pi_sel = Pi_all[torch.arange(B)[:, None], torch.arange(H)[None, :], assign_idx] # [B,H,N,K]
-
-        # ---- Step 3. FGW-based reconstruction 
+        print(f"\n{'='*70}")
+        print(f"🔍 [DEBUG] After assignment (inside no_grad)")
+        print(f"{'='*70}")
+        unique, counts = torch.unique(assign_idx, return_counts=True)
+        print(f"  assign_idx distribution: {dict(zip(unique.tolist(), counts.tolist()))}")
+        print(f"  assign_idx.requires_grad: {assign_idx.requires_grad}")
+        
+        # ✅ FIX 1: Detach index to remove no_grad context flag
+        assign_idx = assign_idx.detach()
+        print(f"\n  After detach:")
+        print(f"    assign_idx.requires_grad: {assign_idx.requires_grad}")
+        
+        # ---- Step 2. Gather selected latent graphs ----
+        # ✅ FIX 2: Explicitly enable gradient for indexing
+        with torch.enable_grad():
+            Fy_sel = Fy[assign_idx]  # [B, H, K, D]
+            Dy_sel = Dy[assign_idx]  # [B, H, K, K]
+            b_sel = b[torch.arange(B, device=b.device).unsqueeze(1), assign_idx]
+        
+        print(f"\n{'='*70}")
+        print(f"🔍 [DEBUG] After indexing (with enable_grad)")
+        print(f"{'='*70}")
+        print(f"  Fy_sel.requires_grad: {Fy_sel.requires_grad}")
+        print(f"  Fy_sel.grad_fn: {Fy_sel.grad_fn}")
+        
+        if not Fy_sel.requires_grad:
+            print(f"\n  ❌ ERROR: Fy_sel still has requires_grad=False!")
+            print(f"  This shouldn't happen with detach + enable_grad")
+            print(f"  Attempting force fix...")
+            Fy_sel.requires_grad_(True)
+            print(f"  After force: Fy_sel.requires_grad = {Fy_sel.requires_grad}")
+        
+        # ---- Step 3. FGW-based reconstruction ----
         # (a) dictionary update (encoder frozen)
         Fy_res_sel, Dy_res_sel, loss_dict = FGWUtils.reconstruct_FGW(
             Fx.detach(), Fy_sel, Dx.detach(), Dy_sel, a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
             outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
         )
+        
+        print(f"\n{'='*70}")
+        print(f"🔍 [DEBUG] After reconstruct_FGW (dictionary)")
+        print(f"{'='*70}")
+        print(f"  loss_dict: {loss_dict.item():.6f}")
+        print(f"  loss_dict.requires_grad: {loss_dict.requires_grad}")
+        print(f"  loss_dict.grad_fn: {loss_dict.grad_fn}")
+        
+        if not loss_dict.requires_grad:
+            print(f"\n  ❌ PROBLEM: loss_dict has no gradient!")
+            print(f"  → Check if Fy_sel had gradient when passed to reconstruct_FGW")
+        
         # (b) encoder update (dictionary frozen)
         _, _, loss_enc = FGWUtils.reconstruct_FGW(
             Fx, Fy_sel.detach(), Dx, Dy_sel.detach(), a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
             outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
         )
+        
+        print(f"\n  loss_enc: {loss_enc.item():.6f}")
 
-        # ---- Step 4. SOM regularizaion for unselected Latent Composite Graphs 
+        # ---- Step 4. SOM regularization for unselected LCGs ----
         B, H = assign_idx.shape 
         M, K, D = Fy.shape
-        mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
-        mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
-        unsel_idx = mask.nonzero(as_tuple = True)
 
-        Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
-        Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
+        if self.args.additional_FGW:
+            mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
+            mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
+            unsel_idx = mask.nonzero(as_tuple = True)
 
-        Fx_rep = Fx.detach().repeat_interleave(M-1, dim = 0)
-        Dx_rep = Dx.detach().repeat_interleave(M-1, dim = 0)
-        a_rep = a.repeat_interleave(M-1, dim = 0)
-        b_rep = torch.ones_like(b_sel).repeat_interleave(M-1, dim = 0)
+            Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
+            Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
 
+            Fx_rep = Fx.detach().repeat_interleave(M-1, dim = 0)
+            Dx_rep = Dx.detach().repeat_interleave(M-1, dim = 0)
+            a_rep = a.repeat_interleave(M-1, dim = 0)
+            b_rep = torch.ones_like(b_sel).repeat_interleave(M-1, dim = 0)
         
-        Fy_unsel_flat = Fy_unsel.view(B * (M - 1), H, K, D)
-        Dy_unsel_flat = Dy_unsel.view(B * (M - 1), H, K, K)
-        Fy_res_unsel, Dy_res_unsel, loss_som = FGWUtils.reconstruct_FGW(
-            Fx_rep, Fy_unsel_flat, Dx_rep, Dy_unsel_flat, 
-            a_rep, b_rep, 
-            alpha = self.alpha, eps = self.eps, 
-            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
-        )
+            Fy_unsel_flat = Fy_unsel.view(B * (M - 1), H, K, D)
+            Dy_unsel_flat = Dy_unsel.view(B * (M - 1), H, K, K)
+            Fy_res_unsel, Dy_res_unsel, loss_som = FGWUtils.reconstruct_FGW(
+                Fx_rep, Fy_unsel_flat, Dx_rep, Dy_unsel_flat, 
+                a_rep, b_rep, 
+                alpha = self.alpha, eps = self.eps, 
+                outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
+            )
 
-
-        Fy_res_unsel = Fy_res_unsel.view(B, M - 1, H, K, D).transpose(1,2)
-        Dy_res_unsel = Dy_res_unsel.view(B, M - 1, H, K, K).transpose(1,2)
-
+            Fy_res_unsel = Fy_res_unsel.view(B, M - 1, H, K, D).transpose(1,2)
+            Dy_res_unsel = Dy_res_unsel.view(B, M - 1, H, K, K).transpose(1,2)
+        else:
+            mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
+            mask.scatter_(2, assign_idx.unsqueeze(-1), False)
+            unsel_idx = mask.nonzero(as_tuple=True)
+            Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
+            Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
+            Fy_res_unsel = Fy_unsel 
+            Dy_res_unsel = Dy_unsel 
+        
+        # ---- Step 5. Merge results ----
         Fy_res_sel = Fy_res_sel.unsqueeze(2)
         Dy_res_sel = Dy_res_sel.unsqueeze(2)
 
@@ -346,69 +401,23 @@ class GraphQuantizer(nn.Module):
         Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
         
-        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean() + self.vq_beta * loss_som.mean() 
-        if self.args.diversifying_loss:
-            # Ay_res_all: [B, H, M, K, K]
-            B, H, M, K, _ = Ay_res_all.shape
+        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
 
-            # (1) batch 평균 (각 LCG의 평균 affinity 구조)
-            A = Ay_res_all.mean(dim=0)  # [H, M, K, K]
-
-            # (2) LCG 단위로 head, node를 flatten
-            A_flat = A.permute(1, 0, 2, 3).reshape(M, -1)  # [M, H*K*K]
-
-            # (3) pairwise L1 거리 계산
-            dists = torch.cdist(A_flat, A_flat, p=1)  # [M, M]
-
-            # (4) 평균 거리 계산 (upper triangle만)
-            mean_dist = (2 * torch.triu(dists, diagonal=1).sum() / (M * (M - 1)))
-
-            # (5) margin-based disentanglement loss
-            dis_loss = F.relu(2.0 - mean_dist)
-            # (6) 전체 손실에 추가
-            fgw_loss = fgw_loss + 0.3 * dis_loss
-        return Fy_res_all, Ay_res_all, fgw_loss 
-        # ---- Step 4. SOM regularizaion for unselected Latent Composite Graphs 
-        # B, H = assign_idx.shape 
+        if self.additional_FGW:
+            fgw_loss += 0.3 * loss_som
         
-        # M, K, D = Fy.shape
-        # mask = torch.ones((B, H, M), dtype=torch.bool, device=Fy.device)
-        # mask.scatter_(2, assign_idx.unsqueeze(-1), False)
-        # unsel_idx = mask.nonzero(as_tuple=True)
-
-        # # 선택되지 않은 LCG들만 추출
-        # Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
-        # Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
-
-        # # === FGW reconstruction (unselected 부분은 생략) ===
-        # # 대신 원본 Fy, Dy를 그대로 사용
-        # Fy_res_unsel = Fy_unsel
-        # Dy_res_unsel = Dy_unsel
-
-        # # 선택된 LCG 차원 맞추기
-        # Fy_res_sel = Fy_res_sel.unsqueeze(2)
-        # Dy_res_sel = Dy_res_sel.unsqueeze(2)
-
-        # # === 전체 LCG 병합 ===
-        # Fy_res_all = torch.cat([Fy_res_sel, Fy_res_unsel], dim=2)  # [B, H, M, K, D]
-        # Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim=2)  # [B, H, M, K, K]
-        # Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
-
-        # # === FGW total loss ===
-        # fgw_loss = (
-        #     loss_dict.mean()
-        #     + self.vq_beta * loss_enc.mean()
-        # )
-        # # 초기화는 한 번만
-        # if not hasattr(self, "assign_counts"):
-        #     self.assign_counts = torch.zeros(M, dtype=torch.long, device=Fy.device)
-
-        # # assign 결과 누적
-        # unique_idx, counts = torch.unique(assign_idx, return_counts=True)
-        # self.assign_counts[unique_idx] += counts
-
-        # # 로그 확인
-        # print("assign_counts:", self.assign_counts.tolist())
-
-        # print("Loss components:", loss_dict.mean().item(), loss_enc.mean().item())
-        # return Fy_res_all, Ay_res_all, fgw_loss
+        print(f"\n{'='*70}")
+        print(f"🔍 [DEBUG] Final FGW loss")
+        print(f"{'='*70}")
+        print(f"  fgw_loss: {fgw_loss.item():.6f}")
+        print(f"  fgw_loss.requires_grad: {fgw_loss.requires_grad}")
+        print(f"  fgw_loss.grad_fn: {fgw_loss.grad_fn}")
+        
+        if fgw_loss.requires_grad:
+            print(f"\n  ✅ SUCCESS: fgw_loss has gradient!")
+        else:
+            print(f"\n  ❌ FAILURE: fgw_loss still has no gradient!")
+        
+        print(f"{'='*70}\n")
+        
+        return Fy_res_all, Ay_res_all, fgw_loss
