@@ -256,7 +256,7 @@ class GraphQuantizer(nn.Module):
         self.eps = eps 
         self.outer_iters = outer_iters 
         self.sinkhorn_iters = sinkhorn_iters 
-        
+        self.additional_FGW = self.args.additional_FGW
     def forward(self, P_affinity : torch.Tensor, basis_outputs : torch.Tensor, latent_graph : torch.Tensor):
         """
             Args:

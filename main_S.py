@@ -278,7 +278,13 @@ def train_and_validate(args, model, train_loader, val_loader,
     for epoch in range(epochs):
         # -------- Train --------
         model.train()
-        train_loss = train_func(model, train_loader, criterion, optimizer, device)
+        
+        # ✅ 첫 epoch만 debug 모드로 실행
+        if epoch == 0:
+            train_loss = train_func(model, train_loader, criterion, optimizer, device, debug_first=True)
+        else:
+            train_loss = train_func(model, train_loader, criterion, optimizer, device, debug_first=False)
+        
         train_losses.append(train_loss)
 
         # 스케줄러: epoch-wise step (per-step 원하면 train_func 내부에서 step 필요)
