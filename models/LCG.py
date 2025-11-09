@@ -256,6 +256,7 @@ class GraphQuantizer(nn.Module):
         self.eps = eps 
         self.outer_iters = outer_iters 
         self.sinkhorn_iters = sinkhorn_iters 
+        self.additional_FGW = self.args.additional_FGW
         
     def forward(self, P_affinity : torch.Tensor, basis_outputs : torch.Tensor, latent_graph : torch.Tensor):
         """
@@ -282,7 +283,7 @@ class GraphQuantizer(nn.Module):
         b = torch.ones(B, latent_graph.M, latent_graph.K, device=Fx.device) / latent_graph.K 
 
         # ---- Step 1. Fused Gromov-Wasserstein distance computation for selection ---- 
-        with torch. no_grad():
+        with torch.no_grad():
             Pi_all, fgw_values = FGWUtils.assign_FGW(
                 Fx, Fy, Dx, Dy, a, b,
                 alpha = self.alpha, eps = self.eps, 
@@ -313,32 +314,42 @@ class GraphQuantizer(nn.Module):
         # ---- Step 4. SOM regularizaion for unselected Latent Composite Graphs 
         B, H = assign_idx.shape 
         M, K, D = Fy.shape
-        mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
-        mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
-        unsel_idx = mask.nonzero(as_tuple = True)
 
-        Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
-        Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
+        if self.args.additional_FGW:
+            mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
+            mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
+            unsel_idx = mask.nonzero(as_tuple = True)
 
-        Fx_rep = Fx.detach().repeat_interleave(M-1, dim = 0)
-        Dx_rep = Dx.detach().repeat_interleave(M-1, dim = 0)
-        a_rep = a.repeat_interleave(M-1, dim = 0)
-        b_rep = torch.ones_like(b_sel).repeat_interleave(M-1, dim = 0)
+            Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
+            Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
+
+            Fx_rep = Fx.detach().repeat_interleave(M-1, dim = 0)
+            Dx_rep = Dx.detach().repeat_interleave(M-1, dim = 0)
+            a_rep = a.repeat_interleave(M-1, dim = 0)
+            b_rep = torch.ones_like(b_sel).repeat_interleave(M-1, dim = 0)
 
         
-        Fy_unsel_flat = Fy_unsel.view(B * (M - 1), H, K, D)
-        Dy_unsel_flat = Dy_unsel.view(B * (M - 1), H, K, K)
-        Fy_res_unsel, Dy_res_unsel, loss_som = FGWUtils.reconstruct_FGW(
-            Fx_rep, Fy_unsel_flat, Dx_rep, Dy_unsel_flat, 
-            a_rep, b_rep, 
-            alpha = self.alpha, eps = self.eps, 
-            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
-        )
+            Fy_unsel_flat = Fy_unsel.view(B * (M - 1), H, K, D)
+            Dy_unsel_flat = Dy_unsel.view(B * (M - 1), H, K, K)
+            Fy_res_unsel, Dy_res_unsel, loss_som = FGWUtils.reconstruct_FGW(
+                Fx_rep, Fy_unsel_flat, Dx_rep, Dy_unsel_flat, 
+                a_rep, b_rep, 
+                alpha = self.alpha, eps = self.eps, 
+                outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
+            )
 
-
-        Fy_res_unsel = Fy_res_unsel.view(B, M - 1, H, K, D).transpose(1,2)
-        Dy_res_unsel = Dy_res_unsel.view(B, M - 1, H, K, K).transpose(1,2)
-
+            Fy_res_unsel = Fy_res_unsel.view(B, M - 1, H, K, D).transpose(1,2)
+            Dy_res_unsel = Dy_res_unsel.view(B, M - 1, H, K, K).transpose(1,2)
+        else:
+            mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
+            mask.scatter_(2, assign_idx.unsqueeze(-1), False)
+            unsel_idx = mask.nonzero(as_tuple=True)
+            Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
+            Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
+            Fy_res_unsel = Fy_unsel 
+            Dy_res_unsel = Dy_unsel 
+        
+        # ---- Step 5. Merge results ----
         Fy_res_sel = Fy_res_sel.unsqueeze(2)
         Dy_res_sel = Dy_res_sel.unsqueeze(2)
 
@@ -346,69 +357,8 @@ class GraphQuantizer(nn.Module):
         Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
         
-        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean() + self.vq_beta * loss_som.mean() 
-        if self.args.diversifying_loss:
-            # Ay_res_all: [B, H, M, K, K]
-            B, H, M, K, _ = Ay_res_all.shape
+        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
 
-            # (1) batch 평균 (각 LCG의 평균 affinity 구조)
-            A = Ay_res_all.mean(dim=0)  # [H, M, K, K]
-
-            # (2) LCG 단위로 head, node를 flatten
-            A_flat = A.permute(1, 0, 2, 3).reshape(M, -1)  # [M, H*K*K]
-
-            # (3) pairwise L1 거리 계산
-            dists = torch.cdist(A_flat, A_flat, p=1)  # [M, M]
-
-            # (4) 평균 거리 계산 (upper triangle만)
-            mean_dist = (2 * torch.triu(dists, diagonal=1).sum() / (M * (M - 1)))
-
-            # (5) margin-based disentanglement loss
-            dis_loss = F.relu(2.0 - mean_dist)
-            # (6) 전체 손실에 추가
-            fgw_loss = fgw_loss + 0.3 * dis_loss
-        return Fy_res_all, Ay_res_all, fgw_loss 
-        # ---- Step 4. SOM regularizaion for unselected Latent Composite Graphs 
-        # B, H = assign_idx.shape 
-        
-        # M, K, D = Fy.shape
-        # mask = torch.ones((B, H, M), dtype=torch.bool, device=Fy.device)
-        # mask.scatter_(2, assign_idx.unsqueeze(-1), False)
-        # unsel_idx = mask.nonzero(as_tuple=True)
-
-        # # 선택되지 않은 LCG들만 추출
-        # Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
-        # Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
-
-        # # === FGW reconstruction (unselected 부분은 생략) ===
-        # # 대신 원본 Fy, Dy를 그대로 사용
-        # Fy_res_unsel = Fy_unsel
-        # Dy_res_unsel = Dy_unsel
-
-        # # 선택된 LCG 차원 맞추기
-        # Fy_res_sel = Fy_res_sel.unsqueeze(2)
-        # Dy_res_sel = Dy_res_sel.unsqueeze(2)
-
-        # # === 전체 LCG 병합 ===
-        # Fy_res_all = torch.cat([Fy_res_sel, Fy_res_unsel], dim=2)  # [B, H, M, K, D]
-        # Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim=2)  # [B, H, M, K, K]
-        # Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
-
-        # # === FGW total loss ===
-        # fgw_loss = (
-        #     loss_dict.mean()
-        #     + self.vq_beta * loss_enc.mean()
-        # )
-        # # 초기화는 한 번만
-        # if not hasattr(self, "assign_counts"):
-        #     self.assign_counts = torch.zeros(M, dtype=torch.long, device=Fy.device)
-
-        # # assign 결과 누적
-        # unique_idx, counts = torch.unique(assign_idx, return_counts=True)
-        # self.assign_counts[unique_idx] += counts
-
-        # # 로그 확인
-        # print("assign_counts:", self.assign_counts.tolist())
-
-        # print("Loss components:", loss_dict.mean().item(), loss_enc.mean().item())
-        # return Fy_res_all, Ay_res_all, fgw_loss
+        if self.additional_FGW:
+            fgw_loss += 0.3 * loss_som
+        return Fy_res_all, Ay_res_all, fgw_loss
