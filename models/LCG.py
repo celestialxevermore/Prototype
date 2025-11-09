@@ -102,28 +102,38 @@ class FGWUtils:
     # ---- 2. reconstruct (grad_on) ---- 
     @staticmethod 
     def reconstruct_FGW(Fx, Fy_sel, Dx, Dy_sel, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30):
-        """
-            reconstruction phase : update assigned latent composite graphs on node-level
-            Fx : [B, H, N, D]
-            Fy_sel : [B, H, K, D]
-            Dx : [B, H, N, N]
-            Dy_sel : [B, H, K, K]
-            Return : 
-                Fy_res : [B, H, K, D] : (updated latent composite graph node embeddings)
-                Dy_res : [D, H, K, K] : (updated latent composite graph affinity matrices)
-                fgw_loss : scalar
-        """
+        print(f"\n🔍 [reconstruct_FGW] Input check:")
+        print(f"  Fx.requires_grad: {Fx.requires_grad}")
+        print(f"  Fy_sel.requires_grad: {Fy_sel.requires_grad}")
+        print(f"  Dx.requires_grad: {Dx.requires_grad}")
+        print(f"  Dy_sel.requires_grad: {Dy_sel.requires_grad}")
+        
         Pi = torch.einsum("bhn,bhk->bhnk", a, b)
-        for _ in range(outer_iters):
+        print(f"  Pi.requires_grad: {Pi.requires_grad}")
+        
+        for i in range(outer_iters):
             C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy_sel)
+            print(f"  [iter {i}] C_feat.requires_grad: {C_feat.requires_grad}")
+            
             C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy_sel, Pi)
+            print(f"  [iter {i}] C_gw.requires_grad: {C_gw.requires_grad}")
+            
             C = (1 - alpha) * C_feat + alpha * C_gw 
+            print(f"  [iter {i}] C.requires_grad: {C.requires_grad}")
+            
             Pi = FGWUtils._sinkhorn_ot(a, b, C.unsqueeze(2), eps = eps, iters = sinkhorn_iters)[:, :, 0]
-        # residual update 
-        Fy_res = Fy_sel #+ torch.einsum("bhnk,bhnd->bhkd",Pi,Fx)
+            print(f"  [iter {i}] Pi (after sinkhorn).requires_grad: {Pi.requires_grad}")
+        
+        print(f"\n  Final C.requires_grad: {C.requires_grad}")
+        print(f"  Final Pi.requires_grad: {Pi.requires_grad}")
+        
+        fgw_loss = (C * Pi).sum((-2, -1)).mean()
+        print(f"  fgw_loss.requires_grad: {fgw_loss.requires_grad}")
+        
+        Fy_res = Fy_sel
         Dy_res = LatentCompositeGraph.cosine_slot_cost_from_U(Fy_res)
-        fgw_loss = (C * Pi).sum((-2, -1)).mean() 
-        return Fy_res, Dy_res, fgw_loss 
+        
+        return Fy_res, Dy_res, fgw_loss
 
 
     @staticmethod
