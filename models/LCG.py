@@ -357,8 +357,8 @@ class GraphQuantizer(nn.Module):
         Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
         
-        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
-
+        #fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
+        fgw_loss = loss_enc.mean() + self.vq_beta * loss_dict.mean()
         if self.additional_FGW:
             fgw_loss += 0.3 * loss_som
         return Fy_res_all, Ay_res_all, fgw_loss

@@ -188,10 +188,11 @@ class Model(nn.Module):
         task_loss = 0.5 * (global_loss + local_loss)
         total_loss += task_loss 
         # === 4. KL consistency loss === 
-        p_local = F.log_softmax(local_pred.detach(), dim=-1)
-        p_global = F.softmax(global_pred, dim=-1)
-        kl_loss = F.kl_div(p_local, p_global, reduction='batchmean')
-        total_loss += 0.2 * kl_loss 
+        if self.args.kl_gamma > 0.0:
+            p_local = F.log_softmax(local_pred.detach(), dim=-1)
+            p_global = F.softmax(global_pred, dim=-1)
+            kl_loss = F.kl_div(p_local, p_global, reduction='batchmean')
+            total_loss += self.args.kl_gamma * kl_loss 
 
         # === 5. FGW loss (distribution alignment between Multiple source <-> Latent Composite Graph) ===
         total_loss += self.args.fgw_alpha * self.fgw_loss 
