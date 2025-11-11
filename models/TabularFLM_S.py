@@ -43,7 +43,6 @@ class Model(nn.Module):
         # ---- Latent Composite Graph Components ---- 
         # (1) LatentCompositeGraph : learnable latent composite graphs (codebook)
         self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
-
         # (2) GraphQuantizer : FGW-based quantization module 
         self.graph_quantizer = GraphQuantizer(args, alpha = args.fgw_alpha)
 
@@ -227,17 +226,6 @@ class Model(nn.Module):
             div_loss = torch.sum(distance * positive_mask) / (torch.sum(distance) + 1e-8)
             total_loss += 0.3 * div_loss
         
-        # # #---- Disentanglement Loss (λ=0.1, margin=2 고정, Disentangled Attention Graph Neural Network for Alzheimer’s Disease Diagnosis code) ----
-        # if hasattr(self, "_last_P_basis"):
-        #     A = self._last_P_basis  # [B, H, S, S]
-        #     B, H, S, _ = A.shape
-        #     A_cols = A.permute(0, 2, 1, 3)  # [B, S, H, S]
-        #     dists = torch.cdist(A_cols, A_cols, p=1)  # [B, S, H, H]
-        #     avg_dists = torch.mean(dists, 1)          # [B, H, H]
-        #     mean_dist = (2 * torch.triu(avg_dists, diagonal=1).sum(dim=(1, 2)) / (H * (H - 1))).mean()
-        #     dis_loss = F.relu(2 - mean_dist)
-        #     total_loss = total_loss + 0.3 * dis_loss
-        #     total_loss += 0.3 * dis_loss
         return total_loss
 
 
@@ -277,6 +265,7 @@ class Model(nn.Module):
         if last_att is not None:
             self._last_P_basis = last_att[:, :, 1:, 1:] # P_affinity 
         # (4) FGW-based quantization ---- 
+        self.basis_outputs_for_viz = basis_outputs
 
         Fy_res, Ay_res, fgw_loss = self.graph_quantizer(
             self._last_P_basis, 
@@ -286,10 +275,6 @@ class Model(nn.Module):
         # (5) Head-wise GNN message passing & readout ---- 
         expert_outputs = self.gnn_experts(Fy_res, Ay_res) # [B, H, D]
         # (6) Coordinator-weighted combination ----
-
-        #global_output = torch.sum(coordinates.unsqueeze(-1) * expert_outputs, dim = 1) #[B, D]
-        #weighted = coordinates.unsqueeze(-1) * expert_outputs 
-        #global_output = weighted.flatten(1)
         # # (7) Global prediction
         #global_pred = self.ghead(global_output)   
         expert_outputs = (coordinates.unsqueeze(1).unsqueeze(-1) * expert_outputs).sum(dim = 2)

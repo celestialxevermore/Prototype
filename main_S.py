@@ -85,7 +85,7 @@ def get_args():
     parser.add_argument("--n_graphs", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
     parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
-    parser.add_argument('--fgw_alpha', type = float, default =0.5)
+    parser.add_argument('--fgw_alpha', type = float, default =0.01)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
     parser.add_argument('--kl_gamma', type = float, default = 0.2)
     parser.add_argument('--additional_FGW',action = 'store_true')
@@ -430,9 +430,33 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
 
     is_bin = (args.num_classes == 2)
     crit   = nn.BCEWithLogitsLoss() if is_bin else nn.CrossEntropyLoss()
-    opt    = optim.Adam(model.parameters(), lr=args.source_lr, weight_decay=1e-5)
+    
+    base_params = [
+        p for name, p in model.named_parameters()
+        if "latent_graph" not in name and p.requires_grad
+    ]
+    lcg_params = [
+        p for name, p in model.named_parameters()
+        if "latent_graph" in name and p.requires_grad
+    ]
+    lcg_lr_multiplier = 1000.0 
+    lcg_lr = args.source_lr * lcg_lr_multiplier 
+    
+    logger.info(f"--- 🚀 Applying Differential LR ---")
+    logger.info(f"   Base LR: {args.source_lr}")
+    logger.info(f"   LCG LR:  {lcg_lr} (x{lcg_lr_multiplier})")
+    
+    opt = optim.Adam(
+        [
+            {'params': base_params},
+            {'params': lcg_params, 'lr': lcg_lr} # 👈 LCG 파라미터 그룹에만 lcg_lr 적용
+        ], 
+        lr=args.source_lr, # 기본 LR (base_params에 적용됨)
+        weight_decay=1e-5
+    )
+    
+    total_params = sum(p.numel() for group in opt.param_groups for p in group['params'])
 
-    # ✅ train_epochs==0이면 스케줄러/학습 루프 스킵 (eval-only)
     total_epochs = int(args.train_epochs)
     if total_epochs > 0:
         warmup_epochs = max(1, int(args.warmup_ratio * total_epochs))

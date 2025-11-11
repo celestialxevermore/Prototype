@@ -101,29 +101,59 @@ class FGWUtils:
         return Pi, fgw_values
     # ---- 2. reconstruct (grad_on) ---- 
     @staticmethod 
-    def reconstruct_FGW(Fx, Fy_sel, Dx, Dy_sel, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30):
-        """
-            reconstruction phase : update assigned latent composite graphs on node-level
-            Fx : [B, H, N, D]
-            Fy_sel : [B, H, K, D]
-            Dx : [B, H, N, N]
-            Dy_sel : [B, H, K, K]
-            Return : 
-                Fy_res : [B, H, K, D] : (updated latent composite graph node embeddings)
-                Dy_res : [D, H, K, K] : (updated latent composite graph affinity matrices)
-                fgw_loss : scalar
-        """
+    def reconstruct_FGW(Fx, Fy_sel, Dx, Dy_sel, a, b, 
+                        alpha = 0.5, eps = 0.05, 
+                        outer_iters = 10, sinkhorn_iters = 30,
+                        map_encoder_output: bool = False):
+        
+        # --- 1. Pi, fgw_loss 계산 (기존과 동일) ---
         Pi = torch.einsum("bhn,bhk->bhnk", a, b)
         for _ in range(outer_iters):
             C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy_sel)
             C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy_sel, Pi)
             C = (1 - alpha) * C_feat + alpha * C_gw 
             Pi = FGWUtils._sinkhorn_ot(a, b, C.unsqueeze(2), eps = eps, iters = sinkhorn_iters)[:, :, 0]
-        # residual update 
-        Fy_res = Fy_sel #+ torch.einsum("bhnk,bhnd->bhkd",Pi,Fx)
-        Dy_res = LatentCompositeGraph.cosine_slot_cost_from_U(Fy_res)
+        
         fgw_loss = (C * Pi).sum((-2, -1)).mean() 
-        return Fy_res, Dy_res, fgw_loss 
+
+        # --- 2. [수정] 플래그에 따라 반환값 분기 ---
+        if map_encoder_output:
+            # === Path (b)용: 그래디언트가 Fx로 흘러야 함 ===
+            Pi_detached = Pi.detach()
+            
+            # 1. Fx_mapped 계산
+            # [32, 1, 13, 8] * [32, 1, 13, 768] -> [32, 1, 8, 768]
+            Fx_mapped = torch.einsum("bhnk,bhnd->bhkd", Pi_detached, Fx)
+            
+            # --- ❗️❗️ 여기가 핵심 수정 ❗️❗️ ---
+            # b_k_for_Fx shape을 [B, H, K, 1]로 만듭니다
+            
+            # Pi_detached.sum(dim=-2) -> [32, 1, 8] (B, H, K)
+            b_k_for_Fx = Pi_detached.sum(dim=-2) 
+            
+            # b_k_for_Fx.unsqueeze(-1) -> [32, 1, 8, 1] (B, H, K, 1)
+            b_k_for_Fx = b_k_for_Fx.unsqueeze(-1) 
+            
+            # [32, 1, 8, 768] / [32, 1, 8, 1] -> 브로드캐스팅 성공
+            Fx_mapped = Fx_mapped / (b_k_for_Fx + 1e-8) 
+            # ------------------------------------
+            
+            Fy_res = Fx_mapped # 👈 Fx와 그래디언트가 연결됨
+            
+            # 2. Dx_mapped 계산
+            Dx_mapped = torch.einsum("bhnk,bhml,bhnm->bhkl", Pi_detached, Pi_detached, Dx)
+            
+            b_k_for_Dx = Pi_detached.sum(dim=-2, keepdim=True) # [B, H, 1, K]
+            b_kl_denom = torch.einsum("bhnk,bhml->bhkl", b_k_for_Dx, b_k_for_Dx.transpose(-1, -2)) # [B, H, K, K]
+
+            Dy_res = Dx_mapped / (b_kl_denom + 1e-8) # 👈 Dx와 그래디언트가 연결됨
+            
+        else:
+            # === Path (a)용: 그래디언트가 Fy_sel로 흘러야 함 ===
+            Fy_res = Fy_sel
+            Dy_res = Dy_sel 
+
+        return Fy_res, Dy_res, fgw_loss
 
 
     @staticmethod
@@ -240,6 +270,7 @@ class LatentCompositeGraph(nn.Module):
                 Dy : [M, K, K] cosine-based structural distances for each latent graph 
         """
         Dy = self.cosine_slot_cost_from_U(self.node_embeddings)
+        
         return self.node_embeddings, Dy
         
 
@@ -277,6 +308,20 @@ class GraphQuantizer(nn.Module):
         Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
         # (2) Latent composite graph & affinity 
         Fy, Dy = latent_graph()
+        if not hasattr(self, 'step_counter'): self.step_counter = 0
+        self.step_counter += 1
+        
+        if self.step_counter % 1 == 0:
+            print("\n" + "*"*50)
+            print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
+            print("  [CODEBOOK (Fy)]")
+            print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
+            print("  [ENCODER (Fx)]")
+            print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
+            if Fx.std().item() > 1.0: # (std가 1.0 이상이면 폭주로 간주)
+                print("   -> ❗️❗️❗️ WARNING: Fx (인코더 출력)이 폭주하고 있습니다!")
+            print("*"*50 + "\n")
+        print(f" min : {Fy.min()} max : {Fy.max()}, mean : {Fy.mean()} std : {Fy.std()} grad : {Fy.grad}")
 
         # (3) Uniform marginals 
         a = torch.ones(B, H, N, device = Fx.device) / N 
@@ -295,23 +340,25 @@ class GraphQuantizer(nn.Module):
         Fy_sel = Fy[assign_idx] # [B, H, K, D]
         Dy_sel = Dy[assign_idx] # [B, H, K, K]
         b_sel = b[torch.arange(B).unsqueeze(1), assign_idx]
-        #Pi_sel = Pi_all[torch.arange(B)[:, None], torch.arange(H)[None, :], assign_idx] # [B,H,N,K]
 
-        # ---- Step 3. FGW-based reconstruction 
-        # (a) dictionary update (encoder frozen)
-        Fy_res_sel, Dy_res_sel, loss_dict = FGWUtils.reconstruct_FGW(
+        Fy_res_sel_detached, Dy_res_sel_detached, loss_dict = FGWUtils.reconstruct_FGW(
             Fx.detach(), Fy_sel, Dx.detach(), Dy_sel, a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
-            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
-        )
-        # (b) encoder update (dictionary frozen)
-        _, _, loss_enc = FGWUtils.reconstruct_FGW(
-            Fx, Fy_sel.detach(), Dx, Dy_sel.detach(), a, b_sel, 
-            alpha = self.alpha, eps = self.eps, 
-            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = False
         )
 
-        # ---- Step 4. SOM regularizaion for unselected Latent Composite Graphs 
+        Fy_res_sel_live, Dy_res_sel_live, loss_enc = FGWUtils.reconstruct_FGW(
+            Fx, Fy_sel.detach(), Dx, Dy_sel.detach(), a, b_sel, 
+            alpha = self.alpha, eps = self.eps, 
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = True
+        )
+
+        Fy_res_sel_ste = Fy_res_sel_live + (Fy_res_sel_detached - Fy_res_sel_live).detach() 
+        Dy_res_sel_ste = Dy_res_sel_live + (Dy_res_sel_detached - Dy_res_sel_live).detach()
+        # --- 4. 최종 STE 출력 (디코더 입력) 상태 확인 ---
+
+        print(f"   loss_dict: {loss_dict.item():.6f}")
+        print(f"   loss_enc:  {loss_enc.item():.6f}")
         B, H = assign_idx.shape 
         M, K, D = Fy.shape
 
@@ -350,15 +397,16 @@ class GraphQuantizer(nn.Module):
             Dy_res_unsel = Dy_unsel 
         
         # ---- Step 5. Merge results ----
-        Fy_res_sel = Fy_res_sel.unsqueeze(2)
-        Dy_res_sel = Dy_res_sel.unsqueeze(2)
+        Fy_res_sel = Fy_res_sel_ste.unsqueeze(2)
+        Dy_res_sel = Dy_res_sel_ste.unsqueeze(2)
 
         Fy_res_all = torch.cat([Fy_res_sel, Fy_res_unsel], dim = 2)
         Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
         
-        #fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
-        fgw_loss = loss_enc.mean() + self.vq_beta * loss_dict.mean()
+        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
+        #fgw_loss = loss_enc.mean() + self.vq_beta * loss_dict.mean()
         if self.additional_FGW:
             fgw_loss += 0.3 * loss_som
+
         return Fy_res_all, Ay_res_all, fgw_loss

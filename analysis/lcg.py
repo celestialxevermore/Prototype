@@ -7,8 +7,7 @@ import torch
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
-from scipy.stats import gaussian_kde
-from matplotlib.patches import Ellipse
+import pandas as pd 
 
 # UMAP import
 try:
@@ -27,6 +26,8 @@ if str(root_dir) not in sys.path:
 from utils.util import fix_seed
 from dataset.data_dataloaders import prepare_embedding_dataloaders
 from models.TabularFLM_S import Model
+# FGWUtils와 LCG 임포트 (argmin 계산용)
+from models.LCG import FGWUtils, LatentCompositeGraph
 
 
 def ensure_dir(p: Path):
@@ -34,6 +35,7 @@ def ensure_dir(p: Path):
 
 
 class LCGVisualizer:
+    # ... (init, _make_loader, _forward_collect는 이전과 동일) ...
     def __init__(self, checkpoint_path: str, device="cuda"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         print(f"[INFO] 📂 Loading checkpoint: {checkpoint_path}")
@@ -54,7 +56,7 @@ class LCGVisualizer:
             ckpt["model_state_dict"], strict=False
         )
         if missing:
-            print(f"⚠️ Missing keys: {missing[:5]}...")  # 처음 5개만
+            print(f"⚠️ Missing keys: {missing[:5]}...")
         if unexpected:
             print(f"⚠️ Unexpected keys: {unexpected[:5]}...")
         
@@ -65,23 +67,21 @@ class LCGVisualizer:
         self.lcg = self.model.latent_graph
         self.M, self.K, self.D = self.lcg.M, self.lcg.K, self.lcg.D
         
-        # ✅ 진단: 학습된 가중치 확인
+        # ✅ 진단: 학습된 가중치 확인 (동일)
         emb = self.lcg.node_embeddings.detach().cpu()
         print(f"\n🔍 LCG 가중치 진단:")
         print(f"  - Shape: {emb.shape} (M={self.M}, K={self.K}, D={self.D})")
         print(f"  - node_embeddings[0,0,:5]: {emb[0,0,:5].numpy()}")
         print(f"  - Min/Max: {emb.min():.4f} / {emb.max():.4f}")
         print(f"  - Mean/Std: {emb.mean():.4f} / {emb.std():.4f}")
-        
-        # 랜덤 초기화 판별 (Xavier: std ≈ sqrt(2/(fan_in+fan_out)))
         expected_std = np.sqrt(2.0 / (self.K + self.D))
         if abs(emb.std().item() - expected_std) < 0.05:
             print(f"  ⚠️ WARNING: 가중치가 랜덤 초기화 상태일 수 있음!")
-            print(f"     (현재 std={emb.std():.4f}, Xavier 예상={expected_std:.4f})")
+            print(f"      (현재 std={emb.std():.4f}, Xavier 예상={expected_std:.4f})")
         else:
             print(f"  ✅ 학습된 가중치로 판단됨")
 
-    def _make_loader(self, dataset_name: str):
+    def _make_loader(self, dataset_name: str, batch_size=32):
         args2 = self.args
         args2.source_data = dataset_name
         fix_seed(args2.random_seed)
@@ -89,41 +89,79 @@ class LCGVisualizer:
         tr, va, te = res["loaders"]
         from torch.utils.data import ConcatDataset, DataLoader
         ds = ConcatDataset([tr.dataset, va.dataset, te.dataset])
-        return DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
+        return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
     @torch.no_grad()
     def _forward_collect(self, batch):
         bd = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
               for k, v in batch.items()}
-        desc_list, nv_list = [], []
         
-        if all(k in bd for k in ["cat_name_value_embeddings", "cat_desc_embeddings"]):
-            nv_list.append(bd["cat_name_value_embeddings"])
-            desc_list.append(bd["cat_desc_embeddings"])
-        if all(k in bd for k in ["num_prompt_embeddings", "num_desc_embeddings"]):
-            nv_list.append(bd["num_prompt_embeddings"])
-            desc_list.append(bd["num_desc_embeddings"])
+        _ = self.model.predict(bd) 
 
-        desc = torch.cat(desc_list, dim=1)
-        nv = torch.cat(nv_list, dim=1)
+        if not hasattr(self.model, "basis_outputs_for_viz"):
+            print("ERROR: 'self.model'에 'basis_outputs_for_viz' 속성이 없습니다.")
+            D_full = self.args.input_dim
+            return np.zeros((bd['y'].shape[0], 1, D_full)) 
+
+        basis_outputs = self.model.basis_outputs_for_viz
+        Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3) 
+        B, H, N, D_head = Fx.shape
+        D_full = H * D_head
         
-        if hasattr(self.model, "encode_graph"):
-            z_graph = self.model.encode_graph(desc, nv)
-        else:
-            z_graph = nv.mean(dim=1, keepdim=False).unsqueeze(1)
+        z_graph_flat = Fx.mean(dim=2).reshape(B, D_full)
+        z_graph = z_graph_flat.unsqueeze(1) 
+        
+        return z_graph.detach().cpu().numpy()
 
-        return z_graph[0].detach().cpu().numpy()
+    @torch.no_grad()
+    def _get_assignments_and_plans(self, batch):
+        """
+        배치를 입력받아, 'argmin' 인덱스 [B, H]와
+        전체 Transport Plan Pi [B, H, M, N, K]를 반환합니다.
+        """
+        bd = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+              for k, v in batch.items()}
+        
+        _ = self.model.predict(bd) 
+
+        basis_outputs = self.model.basis_outputs_for_viz
+        Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3)
+        B, H, N, D_head = Fx.shape
+        
+        P_affinity = self.model._last_P_basis 
+        Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
+        Dx = LatentCompositeGraph.affinity_to_distance(Dx) # Dx는 거리
+        
+        Fy, Dy_affinity = self.lcg() # 여기서 Dy_affinity는 LCG.forward()의 Dy (코사인 유사도)
+        Dy = LatentCompositeGraph.affinity_to_distance(Dy_affinity) # Dy는 거리
+
+        a = torch.ones(B, H, N, device = Fx.device) / N 
+        b = torch.ones(B, self.M, self.K, device=Fx.device) / self.K 
+
+        # no_grad()로 argmin 계산 (GraphQuantizer.forward의 Step 1과 동일)
+        Pi_all , fgw_values = FGWUtils.assign_FGW(
+            Fx, Fy, Dx, Dy, a, b, # Dx, Dy 모두 거리
+            alpha = self.args.fgw_alpha, 
+            eps = 0.05, 
+            outer_iters = 10, 
+            sinkhorn_iters = 30
+        ) # fgw_values shape: [B,H,M], Pi_all shape: [B, H, M, N, K]
+        
+        assign_idx = torch.argmin(fgw_values, dim=-1) # [B, H]
+        
+        # Pi_all (전송 행렬)도 반환
+        return assign_idx, Pi_all
+    
+    # ... (visualize_lcg_only, _analyze_lcg_distances, visualize_sources_and_lcg는 이전과 동일) ...
 
     def visualize_lcg_only(self, out_root: Path, method="umap"):
         """LCG 노드들만 시각화 (학습 후 분포 확인)"""
         ensure_dir(out_root / "lcg_analysis")
         
-        # ✅ 학습된 node_embeddings 가져오기
-        lcg_nodes = self.lcg.node_embeddings.detach().cpu().numpy()  # [M, K, D]
+        lcg_nodes = self.lcg.node_embeddings.detach().cpu().numpy()
         M, K, D = lcg_nodes.shape
-        X = lcg_nodes.reshape(M * K, D)  # [M*K, D]
+        X = lcg_nodes.reshape(M * K, D) 
         
-        # 차원 축소
         reducer = (
             umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=42)
             if (method == "umap" and umap is not None)
@@ -131,7 +169,6 @@ class LCGVisualizer:
         )
         X_2d = reducer.fit_transform(X)
         
-        # 시각화
         cmap = plt.colormaps.get_cmap("tab10")
         plt.figure(figsize=(10, 8))
         
@@ -139,29 +176,15 @@ class LCGVisualizer:
             sub_nodes = X_2d[m * K:(m + 1) * K]
             color = cmap(m % 10)
             
-            # 노드 scatter
             plt.scatter(sub_nodes[:, 0], sub_nodes[:, 1],
-                       color=color, s=80, alpha=0.7, 
-                       edgecolor='black', linewidth=0.5,
-                       label=f"LCG_{m}")
+                        color=color, s=80, alpha=0.7, 
+                        edgecolor='black', linewidth=0.5,
+                        label=f"LCG_{m}")
             
-            # 중심점
             center = sub_nodes.mean(axis=0)
             plt.scatter(center[0], center[1], 
-                       marker="X", color=color, s=200,
-                       edgecolor='black', linewidth=1.5)
-            
-            # 노드 간 연결 (거리 기반)
-            for i in range(K):
-                for j in range(i+1, K):
-                    dist = np.linalg.norm(sub_nodes[i] - sub_nodes[j])
-                    if dist < np.percentile(
-                        [np.linalg.norm(sub_nodes[a] - sub_nodes[b]) 
-                         for a in range(K) for b in range(a+1, K)], 50
-                    ):  # 중간값 이하만 연결
-                        plt.plot([sub_nodes[i, 0], sub_nodes[j, 0]],
-                                [sub_nodes[i, 1], sub_nodes[j, 1]],
-                                color=color, alpha=0.2, linewidth=0.8)
+                        marker="X", color=color, s=200,
+                        edgecolor='black', linewidth=1.5)
         
         plt.legend(fontsize=9, frameon=True, loc='best')
         plt.title(f"Trained LCG Node Distributions ({method.upper()})", fontsize=14)
@@ -174,37 +197,29 @@ class LCGVisualizer:
         plt.close()
         print(f"[VIZ] ✅ Saved: {save_path}")
         
-        # 거리 분석
         self._analyze_lcg_distances(lcg_nodes, out_root)
 
     def _analyze_lcg_distances(self, lcg_nodes, out_root):
         """LCG 간 거리 분석"""
         M, K, D = lcg_nodes.shape
-        
-        # 각 LCG의 중심점 계산
-        centers = lcg_nodes.mean(axis=1)  # [M, D]
-        
-        # 중심점 간 거리 행렬
+        centers = lcg_nodes.mean(axis=1)
         from scipy.spatial.distance import pdist, squareform
         dist_matrix = squareform(pdist(centers, metric='euclidean'))
         
-        # 시각화
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
         
-        # (1) 거리 행렬 히트맵
         im = ax1.imshow(dist_matrix, cmap='viridis', aspect='auto')
         ax1.set_title("LCG Center-to-Center Distances", fontsize=12)
         ax1.set_xlabel("LCG Index"); ax1.set_ylabel("LCG Index")
         ax1.set_xticks(range(M)); ax1.set_yticks(range(M))
         plt.colorbar(im, ax=ax1, label="Euclidean Distance")
         
-        # (2) 거리 분포 히스토그램
         upper_tri = dist_matrix[np.triu_indices(M, k=1)]
         ax2.hist(upper_tri, bins=20, edgecolor='black', alpha=0.7)
         ax2.axvline(upper_tri.mean(), color='red', linestyle='--', 
-                   label=f'Mean: {upper_tri.mean():.3f}')
+                    label=f'Mean: {upper_tri.mean():.3f}')
         ax2.axvline(upper_tri.min(), color='blue', linestyle='--',
-                   label=f'Min: {upper_tri.min():.3f}')
+                    label=f'Min: {upper_tri.min():.3f}')
         ax2.set_title("Distribution of Inter-LCG Distances", fontsize=12)
         ax2.set_xlabel("Distance"); ax2.set_ylabel("Frequency")
         ax2.legend()
@@ -215,7 +230,6 @@ class LCGVisualizer:
         plt.close()
         print(f"[VIZ] ✅ Saved: {save_path}")
         
-        # 통계 출력
         print(f"\n📊 LCG 거리 통계:")
         print(f"  - 평균 거리: {upper_tri.mean():.4f}")
         print(f"  - 최소 거리: {upper_tri.min():.4f}")
@@ -228,7 +242,7 @@ class LCGVisualizer:
             print(f"  ⚠️ WARNING: LCG 분포가 고르지 않음 (std={upper_tri.std():.4f})")
 
     def visualize_sources_and_lcg(self, sources, out_root: Path, 
-                                  max_samples=200, method="umap"):
+                                      max_samples=200, method="umap"):
         """Multi-source 데이터 + LCG 함께 시각화"""
         ensure_dir(out_root / "joint_space")
         
@@ -236,55 +250,75 @@ class LCGVisualizer:
         print("[INFO] 🔄 Collecting embeddings...")
         
         for s in sources:
-            loader = self._make_loader(s)
+            loader = self._make_loader(s, batch_size=32)
+            temp_embeds = []
             for i, batch in enumerate(loader):
-                z_np = self._forward_collect(batch)
-                all_embeds.append(z_np)
-                all_labels.append(s)
-                if i >= max_samples:
+                z_np = self._forward_collect(batch) # [B, 1, D_full]
+                temp_embeds.append(z_np)
+                if (i * loader.batch_size) >= max_samples:
                     break
+            
+            if not temp_embeds: continue
+            
+            s_embeds = np.concatenate(temp_embeds, axis=0) 
+            all_embeds.append(s_embeds)
+            all_labels.extend([s] * len(s_embeds))
         
-        X = np.concatenate(all_embeds, axis=0)
+        if not all_embeds:
+            print("[VIZ] ⚠️ No embeddings collected. Skipping UMAP.")
+            return
+
+        X = np.concatenate(all_embeds, axis=0) 
+        if X.ndim == 3: 
+            X = X.reshape(-1, X.shape[-1]) 
+            
         X = StandardScaler().fit_transform(X)
         
-        # LCG 노드 추가
         lcg_nodes = self.lcg.node_embeddings.detach().cpu().numpy().reshape(-1, self.D)
-        X_all = np.concatenate([X, lcg_nodes], axis=0)
         
-        # 차원 축소
-        reducer = (
-            umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
-            if (method == "umap" and umap is not None)
-            else TSNE(n_components=2, perplexity=40, random_state=42)
-        )
-        X_2d_all = reducer.fit_transform(X_all)
-        X_2d, lcg_2d = X_2d_all[:len(X)], X_2d_all[len(X):]
+        if lcg_nodes.shape[1] != X.shape[1]:
+            print(f"⚠️ LCG 노드 차원({lcg_nodes.shape[1]})과 샘플 차원({X.shape[1]})이 다릅니다!")
+            reducer_lcg = (
+                umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=42)
+                if (method == "umap" and umap is not None)
+                else TSNE(n_components=2, perplexity=min(30, lcg_nodes.shape[0]-1), random_state=42)
+            )
+            lcg_2d = reducer_lcg.fit_transform(lcg_nodes)
+            reducer_X = (
+                umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
+                if (method == "umap" and umap is not None)
+                else TSNE(n_components=2, perplexity=40, random_state=42)
+            )
+            X_2d = reducer_X.fit_transform(X)
+        else:
+            X_all = np.concatenate([X, lcg_nodes], axis=0)
+            reducer = (
+                umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
+                if (method == "umap" and umap is not None)
+                else TSNE(n_components=2, perplexity=40, random_state=42)
+            )
+            X_2d_all = reducer.fit_transform(X_all)
+            X_2d, lcg_2d = X_2d_all[:len(X)], X_2d_all[len(X):]
         
-        # 시각화
         colors = {s: plt.colormaps.get_cmap("tab10")(i % 10) 
-                 for i, s in enumerate(sources)}
+                  for i, s in enumerate(sources)}
         plt.figure(figsize=(10, 9))
         
-        # Source 데이터
         for s in sources:
             idx = [i for i, l in enumerate(all_labels) if l == s]
             plt.scatter(X_2d[idx, 0], X_2d[idx, 1],
-                       c=[colors[s]], s=15, alpha=0.5, label=f"{s}")
+                        c=[colors[s]], s=15, alpha=0.5, label=f"{s}")
         
-        # LCG
         cmap_lcg = plt.colormaps.get_cmap("Set3")
         for m in range(self.M):
             sub_nodes = lcg_2d[m * self.K:(m + 1) * self.K]
             color = cmap_lcg(m % 12)
-            
             plt.scatter(sub_nodes[:, 0], sub_nodes[:, 1],
-                       color=color, s=100, edgecolor='black', 
-                       linewidth=1.0, label=f"LCG_{m}", marker='D')
-            
-            # 중심
+                        color=color, s=100, edgecolor='black', 
+                        linewidth=1.0, label=f"LCG_{m}", marker='D')
             center = sub_nodes.mean(axis=0)
             plt.scatter(center[0], center[1], marker="X", 
-                       color=color, s=250, edgecolor='black', linewidth=2)
+                        color=color, s=250, edgecolor='black', linewidth=2)
         
         plt.legend(fontsize=8, frameon=True, loc='best', ncol=2)
         plt.title("Multi-Source Samples + Trained LCG Distributions", fontsize=13)
@@ -297,20 +331,200 @@ class LCGVisualizer:
         plt.close()
         print(f"[VIZ] ✅ Saved: {save_path}")
 
+    def visualize_lcg_assignments(self, sources, out_root: Path):
+        """
+        각 소스 데이터가 어떤 LCG에 할당되는지 누적 막대 그래프로 시각화합니다.
+        """
+        print("[INFO] 📊 Generating LCG assignment statistics...")
+        ensure_dir(out_root / "lcg_analysis")
+        
+        M = self.M
+        H = self.model.args.num_basis_heads
+        
+        counts = {}
+        for s in sources:
+            loader = self._make_loader(s, batch_size=32)
+            source_counts = np.zeros((M, H))
+            
+            for i, batch in enumerate(loader):
+                assign_idx_tensor, _ = self._get_assignments_and_plans(batch)
+                assign_idx_np = assign_idx_tensor.cpu().numpy()
+                
+                for b in range(assign_idx_np.shape[0]):
+                    for h in range(assign_idx_np.shape[1]):
+                        lcg_idx = assign_idx_np[b, h]
+                        source_counts[lcg_idx, h] += 1
+            counts[s] = source_counts
+
+        colors = {s: plt.colormaps.get_cmap("tab10")(i % 10) 
+                  for i, s in enumerate(sources)}
+        lcg_names = [f"LCG_{i}" for i in range(M)]
+        
+        for h in range(H):
+            plt.figure(figsize=(10, 6))
+            ax = plt.gca()
+            bottom = np.zeros(M)
+            
+            for s in sources:
+                source_counts_per_head = counts[s][:, h]
+                ax.bar(lcg_names, source_counts_per_head, 
+                       bottom=bottom, label=s, color=colors[s],
+                       edgecolor='black', linewidth=0.5)
+                bottom += source_counts_per_head
+            
+            ax.set_ylabel("Assigned Sample Count")
+            ax.set_title(f"LCG Assignment Distribution (Head {h})")
+            ax.legend(title="Sources", loc='upper right')
+            ax.grid(axis='y', linestyle='--', alpha=0.3)
+            plt.xticks(rotation=45, ha='right')
+            plt.tight_layout()
+            
+            save_path = out_root / "lcg_analysis" / f"lcg_assignments_head_{h}.png"
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"[VIZ] ✅ Saved: {save_path}")
+            
+    # [--- 수정: 컬러바 및 제목 Affinity로 변경 ---]
+    @torch.no_grad()
+    def visualize_lcg_affinities(self, out_root: Path): # 함수 이름도 Affinity로
+        """
+        학습된 LCG 8개의 내부 "유사도" ([K, K])를 2x4 그리드 히트맵으로 시각화합니다.
+        """
+        print("[INFO] 🎨 Generating LCG internal affinity heatmaps...")
+        ensure_dir(out_root / "lcg_analysis")
+        
+        # LCG.forward()가 반환하는 것이 Dy_affinity (코사인 유사도)
+        _ , Dy_affinity = self.lcg() 
+        Dy_affinity_np = Dy_affinity.detach().cpu().numpy() # [M, K, K]
+        
+        M, K, _ = Dy_affinity_np.shape
+        ncols = min(M, 4)
+        nrows = int(np.ceil(M / ncols))
+        
+        fig, axes = plt.subplots(nrows, ncols, 
+                                 figsize=(ncols * 4, nrows * 3.5), 
+                                 squeeze=False)
+        
+        # 유사도 범위는 -1 ~ 1
+        vmin, vmax = -1, 1
+        
+        for m in range(M):
+            ax = axes[m // ncols, m % ncols]
+            matrix = Dy_affinity_np[m]
+            
+            # vmin=-1, vmax=1 (유사도 범위)
+            # cmap='viridis' (낮은 값 보라색, 높은 값 노란색)
+            im = ax.imshow(matrix, cmap='viridis', vmin=vmin, vmax=vmax, 
+                           interpolation='nearest')
+            
+            ax.set_title(f"LCG_{m} Internal Affinity") # 제목 변경
+            ax.set_xlabel("Node Index (K)")
+            ax.set_ylabel("Node Index (K)")
+        
+        for m in range(M, nrows * ncols):
+            axes[m // ncols, m % ncols].axis('off')
+
+        fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.7, 
+                     label=f"Cosine similarity (-1 to 1)") # 컬러바 레이블 변경
+        
+        fig.suptitle("Trained LCG Internal Affinity Structures", fontsize=16, y=1.02)
+        plt.tight_layout()
+        
+        save_path = out_root / "lcg_analysis" / "lcg_internal_affinities.png"
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"[VIZ] ✅ Saved: {save_path}")
+    # [--- 수정 끝 ---]
+
+    # [--- 수정: visualize_lcg_node_usage 그리드 레이아웃 변경 ---]
+    @torch.no_grad()
+    def visualize_lcg_node_usage(self, sources, out_root: Path):
+        """
+        각 LCG가 샘플에 할당될 때, 내부 K개 노드를 얼마나 사용하는지 시각화합니다.
+        (즉, Transport Plan Pi의 K-marginal 분포)
+        """
+        print("[INFO] 📈 Generating LCG internal node usage (K-Marginal)...")
+        ensure_dir(out_root / "lcg_analysis")
+
+        M, K, H = self.M, self.K, self.model.args.num_basis_heads
+        
+        # 1. 집계: k_usage[source_name] = [M, K, H] 크기의 누적 분포
+        k_usage = {}
+        
+        for s in sources:
+            loader = self._make_loader(s, batch_size=32)
+            source_k_usage = np.zeros((M, K, H))
+            
+            for i, batch in enumerate(loader):
+                assign_idx, Pi_all = self._get_assignments_and_plans(batch)
+                B = assign_idx.shape[0]
+
+                for b in range(B):
+                    for h in range(H):
+                        lcg_idx = assign_idx[b, h]
+                        
+                        Pi_winner = Pi_all[b, h, lcg_idx, :, :]
+                        k_marginal = Pi_winner.sum(dim=0).cpu().numpy()
+                        
+                        source_k_usage[lcg_idx, :, h] += k_marginal
+            
+            k_usage[s] = source_k_usage
+
+        cmap = plt.colormaps.get_cmap("tab10")
+        colors = {s: cmap(i % 10) for i, s in enumerate(sources)}
+        
+        # --- [ ❗️❗️ 수정 ❗️❗️ ] ---
+        # 그리드 레이아웃을 H행 M열로 변경하여 가로로 길게 그리기
+        # H=1인 경우 (1, M) 행렬
+        fig, axes = plt.subplots(H, M, # H행 M열
+                                 figsize=(M * 3.5, H * 4), # 가로 길이 더 길게
+                                 squeeze=False)
+        
+        for h in range(H): # 먼저 Head를 반복
+            for m in range(M): # 그 다음 LCG를 반복
+                ax = axes[h, m] # ax 접근 순서도 변경
+
+                bottom = np.zeros(K)
+                
+                for s in sources:
+                    node_usage_k = k_usage[s][m, :, h] # 여전히 m, h 순서
+                    
+                    ax.bar(range(K), node_usage_k, 
+                           bottom=bottom, label=s, color=colors[s],
+                           edgecolor='black', linewidth=0.5)
+                    
+                    bottom += node_usage_k
+                
+                ax.set_title(f"LCG_{m} / Head_{h}")
+                ax.set_xlabel("Node Index (K)")
+                ax.set_ylabel("Total Transport Mass")
+                ax.set_xticks(range(K))
+
+        handles, labels = ax.get_legend_handles_labels()
+        fig.legend(handles, labels, title="Sources", loc='upper right')
+        fig.suptitle("LCG Internal Node Usage (Transport Plan K-Marginal)", fontsize=16, y=1.02)
+        plt.tight_layout()
+        
+        save_path = out_root / "lcg_analysis" / "lcg_internal_node_usage.png"
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"[VIZ] ✅ Saved: {save_path}")
+    # [--- 수정 끝 ---]
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint_dir", type=str, required=True,
-                   help="Path to checkpoint file")
+                    help="Path to checkpoint file")
     ap.add_argument("--output_dir", type=str, default=None)
     ap.add_argument("--max_samples", type=int, default=200)
     ap.add_argument("--method", type=str, default="umap", 
-                   choices=["umap", "tsne"])
+                    choices=["umap", "tsne"])
     args = ap.parse_args()
 
     viz = LCGVisualizer(args.checkpoint_dir)
     out_root = (Path(args.output_dir) if args.output_dir 
-               else Path(args.checkpoint_dir).parent / "visualization")
+                else Path(args.checkpoint_dir).parent / "visualization")
     ensure_dir(out_root)
 
     # (1) LCG만 시각화
@@ -318,8 +532,8 @@ def main():
     
     # (2) Multi-source + LCG 함께 시각화
     sources = (viz.args.source_data 
-              if isinstance(viz.args.source_data, (list, tuple)) 
-              else [viz.args.source_data])
+               if isinstance(viz.args.source_data, (list, tuple)) 
+               else [viz.args.source_data])
     target = getattr(viz.args, "target_data", None)
     if target:
         sources.append(target)
@@ -327,6 +541,15 @@ def main():
     viz.visualize_sources_and_lcg(sources, out_root, 
                                   max_samples=args.max_samples,
                                   method=args.method)
+    
+    # (3) LCG 할당 누적 막대 그래프 시각화
+    viz.visualize_lcg_assignments(sources, out_root)
+    
+    # (4) LCG 내부 "유사도" 시각화 (함수 이름 및 내용 변경)
+    viz.visualize_lcg_affinities(out_root) # 함수 이름 변경
+    
+    # (5) LCG K-노드 사용량(Pi) 시각화 (레이아웃 변경)
+    viz.visualize_lcg_node_usage(sources, out_root)
     
     print(f"\n✅ 시각화 완료! 결과: {out_root}")
 
