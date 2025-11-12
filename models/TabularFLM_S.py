@@ -4,9 +4,6 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import pdb
-from sklearn.preprocessing import PowerTransformer, StandardScaler
-import json
-import os
 from torch import Tensor
 import math
 import torch.nn.init as nn_init
@@ -276,7 +273,6 @@ class Model(nn.Module):
         expert_outputs = self.gnn_experts(Fy_res, Ay_res) # [B, H, D]
         # (6) Coordinator-weighted combination ----
         # # (7) Global prediction
-        #global_pred = self.ghead(global_output)   
         expert_outputs = (coordinates.unsqueeze(1).unsqueeze(-1) * expert_outputs).sum(dim = 2)
         global_output = expert_outputs.reshape(expert_outputs.size(0), -1)
         global_pred = self.ghead(global_output)

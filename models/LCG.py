@@ -268,10 +268,18 @@ class LatentCompositeGraph(nn.Module):
             Returns:
                 node_embeddings: [M, K, D]
                 Dy : [M, K, K] cosine-based structural distances for each latent graph 
+                LCG_diversifying_loss : (Scalar) Loss to encourage diversify among the latent composite graph
         """
-        Dy = self.cosine_slot_cost_from_U(self.node_embeddings)
-        
-        return self.node_embeddings, Dy
+
+        Dy_affinity = self.cosine_slot_cost_from_U(self.node_embeddings)
+        diversify_loss = None
+        if getattr(self.args, "lcg_diversifying_loss", False) is True:
+            identity_mask = torch.eye(self.K, device = Dy_affinity.device, dtype = torch.bool).unsqueeze(0)
+            identity_mask = identity_mask.expand(self.M, -1, -1)
+            off_diagonal_affinities = Dy_affinity[~identity_mask].view(self.M, -1)
+            diversify_loss = torch.mean(torch.abs(off_diagonal_affinities))
+
+        return self.node_embeddings, Dy_affinity, diversify_loss
         
 
 class GraphQuantizer(nn.Module):
@@ -306,22 +314,25 @@ class GraphQuantizer(nn.Module):
         Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3) #[B, H, N, D/H]
 
         Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
+        Dx = LatentCompositeGraph.affinity_to_distance(Dx)
         # (2) Latent composite graph & affinity 
-        Fy, Dy = latent_graph()
-        if not hasattr(self, 'step_counter'): self.step_counter = 0
-        self.step_counter += 1
         
-        if self.step_counter % 1 == 0:
-            print("\n" + "*"*50)
-            print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
-            print("  [CODEBOOK (Fy)]")
-            print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
-            print("  [ENCODER (Fx)]")
-            print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
-            if Fx.std().item() > 1.0: # (std가 1.0 이상이면 폭주로 간주)
-                print("   -> ❗️❗️❗️ WARNING: Fx (인코더 출력)이 폭주하고 있습니다!")
-            print("*"*50 + "\n")
-        print(f" min : {Fy.min()} max : {Fy.max()}, mean : {Fy.mean()} std : {Fy.std()} grad : {Fy.grad}")
+        Fy, Dy, lcg_diversifying_loss = latent_graph()
+
+        # if not hasattr(self, 'step_counter'): self.step_counter = 0
+        # self.step_counter += 1
+        
+        # if self.step_counter % 1 == 0:
+        #     print("\n" + "*"*50)
+        #     print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
+        #     print("  [CODEBOOK (Fy)]")
+        #     print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
+        #     print("  [ENCODER (Fx)]")
+        #     print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
+        #     if Fx.std().item() > 1.0: # (std가 1.0 이상이면 폭주로 간주)
+        #         print("   -> ❗️❗️❗️ WARNING: Fx (인코더 출력)이 폭주하고 있습니다!")
+        #     print("*"*50 + "\n")
+        # print(f" min : {Fy.min()} max : {Fy.max()}, mean : {Fy.mean()} std : {Fy.std()} grad : {Fy.grad}")
 
         # (3) Uniform marginals 
         a = torch.ones(B, H, N, device = Fx.device) / N 
@@ -357,8 +368,36 @@ class GraphQuantizer(nn.Module):
         Dy_res_sel_ste = Dy_res_sel_live + (Dy_res_sel_detached - Dy_res_sel_live).detach()
         # --- 4. 최종 STE 출력 (디코더 입력) 상태 확인 ---
 
-        print(f"   loss_dict: {loss_dict.item():.6f}")
-        print(f"   loss_enc:  {loss_enc.item():.6f}")
+        # print(f"   loss_dict: {loss_dict.item():.6f}")
+        # print(f"   loss_enc:  {loss_enc.item():.6f}")
+        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
+        # (모든 계산이 끝난 후, 100스텝마다 한 번씩 모든 STATS COMPARE 출력)
+        # (카운터 초기화)
+        if not hasattr(self, 'step_counter'): self.step_counter = 0
+        self.step_counter += 1
+        if self.step_counter % 1 == 0: 
+            print("\n" + "*"*50)
+            print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
+            print("  [CODEBOOK (Fy)]")
+            print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
+            print("  [ENCODER (Fx)]")
+            print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
+            
+            # --- [ ❗️❗️ 핵심 수정 ❗️❗️ ] ---
+            print("  [FGW 최종 성적표 (Sample 0, Head 0)]")
+            print(f"   Distances (Sample 0): {fgw_values[0, 0, :].cpu().numpy()}")
+            print(f"  [🏆 Selected LCGs (All Samples in Batch, Head 0)]")
+            # assign_idx[B, H]에서 B개 샘플의 0번 헤드 선택 [B]
+            print(f"   {assign_idx[:, 0].cpu().numpy()}") 
+            # --- [ 수정 끝 ] ---
+
+            print("  [Calculated Losses]")
+            print(f"   loss_dict (Codebook pull): {loss_dict.item():.6f}")
+            print(f"   loss_enc (Encoder commit): {loss_enc.item():.6f}")
+            if lcg_diversifying_loss is not None:
+                print(f"   lcg_div_loss (Internal):   {lcg_diversifying_loss.item():.6f}")
+            print("*"*50 + "\n")
+        # --- [ 수정 끝 ] ---
         B, H = assign_idx.shape 
         M, K, D = Fy.shape
 
@@ -405,8 +444,10 @@ class GraphQuantizer(nn.Module):
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
         
         fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
-        #fgw_loss = loss_enc.mean() + self.vq_beta * loss_dict.mean()
+        
         if self.additional_FGW:
             fgw_loss += 0.3 * loss_som
-
+        if getattr(self.args, "lcg_diversifying_loss", False) is True:
+            div_alpha = getattr(self.args, "lcg_div_alpha", 10)
+            fgw_loss += div_alpha * lcg_diversifying_loss
         return Fy_res_all, Ay_res_all, fgw_loss

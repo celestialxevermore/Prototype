@@ -93,25 +93,36 @@ class LCGVisualizer:
 
     @torch.no_grad()
     def _forward_collect(self, batch):
+        """
+        [수정]
+        샘플 그래프의 대표 임베딩으로 'Fx.mean()' 대신
+        'x_basis'의 [CLS] 토큰 ([:, 0, :])을 사용합니다.
+        """
         bd = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
               for k, v in batch.items()}
         
+        # 1. predict 함수를 실행하여
+        #    'self.x_basis'를 포함한 모든 내부 상태를 계산
         _ = self.model.predict(bd) 
 
-        if not hasattr(self.model, "basis_outputs_for_viz"):
-            print("ERROR: 'self.model'에 'basis_outputs_for_viz' 속성이 없습니다.")
+        if not hasattr(self.model, "x_basis"):
+            print("ERROR: 'self.model'에 'x_basis' 속성이 없습니다.")
+            print("     (model.predict()가 self.x_basis = x_basis를 저장하는지 확인하세요.)")
             D_full = self.args.input_dim
-            return np.zeros((bd['y'].shape[0], 1, D_full)) 
+            return np.zeros((bd['y'].shape[0], 1, D_full)) # [B, 1, D]
 
-        basis_outputs = self.model.basis_outputs_for_viz
-        Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3) 
-        B, H, N, D_head = Fx.shape
-        D_full = H * D_head
+        # 2. [CLS] 토큰 임베딩을 가져옵니다
+        # x_basis shape: [B, N+1, D_full]
+        x_basis = self.model.x_basis
         
-        z_graph_flat = Fx.mean(dim=2).reshape(B, D_full)
-        z_graph = z_graph_flat.unsqueeze(1) 
+        # [CLS] 토큰은 [:, 0, :]에 있습니다.
+        # z_graph_cls shape: [B, D_full]
+        z_graph_cls = x_basis[:, 0, :]
         
-        return z_graph.detach().cpu().numpy()
+        # 3. UMAP 플로터와 차원을 맞추기 위해 [B, 1, D_full]로 변경
+        z_graph = z_graph_cls.unsqueeze(1) 
+        
+        return z_graph.detach().cpu().numpy() # [B, 1, D_full]
 
     @torch.no_grad()
     def _get_assignments_and_plans(self, batch):
@@ -132,24 +143,27 @@ class LCGVisualizer:
         Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
         Dx = LatentCompositeGraph.affinity_to_distance(Dx) # Dx는 거리
         
-        Fy, Dy_affinity = self.lcg() # 여기서 Dy_affinity는 LCG.forward()의 Dy (코사인 유사도)
+        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
+        # 3개의 반환값을 모두 받되, diversity_loss는 무시 (시각화에 불필요)
+        Fy, Dy_affinity, _ = self.lcg() # lcg()가 3개를 반환
+        # --- [ 수정 끝 ] ---
+        
         Dy = LatentCompositeGraph.affinity_to_distance(Dy_affinity) # Dy는 거리
 
         a = torch.ones(B, H, N, device = Fx.device) / N 
         b = torch.ones(B, self.M, self.K, device=Fx.device) / self.K 
 
-        # no_grad()로 argmin 계산 (GraphQuantizer.forward의 Step 1과 동일)
+        # no_grad()로 argmin 계산
         Pi_all , fgw_values = FGWUtils.assign_FGW(
             Fx, Fy, Dx, Dy, a, b, # Dx, Dy 모두 거리
             alpha = self.args.fgw_alpha, 
             eps = 0.05, 
             outer_iters = 10, 
             sinkhorn_iters = 30
-        ) # fgw_values shape: [B,H,M], Pi_all shape: [B, H, M, N, K]
+        ) 
         
         assign_idx = torch.argmin(fgw_values, dim=-1) # [B, H]
         
-        # Pi_all (전송 행렬)도 반환
         return assign_idx, Pi_all
     
     # ... (visualize_lcg_only, _analyze_lcg_distances, visualize_sources_and_lcg는 이전과 동일) ...
@@ -243,12 +257,17 @@ class LCGVisualizer:
 
     def visualize_sources_and_lcg(self, sources, out_root: Path, 
                                       max_samples=200, method="umap"):
-        """Multi-source 데이터 + LCG 함께 시각화"""
+        """
+        [수정]
+        Multi-source 데이터 + LCG "K개 노드" 64개를 함께 시각화합니다.
+        (장식용 다이아몬드 대신 실제 노드 좌표 사용)
+        """
         ensure_dir(out_root / "joint_space")
         
         all_embeds, all_labels = [], []
         print("[INFO] 🔄 Collecting embeddings...")
         
+        # 1. 샘플(Fx) 임베딩 수집
         for s in sources:
             loader = self._make_loader(s, batch_size=32)
             temp_embeds = []
@@ -257,9 +276,7 @@ class LCGVisualizer:
                 temp_embeds.append(z_np)
                 if (i * loader.batch_size) >= max_samples:
                     break
-            
             if not temp_embeds: continue
-            
             s_embeds = np.concatenate(temp_embeds, axis=0) 
             all_embeds.append(s_embeds)
             all_labels.extend([s] * len(s_embeds))
@@ -268,65 +285,87 @@ class LCGVisualizer:
             print("[VIZ] ⚠️ No embeddings collected. Skipping UMAP.")
             return
 
-        X = np.concatenate(all_embeds, axis=0) 
-        if X.ndim == 3: 
-            X = X.reshape(-1, X.shape[-1]) 
+        X_samples = np.concatenate(all_embeds, axis=0) # [Num_Samples, 1, D_full]
+        if X_samples.ndim == 3: 
+            X_samples = X_samples.reshape(-1, X_samples.shape[-1]) # [Num_Samples, D_full]
             
-        X = StandardScaler().fit_transform(X)
+        X_samples_scaled = StandardScaler().fit_transform(X_samples)
         
+        # 2. LCG (Fy) "K개 노드" 임베딩 수집
+        # [M, K, D_head] -> [M*K, D_head]
         lcg_nodes = self.lcg.node_embeddings.detach().cpu().numpy().reshape(-1, self.D)
         
-        if lcg_nodes.shape[1] != X.shape[1]:
-            print(f"⚠️ LCG 노드 차원({lcg_nodes.shape[1]})과 샘플 차원({X.shape[1]})이 다릅니다!")
+        # 3. UMAP/TSNE (차원 일치 확인)
+        # ❗️ Fx(D_full)와 Fy(D_head)의 차원이 다를 수 있습니다.
+        if lcg_nodes.shape[1] != X_samples_scaled.shape[1]:
+            print(f"⚠️ LCG 노드 차원({lcg_nodes.shape[1]})과 샘플 차원({X_samples_scaled.shape[1]})이 다릅니다!")
+            
+            
             reducer_lcg = (
                 umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=42)
                 if (method == "umap" and umap is not None)
                 else TSNE(n_components=2, perplexity=min(30, lcg_nodes.shape[0]-1), random_state=42)
             )
-            lcg_2d = reducer_lcg.fit_transform(lcg_nodes)
+            lcg_2d = reducer_lcg.fit_transform(lcg_nodes) # [M*K, 2]
+            
             reducer_X = (
                 umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
                 if (method == "umap" and umap is not None)
                 else TSNE(n_components=2, perplexity=40, random_state=42)
             )
-            X_2d = reducer_X.fit_transform(X)
+            X_2d = reducer_X.fit_transform(X_samples_scaled) # [Num_Samples, 2]
+            
         else:
-            X_all = np.concatenate([X, lcg_nodes], axis=0)
+            print("    -> 샘플과 LCG를 함께 UMAP/t-SNE 변환합니다.")
+            X_all = np.concatenate([X_samples_scaled, lcg_nodes], axis=0)
             reducer = (
                 umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
                 if (method == "umap" and umap is not None)
                 else TSNE(n_components=2, perplexity=40, random_state=42)
             )
             X_2d_all = reducer.fit_transform(X_all)
-            X_2d, lcg_2d = X_2d_all[:len(X)], X_2d_all[len(X):]
+            X_2d = X_2d_all[:len(X_samples_scaled)] # 샘플 2D 좌표
+            lcg_2d = X_2d_all[len(X_samples_scaled):] # LCG "K개 노드" 64개의 2D 좌표
         
+        # 4. 시각화
         colors = {s: plt.colormaps.get_cmap("tab10")(i % 10) 
                   for i, s in enumerate(sources)}
         plt.figure(figsize=(10, 9))
         
+        # Plot Source 데이터 (점)
         for s in sources:
             idx = [i for i, l in enumerate(all_labels) if l == s]
             plt.scatter(X_2d[idx, 0], X_2d[idx, 1],
                         c=[colors[s]], s=15, alpha=0.5, label=f"{s}")
         
+        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
+        # Plot LCG (K개 노드 64개)
         cmap_lcg = plt.colormaps.get_cmap("Set3")
         for m in range(self.M):
-            sub_nodes = lcg_2d[m * self.K:(m + 1) * self.K]
+            # lcg_2d ([M*K, 2])에서 K개 노드의 실제 2D 좌표를 가져옴
+            sub_nodes_2d = lcg_2d[m * self.K:(m + 1) * self.K]
             color = cmap_lcg(m % 12)
-            plt.scatter(sub_nodes[:, 0], sub_nodes[:, 1],
+            
+            # 8개의 "진짜" 노드 위치를 다이아몬드로 그림
+            plt.scatter(sub_nodes_2d[:, 0], sub_nodes_2d[:, 1],
                         color=color, s=100, edgecolor='black', 
-                        linewidth=1.0, label=f"LCG_{m}", marker='D')
-            center = sub_nodes.mean(axis=0)
+                        linewidth=1.0, label=f"LCG_{m}", marker='D',
+                        alpha=0.8) # (겹쳐 보이도록 alpha 추가)
+            
+            # LCG의 평균 중심점에 X자 마커
+            center = sub_nodes_2d.mean(axis=0)
             plt.scatter(center[0], center[1], marker="X", 
-                        color=color, s=250, edgecolor='black', linewidth=2)
-        
+                        color="black", s=100, linewidth=1.5,
+                        alpha=0.5) # (X마커는 검은색으로 통일)
+        # --- [ 수정 끝 ] ---
+
         plt.legend(fontsize=8, frameon=True, loc='best', ncol=2)
-        plt.title("Multi-Source Samples + Trained LCG Distributions", fontsize=13)
+        plt.title("Multi-Source Samples + Trained LCG *Nodes* Distributions", fontsize=13) # 제목 수정
         plt.xlabel("Dim-1"); plt.ylabel("Dim-2")
         plt.grid(alpha=0.2)
         plt.tight_layout()
         
-        save_path = out_root / "joint_space" / "sources_and_lcg.png"
+        save_path = out_root / "joint_space" / "sources_and_lcg_nodes.png" # 새 이름
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"[VIZ] ✅ Saved: {save_path}")
@@ -393,8 +432,11 @@ class LCGVisualizer:
         print("[INFO] 🎨 Generating LCG internal affinity heatmaps...")
         ensure_dir(out_root / "lcg_analysis")
         
-        # LCG.forward()가 반환하는 것이 Dy_affinity (코사인 유사도)
-        _ , Dy_affinity = self.lcg() 
+        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
+        # 3개의 반환값을 모두 받되, diversity_loss는 무시
+        _ , Dy_affinity, _ = self.lcg() 
+        # --- [ 수정 끝 ] ---
+        
         Dy_affinity_np = Dy_affinity.detach().cpu().numpy() # [M, K, K]
         
         M, K, _ = Dy_affinity_np.shape
@@ -412,8 +454,6 @@ class LCGVisualizer:
             ax = axes[m // ncols, m % ncols]
             matrix = Dy_affinity_np[m]
             
-            # vmin=-1, vmax=1 (유사도 범위)
-            # cmap='viridis' (낮은 값 보라색, 높은 값 노란색)
             im = ax.imshow(matrix, cmap='viridis', vmin=vmin, vmax=vmax, 
                            interpolation='nearest')
             
