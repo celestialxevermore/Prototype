@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
 import pandas as pd 
-
+from sklearn.decomposition import PCA
 # UMAP import
 try:
     import umap
@@ -168,50 +168,89 @@ class LCGVisualizer:
     
     # ... (visualize_lcg_only, _analyze_lcg_distances, visualize_sources_and_lcg는 이전과 동일) ...
 
-    def visualize_lcg_only(self, out_root: Path, method="umap"):
-        """LCG 노드들만 시각화 (학습 후 분포 확인)"""
+    def visualize_lcg_only(self, out_root: Path, method="pca"):
+        """
+        [수정]
+        LCG "내부" K개 노드의 분포를 "개별적"으로 PCA 시각화합니다.
+        (8개 플롯의 축 스케일을 "통일"하여 분산(흩어짐)을 비교)
+        """
         ensure_dir(out_root / "lcg_analysis")
         
-        lcg_nodes = self.lcg.node_embeddings.detach().cpu().numpy()
-        M, K, D = lcg_nodes.shape
-        X = lcg_nodes.reshape(M * K, D) 
+        # ✅ 학습된 node_embeddings 가져오기
+        lcg_nodes_all = self.lcg.node_embeddings.detach().cpu().numpy()  # [M, K, D]
+        M, K, D = lcg_nodes_all.shape
         
-        reducer = (
-            umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=42)
-            if (method == "umap" and umap is not None)
-            else TSNE(n_components=2, perplexity=min(30, M*K-1), random_state=42)
-        )
-        X_2d = reducer.fit_transform(X)
-        
-        cmap = plt.colormaps.get_cmap("tab10")
-        plt.figure(figsize=(10, 8))
-        
+        # 1. M=8번 "개별적"으로 PCA 실행 및 좌표 수집
+        all_X_2d = []
         for m in range(M):
-            sub_nodes = X_2d[m * K:(m + 1) * K]
-            color = cmap(m % 10)
+            X = lcg_nodes_all[m] # [K, D]
             
-            plt.scatter(sub_nodes[:, 0], sub_nodes[:, 1],
-                        color=color, s=80, alpha=0.7, 
-                        edgecolor='black', linewidth=0.5,
-                        label=f"LCG_{m}")
+            # (데이터가 0으로 붕괴했을 경우 PCA 에러 방지)
+            if np.std(X) < 1e-6:
+                X_2d = np.zeros((K, 2)) # 0으로 채움
+            else:
+                pca = PCA(n_components=2, random_state=42)
+                X_2d = pca.fit_transform(X) # [K, 2]
             
-            center = sub_nodes.mean(axis=0)
-            plt.scatter(center[0], center[1], 
-                        marker="X", color=color, s=200,
-                        edgecolor='black', linewidth=1.5)
+            all_X_2d.append(X_2d)
+
+        # 2. 8개 PCA 결과의 "글로벌" 스케일(min/max) 찾기
+        all_X_2d_np = np.concatenate(all_X_2d) # [M*K, 2]
+        x_min, x_max = all_X_2d_np[:, 0].min(), all_X_2d_np[:, 0].max()
+        y_min, y_max = all_X_2d_np[:, 1].min(), all_X_2d_np[:, 1].max()
         
-        plt.legend(fontsize=9, frameon=True, loc='best')
-        plt.title(f"Trained LCG Node Distributions ({method.upper()})", fontsize=14)
-        plt.xlabel("Dim-1"); plt.ylabel("Dim-2")
-        plt.grid(alpha=0.2)
+        # (패딩 추가)
+        padding_x = (x_max - x_min) * 0.1 if (x_max - x_min) > 1e-6 else 0.1
+        padding_y = (y_max - y_min) * 0.1 if (y_max - y_min) > 1e-6 else 0.1
+
+        # 3. 2x4 그리드 플롯 준비
+        ncols = min(M, 4)
+        nrows = int(np.ceil(M / ncols))
+        fig, axes = plt.subplots(nrows, ncols, 
+                                 figsize=(ncols * 4, nrows * 3.5), 
+                                 squeeze=False)
+        cmap = plt.colormaps.get_cmap("tab10")
+
+        # 4. 동일한 스케일로 8개 플롯 그리기
+        for m in range(M):
+            ax = axes[m // ncols, m % ncols]
+            color = cmap(m % 10)
+            X_2d = all_X_2d[m] # [K, 2]
+            
+            # (1) 8개 노드(점) 그리기
+            ax.scatter(X_2d[:, 0], X_2d[:, 1],
+                        color=color, s=100, alpha=0.8, 
+                        edgecolor='black', linewidth=0.5)
+            
+            # (2) 중심점
+            center = X_2d.mean(axis=0)
+            ax.scatter(center[0], center[1], 
+                        marker="X", color="black", s=100,
+                        edgecolor='white', linewidth=1.5, alpha=0.7)
+            
+            # (3) ❗️ 스케일 통일 ❗️
+            ax.set_xlim(x_min - padding_x, x_max + padding_x)
+            ax.set_ylim(y_min - padding_y, y_max + padding_y)
+            
+            ax.set_title(f"LCG_{m} Internal Node PCA")
+            ax.set_xlabel("PC 1"); ax.set_ylabel("PC 2")
+            ax.grid(alpha=0.2)
+        
+        # 남는 빈 subplot 숨기기
+        for m in range(M, nrows * ncols):
+            axes[m // ncols, m % ncols].axis('off')
+        
+        fig.suptitle(f"Trained LCG Internal Node Distributions (PCA - Unified Scale)", fontsize=16, y=1.02)
         plt.tight_layout()
         
-        save_path = out_root / "lcg_analysis" / f"lcg_only_{method}.png"
+        save_path = out_root / "lcg_analysis" / f"lcg_only_nodes_pca.png" # 새 이름
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"[VIZ] ✅ Saved: {save_path}")
+        # --- [ 수정 끝 ] ---
         
-        self._analyze_lcg_distances(lcg_nodes, out_root)
+        # (LCG "그룹" 간의 거리 분석은 UMAP/TSNE와 무관하므로 그대로 둠)
+        self._analyze_lcg_distances(lcg_nodes_all, out_root)
 
     def _analyze_lcg_distances(self, lcg_nodes, out_root):
         """LCG 간 거리 분석"""
@@ -425,19 +464,25 @@ class LCGVisualizer:
             
     # [--- 수정: 컬러바 및 제목 Affinity로 변경 ---]
     @torch.no_grad()
-    def visualize_lcg_affinities(self, out_root: Path): # 함수 이름도 Affinity로
+    def visualize_lcg_affinities(self, out_root: Path):
         """
-        학습된 LCG 8개의 내부 "유사도" ([K, K])를 2x4 그리드 히트맵으로 시각화합니다.
+        학습된 LCG 8개의 내부 "Affinity" (코사인 유사도, -1 ~ 1)를 시각화합니다.
         """
         print("[INFO] 🎨 Generating LCG internal affinity heatmaps...")
         ensure_dir(out_root / "lcg_analysis")
         
-        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
-        # 3개의 반환값을 모두 받되, diversity_loss는 무시
-        _ , Dy_affinity, _ = self.lcg() 
-        # --- [ 수정 끝 ] ---
+        # 1. self.lcg()로부터 "거리(Distance)" 행렬을 가져옵니다.
+        # (반환값 3개 중 2번째가 Dy(거리) 행렬입니다)
+        _ , Dy_distance_tensor, _ = self.lcg() 
         
-        Dy_affinity_np = Dy_affinity.detach().cpu().numpy() # [M, K, K]
+        # ⬇️ --- [ ✨ "거리"를 "유사도(Affinity)"로 역연산 (핵심 수정) ✨ ] --- ⬇️
+        # 수식: Dy_distance = (1.0 - Dy_similarity) / 2.0
+        # 역연산: Dy_similarity = 1.0 - (2.0 * Dy_distance)
+        Dy_affinity_tensor = 1.0 - (2.0 * Dy_distance_tensor)
+        # ⬆️ --- [ ✨ 수정 끝 ✨ ] --- ⬆️
+
+        # 2. 이제 "유사도" 텐서를 numpy로 변환합니다.
+        Dy_affinity_np = Dy_affinity_tensor.detach().cpu().numpy() # [M, K, K]
         
         M, K, _ = Dy_affinity_np.shape
         ncols = min(M, 4)
@@ -447,25 +492,27 @@ class LCGVisualizer:
                                  figsize=(ncols * 4, nrows * 3.5), 
                                  squeeze=False)
         
-        # 유사도 범위는 -1 ~ 1
+        # 3. "유사도"의 범위(-1 ~ 1)로 플롯합니다. (이 설정은 올바릅니다)
         vmin, vmax = -1, 1
         
         for m in range(M):
             ax = axes[m // ncols, m % ncols]
             matrix = Dy_affinity_np[m]
             
+            # vmin/vmax에 따라 대각선(+1.0)이 노란색으로 올바르게 표시됩니다.
             im = ax.imshow(matrix, cmap='viridis', vmin=vmin, vmax=vmax, 
                            interpolation='nearest')
             
-            ax.set_title(f"LCG_{m} Internal Affinity") # 제목 변경
+            ax.set_title(f"LCG_{m} Internal Affinity")
             ax.set_xlabel("Node Index (K)")
             ax.set_ylabel("Node Index (K)")
         
         for m in range(M, nrows * ncols):
             axes[m // ncols, m % ncols].axis('off')
 
+        # 컬러바 레이블 (이 설정도 올바릅니다)
         fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.7, 
-                     label=f"Cosine similarity (-1 to 1)") # 컬러바 레이블 변경
+                     label=f"Cosine similarity (-1 to 1)") 
         
         fig.suptitle("Trained LCG Internal Affinity Structures", fontsize=16, y=1.02)
         plt.tight_layout()

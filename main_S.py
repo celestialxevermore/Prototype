@@ -28,6 +28,8 @@ from datetime import datetime
 import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
+import logging
+import sys
 
 experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -85,14 +87,14 @@ def get_args():
     parser.add_argument("--n_graphs", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
     parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
-    parser.add_argument('--fgw_alpha', type = float, default =0.01)
-    parser.add_argument('--lcg_div_alpha', type = float, default = 0.1)
+    parser.add_argument('--fgw_alpha', type = float, default =1)
+    parser.add_argument('--lcg_div_alpha', type = float, default = 10)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
     parser.add_argument('--kl_gamma', type = float, default = 0.2)
     parser.add_argument('--additional_FGW',action = 'store_true')
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
-
+    parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
     '''
         Basis GAT Configuration
     '''
@@ -245,6 +247,8 @@ def train_and_validate(args, model, train_loader, val_loader,
     마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
     (스케줄러가 주어지면 epoch-wise로 step)
     """
+    logger_name = "my_experiment_logger" 
+    logger = logging.getLogger(logger_name)
     train_losses, val_losses = [], []
     train_aucs, val_aucs = [], []
     train_precisions, val_precisions = [], []
@@ -282,6 +286,23 @@ def train_and_validate(args, model, train_loader, val_loader,
     checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    log_file_path = os.path.join(checkpoint_dir, f"train_log_{experiment_id}.log")
+
+    # 2. 파일 핸들러 생성
+    file_handler = logging.FileHandler(log_file_path)
+    file_handler.setLevel(logging.INFO)
+    
+    # 3. [수정] $ -> %로 변경
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # 4. "루트 로거"에 이 파일 핸들러를 "추가"
+    logging.getLogger().addHandler(file_handler)
+    
+    # 5. [수정] "f... -> f"... 로 변경
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file_path for h in logger.handlers):
+        logger.addHandler(file_handler)
+        logger.info(f"--- Log file initialized (Few mode). Saving stats to: {log_file_path} ---")
     for epoch in range(epochs):
         # -------- Train --------
         model.train()
@@ -412,6 +433,9 @@ def train_and_validate(args, model, train_loader, val_loader,
 # -----------------------------
 def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     import shutil  # ← 추가
+    logger_name = "my_experiment_logger"
+    logger = logging.getLogger(logger_name)
+
     name_to_idx = {name: i for i, name in enumerate(sources)}
     trains, vals, tests, ncs = [], [], [], []
     for name in sources:
@@ -442,7 +466,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         p for name, p in model.named_parameters()
         if "latent_graph" in name and p.requires_grad
     ]
-    lcg_lr_multiplier = 1000.0 
+    lcg_lr_multiplier = 1.0 
     lcg_lr = args.source_lr * lcg_lr_multiplier 
     
     logger.info(f"--- 🚀 Applying Differential LR ---")
@@ -482,6 +506,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     best_state = None
     last_best_epoch = -1
 
+    
+
+
     # === 체크포인트 디렉토리 & 파일명 (고정 이름 + 히스토리) ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
     model_sig = (
@@ -502,6 +529,17 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     os.makedirs(ckpt_dir, exist_ok=True)
     ckpt_latest = os.path.join(ckpt_dir, "best.pt")  # ← 고정 이름(재사용용)
     ckpt_hist   = os.path.join(ckpt_dir, f"best_{experiment_id}.pt")  # ← 기록 보존용
+    
+
+    log_file_path = os.path.join(ckpt_dir, f"train_log_{experiment_id}.log")
+    file_handler = logging.FileHandler(log_file_path)
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file_path for h in logger.handlers):
+        logger.addHandler(file_handler)
+        logger.info(f"--- Log file initialized (Pre mode). Saving stats to: {log_file_path} ---")
 
     # === 학습 루프 (total_epochs==0이면 스킵됨) ===
     for epoch in range(total_epochs):
@@ -721,7 +759,21 @@ def main():
     start_time = time.time()
     args = get_args()
     fix_seed(args.random_seed)
+    # 1. "전용 로거"를 가져옵니다.
+    logger_name = "my_experiment_logger" 
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False # "복도"로 소리가 새어나가지 않게 함
 
+    # 2. "콘솔" 핸들러를 "무조건" 추가합니다 (디버깅용).
+    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+        
+    logger.info("--- 💡 Global logger initialized (Console) 💡 ---")
     # cpu affinity(옵션): 안전 가드
     try:
         ncpu = os.cpu_count() or 1

@@ -41,7 +41,7 @@ class Model(nn.Module):
         # (1) LatentCompositeGraph : learnable latent composite graphs (codebook)
         self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
         # (2) GraphQuantizer : FGW-based quantization module 
-        self.graph_quantizer = GraphQuantizer(args, alpha = args.fgw_alpha)
+        self.graph_quantizer = GraphQuantizer(args, alpha = 0.9, eps = 0.1)
 
         # (3) LatentCompositeGNN : Head-wise message passing + readout 
         self.gnn_experts = LatentCompositeGNN(
@@ -266,7 +266,7 @@ class Model(nn.Module):
 
         Fy_res, Ay_res, fgw_loss = self.graph_quantizer(
             self._last_P_basis, 
-            basis_outputs, self.latent_graph
+            basis_outputs, self.latent_graph, batch
         )
         self.fgw_loss = fgw_loss
         # (5) Head-wise GNN message passing & readout ---- 

@@ -4,13 +4,16 @@ import torch.nn.functional as F
 import torch.nn.init as nn_init 
 import math 
 import pdb
+import numpy as np 
+import logging
+import pandas as pd
 class FGWUtils:
     """ 
         Differentiable Fused Gromov-Wasserstein utilities.
         - Pure math layer (no parameters)
     """
     @staticmethod 
-    def _sinkhorn_ot(a, b, C, eps = 0.05, iters= 30, tolerance = 1e-6):
+    def _sinkhorn_ot(a, b, C, eps = 0.05, iters= 100, tolerance = 1e-6):
         """
             a : [B, H, N] (distribution over N features of H attention heads)
             b : [B, M, K] (distribution over K features of M latent composite graph)
@@ -20,16 +23,24 @@ class FGWUtils:
         """
         B, H,  M, N, K = C.shape 
         Kmat = torch.exp(-C / max(eps, 1e-6)).clamp_min(1e-12) # [B,H,M,N,K]
-
+        # --- [❗️❗️ 5. Kmat 계산 직후 로깅 ❗️❗️] ---
+        Kmat_pre_exp = -C / max(eps, 1e-6)
+        Kmat = torch.exp(Kmat_pre_exp).clamp_min(1e-12)
+        logger = logging.getLogger("my_experiment_logger")
+        # C.mean()은 reconstruct_FGW와 차원(M)이 달라서 값이 다를 수 있습니다.
+        logger.info(f"--- 🩺 FGWUtils (_sinkhorn_ot) ---")
+        logger.info(f"  [Input] C.mean: {C.mean().item():.4f}, eps: {eps}")
+        logger.info(f"  [Pre-Exp] (-C/eps).mean: {Kmat_pre_exp.mean().item():.4f}")
+        logger.info(f"  [Kmat] Kmat.mean: {Kmat.mean().item():.4E}, Kmat.max: {Kmat.max().item():.4E}")
         # Initialization 
         u = torch.ones(B, H, M, N, device=C.device) / N # Head Marginal distribution 
         v = torch.ones(B, H, M, K, device=C.device) / K # Latent Composite Graph Marginal distribution 
-
+        epsilon_tolerance = 1e-9
         for _ in range(iters):
-            Kv = torch.einsum("bhmnk,bhmk->bhmn",Kmat,v) + tolerance 
+            Kv = torch.einsum("bhmnk,bhmk->bhmn",Kmat,v) + epsilon_tolerance 
             u = a.unsqueeze(2) / Kv 
 
-            KTu = torch.einsum("bhmnk,bhmn->bhmk", Kmat, u) + tolerance 
+            KTu = torch.einsum("bhmnk,bhmn->bhmk", Kmat, u) + epsilon_tolerance 
             v = b.unsqueeze(1) / KTu 
         Pi = (u.unsqueeze(-1) * Kmat) * v.unsqueeze(-2) # Transport Plan Head H x Latent composite M 
         return Pi
@@ -64,22 +75,26 @@ class FGWUtils:
         Returns:
             C_gw : [B, H, M, N, K]
         """
+
         if Dy.dim() == 3: # (assign)
             B, H, M, N, K = Pi.shape 
             Dx_ = Dx.unsqueeze(2).unsqueeze(-1).unsqueeze(-1) # [B, H, 1, N, N, 1, 1]
             Dy_ = Dy.unsqueeze(0).unsqueeze(0).unsqueeze(3).unsqueeze(3) # [1, 1, M, 1, 1, K, K]
             diff2 = (Dx_ - Dy_) ** 2 
-            return torch.einsum("bhmnNkK,bhmnK->bhmnK", diff2, Pi)
+            
+
+            return torch.einsum("bhmnNkK,bhmNK->bhmnK", diff2, Pi)
         else: # (reconstruct)
             B, H, N, K = Pi.shape 
             Dx_ = Dx.unsqueeze(-1).unsqueeze(-1) # [B, H, N, N, 1, 1]
             Dy_ = Dy.unsqueeze(2).unsqueeze(2) # [B, H, 1, 1, K, K]
             diff2 = (Dx_ - Dy_) ** 2 
-            return torch.einsum("bhnNkK,bhnK->bhnK", diff2, Pi)
+
+            return torch.einsum("bhnNkK,bhNK->bhnK", diff2, Pi)
     
     # ---- 1. assign (no_grad) ---- 
     @staticmethod 
-    def assign_FGW(Fx, Fy, Dx, Dy, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30):
+    def assign_FGW(Fx, Fy, Dx, Dy, a, b, alpha = 0.5, eps = 0.05, outer_iters = 10, sinkhorn_iters = 30, do_log : bool = False):
         """
             assign phase : Select the nearest latent composite graph on each (B, H)
             Fx : [B, H, N, D]
@@ -90,12 +105,50 @@ class FGWUtils:
             fgw_values : [B, H, M]
             Pi : [B, H, M, N, K]
         """
+        logger = logging.getLogger("my_experiment_logger")
         with torch.no_grad():
             Pi = torch.einsum("bhn,bmk->bhmnk",a,b)
             for _ in range(outer_iters):
                 C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy)
                 C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy, Pi)
-                C = (1 - alpha) * C_feat + alpha * C_gw 
+                
+                C_feat_norm = C_feat / (C_feat.mean().detach() + 1e-8)
+                C_gw_norm = C_gw / (C_gw.mean().detach() + 1e-8)
+
+                if _ == outer_iters -1 and do_log:
+                    # ⬇️ --- [ ✨ "타이틀" 수정됨 ✨ ] --- ⬇️
+                    logger.info(f"--- 🩺 FGWUtils (assign_FGW) ---") 
+                    logger.info(f"   (alpha: {alpha}, eps: {eps})")
+
+                    # ⬇️ --- [ ✨ "입력 재료" 로깅 추가됨 ✨ ] --- ⬇️
+                    logger.info("--- 🩺 FGW Inputs (Source) ---")
+                    logger.info(f"   [Fx]     mean: {Fx.mean().item():.4f}, std: {Fx.std().item():.4f}, L2_norm_sq: {(Fx**2).sum(-1).mean().item():.4f}")
+                    logger.info(f"   [Dx]     mean: {Dx.mean().item():.4f}, std: {Dx.std().item():.4f}, min: {Dx.min().item():.4f}, max: {Dx.max().item():.4f}")
+                    logger.info("--- 🩺 FGW Inputs (Target_All) ---") # 'Selected' -> 'All'
+                    
+                    # ⬇️ --- [ ✨ "변수명" 수정됨 (Fy_sel -> Fy, Dy_sel -> Dy) ✨ ] --- ⬇️
+                    logger.info(f"   [Fy]     mean: {Fy.mean().item():.4f}, std: {Fy.std().item():.4f}, L2_norm_sq: {(Fy**2).sum(-1).mean().item():.4f}")
+                    logger.info(f"   [Dy]     mean: {Dy.mean().item():.4f}, std: {Dy.std().item():.4f}, min: {Dy.min().item():.4f}, max: {Dy.max().item():.4f}")
+                    # ⬆️ --- [ ✨ 로깅 코드 끝 ✨ ] --- ⬆️
+
+                    # (Pre-Alpha) C_feat와 C_gw의 원본 통계
+                    logger.info("--- 🩺 FGW Cost Components (Pre-Alpha) ---")
+                    logger.info(f"   [C_feat] mean: {C_feat.mean().item():.4f}, std: {C_feat.std().item():.4f}, max: {C_feat.max().item():.4f}")
+                    logger.info(f"   [C_gw]   mean: {C_gw.mean().item():.4f}, std: {C_gw.std().item():.4f}, max: {C_gw.max().item():.4f}")
+                    
+                    # (Post-Alpha) 가중치가 적용된 후의 통계
+                    C_feat_weighted = (1 - alpha) * C_feat_norm
+                    C_gw_weighted = alpha * C_gw_norm
+                    logger.info("--- 🩺 FGW Cost Components (Post-Alpha) ---")
+                    logger.info(f"   [C_feat_w] mean: {C_feat_weighted.mean().item():.4f}, std: {C_feat_weighted.std().item():.4f}")
+                    logger.info(f"   [C_gw_w]   mean: {C_gw_weighted.mean().item():.4f}, std: {C_gw_weighted.std().item():.4f}")
+
+                    # 최종 C 행렬 통계
+                    C_combined = C_feat_weighted + C_gw_weighted
+                    logger.info("--- 🩺 FGW Cost Components (Final C) ---")
+                    logger.info(f"   [C Matrix] mean: {C_combined.mean().item():.4f}, std: {C_combined.std().item():.4f}, max: {C_combined.max().item():.4f}")
+                # ⬆️ --- [ ✨ 로깅 코드 끝 ✨ ] --- ⬆️
+                C = (1 - alpha) * C_feat_norm + alpha * C_gw_norm
                 Pi = FGWUtils._sinkhorn_ot(a, b, C, eps = eps, iters = sinkhorn_iters)
             fgw_values = (C * Pi).sum((-2, -1))
         return Pi, fgw_values
@@ -104,17 +157,56 @@ class FGWUtils:
     def reconstruct_FGW(Fx, Fy_sel, Dx, Dy_sel, a, b, 
                         alpha = 0.5, eps = 0.05, 
                         outer_iters = 10, sinkhorn_iters = 30,
-                        map_encoder_output: bool = False):
-        
+                        map_encoder_output: bool = False, do_log : bool = False):
+        logger = logging.getLogger("my_experiment_logger")
         # --- 1. Pi, fgw_loss 계산 (기존과 동일) ---
         Pi = torch.einsum("bhn,bhk->bhnk", a, b)
         for _ in range(outer_iters):
             C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy_sel)
             C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy_sel, Pi)
-            C = (1 - alpha) * C_feat + alpha * C_gw 
+            C_feat_norm = C_feat / (C_feat.mean().detach() + 1e-8)
+            C_gw_norm = C_gw / (C_gw.mean().detach() + 1e-8)
+            # ⬇️ --- [ ✨ 로깅 코드 수정/병합됨 ✨ ] --- ⬇️
+            if _ == outer_iters -1 and do_log:
+                logger.info(f"--- 🩺 FGWUtils (reconstruct_FGW) ---")
+                logger.info(f"   (alpha: {alpha}, eps: {eps})")
+
+                # ⬇️ --- [ ✨ "입력 재료" 로깅 추가됨 ✨ ] --- ⬇️
+                logger.info("--- 🩺 FGW Inputs (Source) ---")
+                logger.info(f"   [Fx]     mean: {Fx.mean().item():.4f}, std: {Fx.std().item():.4f}, L2_norm_sq: {(Fx**2).sum(-1).mean().item():.4f}")
+                logger.info(f"   [Dx]     mean: {Dx.mean().item():.4f}, std: {Dx.std().item():.4f}, min: {Dx.min().item():.4f}, max: {Dx.max().item():.4f}")
+                logger.info("--- 🩺 FGW Inputs (Target_Selected) ---")
+                logger.info(f"   [Fy_sel] mean: {Fy_sel.mean().item():.4f}, std: {Fy_sel.std().item():.4f}, L2_norm_sq: {(Fy_sel**2).sum(-1).mean().item():.4f}")
+                logger.info(f"   [Dy_sel] mean: {Dy_sel.mean().item():.4f}, std: {Dy_sel.std().item():.4f}, min: {Dy_sel.min().item():.4f}, max: {Dy_sel.max().item():.4f}")
+                # ⬆️ --- [ ✨ 로깅 코드 끝 ✨ ] --- ⬆️
+
+                # (Pre-Alpha) C_feat와 C_gw의 원본 통계
+                logger.info("--- 🩺 FGW Cost Components (Pre-Alpha) ---")
+                logger.info(f"   [C_feat] mean: {C_feat.mean().item():.4f}, std: {C_feat.std().item():.4f}, max: {C_feat.max().item():.4f}")
+                logger.info(f"   [C_gw]   mean: {C_gw.mean().item():.4f}, std: {C_gw.std().item():.4f}, max: {C_gw.max().item():.4f}")
+                
+                # (Post-Alpha) 가중치가 적용된 후의 통계
+                C_feat_weighted = (1 - alpha) * C_feat_norm
+                C_gw_weighted = alpha * C_gw_norm
+                logger.info("--- 🩺 FGW Cost Components (Post-Alpha) ---")
+                logger.info(f"   [C_feat_w] mean: {C_feat_weighted.mean().item():.4f}, std: {C_feat_weighted.std().item():.4f}")
+                logger.info(f"   [C_gw_w]   mean: {C_gw_weighted.mean().item():.4f}, std: {C_gw_weighted.std().item():.4f}")
+
+                # 최종 C 행렬 통계
+                C_combined = C_feat_weighted + C_gw_weighted
+                logger.info("--- 🩺 FGW Cost Components (Final C) ---")
+                logger.info(f"   [C Matrix] mean: {C_combined.mean().item():.4f}, std: {C_combined.std().item():.4f}, max: {C_combined.max().item():.4f}")
+            # ⬆️ --- [ ✨ 로깅 코드 끝 ✨ ] --- ⬆️
+            C = (1 - alpha) * C_feat_norm + alpha * C_gw_norm
+           
             Pi = FGWUtils._sinkhorn_ot(a, b, C.unsqueeze(2), eps = eps, iters = sinkhorn_iters)[:, :, 0]
         
         fgw_loss = (C * Pi).sum((-2, -1)).mean() 
+
+        '''
+            b return updates
+        '''
+        b_updated = Pi.sum(dim=-2)
 
         # --- 2. [수정] 플래그에 따라 반환값 분기 ---
         if map_encoder_output:
@@ -125,7 +217,6 @@ class FGWUtils:
             # [32, 1, 13, 8] * [32, 1, 13, 768] -> [32, 1, 8, 768]
             Fx_mapped = torch.einsum("bhnk,bhnd->bhkd", Pi_detached, Fx)
             
-            # --- ❗️❗️ 여기가 핵심 수정 ❗️❗️ ---
             # b_k_for_Fx shape을 [B, H, K, 1]로 만듭니다
             
             # Pi_detached.sum(dim=-2) -> [32, 1, 8] (B, H, K)
@@ -138,7 +229,7 @@ class FGWUtils:
             Fx_mapped = Fx_mapped / (b_k_for_Fx + 1e-8) 
             # ------------------------------------
             
-            Fy_res = Fx_mapped # 👈 Fx와 그래디언트가 연결됨
+            Fy_res = Fx_mapped # Fx와 그래디언트가 연결됨
             
             # 2. Dx_mapped 계산
             Dx_mapped = torch.einsum("bhnk,bhml,bhnm->bhkl", Pi_detached, Pi_detached, Dx)
@@ -146,14 +237,15 @@ class FGWUtils:
             b_k_for_Dx = Pi_detached.sum(dim=-2, keepdim=True) # [B, H, 1, K]
             b_kl_denom = torch.einsum("bhnk,bhml->bhkl", b_k_for_Dx, b_k_for_Dx.transpose(-1, -2)) # [B, H, K, K]
 
-            Dy_res = Dx_mapped / (b_kl_denom + 1e-8) # 👈 Dx와 그래디언트가 연결됨
+            Dy_res = Dx_mapped / (b_kl_denom + 1e-8) # Dx와 그래디언트가 연결됨
             
         else:
             # === Path (a)용: 그래디언트가 Fy_sel로 흘러야 함 ===
+            Pi_detached = Pi.detach()
             Fy_res = Fy_sel
             Dy_res = Dy_sel 
 
-        return Fy_res, Dy_res, fgw_loss
+        return Fy_res, Dy_res, fgw_loss, b_updated, Pi_detached
 
 
     @staticmethod
@@ -199,8 +291,8 @@ class LatentCompositeGraph(nn.Module):
         self.K = int(n_nodes)
         self.D = self.args.input_dim // self.args.num_basis_heads
         self.node_embeddings = nn.Parameter(torch.empty(self.M, self.K, self.D))
-        nn_init.xavier_uniform_(self.node_embeddings)
-
+        #nn_init.xavier_uniform_(self.node_embeddings)
+        nn_init.normal_(self.node_embeddings, mean=0.0, std = 1.0)
     @staticmethod 
     def _row_softmax(x, temperature = 1.0, mask=None):
         if mask is not None:
@@ -261,7 +353,8 @@ class LatentCompositeGraph(nn.Module):
 
         # enforce symmetry
         cosine_similarity = 0.5 * (cosine_similarity + cosine_similarity.transpose(-1, -2))
-        return cosine_similarity.clamp(-1.0, 1.0)
+        cosine_similarity = (1.0 - cosine_similarity) / 2.0 
+        return cosine_similarity
 
     def forward(self):
         """ 
@@ -274,11 +367,26 @@ class LatentCompositeGraph(nn.Module):
         Dy_affinity = self.cosine_slot_cost_from_U(self.node_embeddings)
         diversify_loss = None
         if getattr(self.args, "lcg_diversifying_loss", False) is True:
-            identity_mask = torch.eye(self.K, device = Dy_affinity.device, dtype = torch.bool).unsqueeze(0)
-            identity_mask = identity_mask.expand(self.M, -1, -1)
-            off_diagonal_affinities = Dy_affinity[~identity_mask].view(self.M, -1)
-            diversify_loss = torch.mean(torch.abs(off_diagonal_affinities))
+            U = self.node_embeddings # [M, K, D]
+            # 1. (M, K, 1, D) vs (M, 1, K, D)
+            U1, U2 = U.unsqueeze(2), U.unsqueeze(1)
+            
+            # 2. [M, K, K] Euclidean distances 
+            pdist_sq = (U1 - U2).pow(2).sum(-1)
 
+            # 3. lcg_hinge_margin_sq 
+            margin_sq = getattr(self.args, "lcg_hinge_margin_sq", 1.0)
+
+            # 4. Hinge Loss 
+            loss_matrix = torch.clamp_min(margin_sq - pdist_sq, 0.0)
+
+            # 5. Diagonal masking 
+            identity_mask = torch.eye(self.K, device = U.device, dtype=torch.bool).unsqueeze(0)
+            loss_matrix.masked_fill_(identity_mask, 0)
+
+            # non-diagonal loss calculation 
+            num_pairs = self.M * self.K * (self.K - 1)
+            diversify_loss = loss_matrix.sum() / (num_pairs + 1e-8)
         return self.node_embeddings, Dy_affinity, diversify_loss
         
 
@@ -287,7 +395,7 @@ class GraphQuantizer(nn.Module):
         perform graph-level quantization using FGW distances. 
         Selects one latent composite graph per head and applies VQ-stype stop-gradient update. 
     """
-    def __init__(self, args, alpha = 0.5, eps = 0.05, outer_iters = 10 , sinkhorn_iters = 30):
+    def __init__(self, args, alpha = 0.5, eps = 0.05, outer_iters = 20 , sinkhorn_iters = 200):
         super().__init__() 
         self.args = args 
         self.alpha = alpha 
@@ -296,8 +404,13 @@ class GraphQuantizer(nn.Module):
         self.outer_iters = outer_iters 
         self.sinkhorn_iters = sinkhorn_iters 
         self.additional_FGW = self.args.additional_FGW
+    
+        # --- [2. Logger 초기화] --- 
+        self.logger = logging.getLogger("my_experiment_logger")
+        self.register_buffer("has_printed_initial_weights", torch.tensor(False), persistent=False)
+
         
-    def forward(self, P_affinity : torch.Tensor, basis_outputs : torch.Tensor, latent_graph : torch.Tensor):
+    def forward(self, P_affinity : torch.Tensor, basis_outputs : torch.Tensor, latent_graph : torch.Tensor, batch : dict):
         """
             Args:
                 P_affinity : [B, H, N, N]
@@ -313,37 +426,46 @@ class GraphQuantizer(nn.Module):
         # (1) Source graph & affinity
         Fx = basis_outputs[:, 1:, :, :].permute(0, 2, 1, 3) #[B, H, N, D/H]
 
-        Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
-        Dx = LatentCompositeGraph.affinity_to_distance(Dx)
+        logger = logging.getLogger("my_experiment_logger")
+        if not hasattr(self, 'gq_step_counter'): self.gq_step_counter = 0
+        self.gq_step_counter += 1
+
+        do_log = (self.gq_step_counter % 100 == 1)
+        if do_log:
+                
+            logger.info(f"\n" + "="*60)
+            logger.info(f"--- 📊 GraphQuantizer Inputs (Step: {self.gq_step_counter}) ---")
+            logger.info("--- 🩺 (Source - 1. Raw Affinity) ---")
+            logger.info(f"   [P_affinity] (Raw GAT Attn) mean: {P_affinity.mean().item():.4f}, std: {P_affinity.std().item():.4f}, min: {P_affinity.min().item():.4f}, max: {P_affinity.max().item():.4f}")
+
+        Dx_affinity = LatentCompositeGraph.normalize_affinity(P_affinity)
+        Dx = LatentCompositeGraph.affinity_to_distance(Dx_affinity)
         # (2) Latent composite graph & affinity 
         
         Fy, Dy, lcg_diversifying_loss = latent_graph()
-
-        # if not hasattr(self, 'step_counter'): self.step_counter = 0
-        # self.step_counter += 1
-        
-        # if self.step_counter % 1 == 0:
-        #     print("\n" + "*"*50)
-        #     print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
-        #     print("  [CODEBOOK (Fy)]")
-        #     print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
-        #     print("  [ENCODER (Fx)]")
-        #     print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
-        #     if Fx.std().item() > 1.0: # (std가 1.0 이상이면 폭주로 간주)
-        #         print("   -> ❗️❗️❗️ WARNING: Fx (인코더 출력)이 폭주하고 있습니다!")
-        #     print("*"*50 + "\n")
-        # print(f" min : {Fy.min()} max : {Fy.max()}, mean : {Fy.mean()} std : {Fy.std()} grad : {Fy.grad}")
 
         # (3) Uniform marginals 
         a = torch.ones(B, H, N, device = Fx.device) / N 
         b = torch.ones(B, latent_graph.M, latent_graph.K, device=Fx.device) / latent_graph.K 
 
+        
+        # reconstruct_FGW 내부의 로그와 겹칠 수 있으므로 50~100 스텝마다 한 번씩만 확인
+        if do_log: 
+            logger.info("--- 🩺 (Source - 2. Processed Inputs) ---")
+            logger.info(f"   [Fx] (Sample)  mean: {Fx.mean().item():.4f}, std: {Fx.std().item():.4f}, L2_norm_sq: {(Fx**2).sum(-1).mean().item():.4f}")
+            # "After" 통계
+            logger.info(f"   [Dx] (After Norm & 1-P) mean: {Dx.mean().item():.4f}, std: {Dx.std().item():.4f}, min: {Dx.min().item():.4f}, max: {Dx.max().item():.4f}")
+            logger.info("--- 🩺 (Target Codebook - All) ---")
+            logger.info(f"   [Fy] (All LCG) mean: {Fy.mean().item():.4f}, std: {Fy.std().item():.4f}, L2_norm_sq: {(Fy**2).sum(-1).mean().item():.4f}")
+            logger.info(f"   [Dy] (All LCG) mean: {Dy.mean().item():.4f}, std: {Dy.std().item():.4f}, min: {Dy.min().item():.4f}, max: {Dy.max().item():.4f}")
+            logger.info("="*60 + "\n")
+        # ⬆️ --- [ ✨ 로깅 코드 끝 ✨ ] --- ⬆️
         # ---- Step 1. Fused Gromov-Wasserstein distance computation for selection ---- 
         with torch.no_grad():
             Pi_all, fgw_values = FGWUtils.assign_FGW(
                 Fx, Fy, Dx, Dy, a, b,
                 alpha = self.alpha, eps = self.eps, 
-                outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
+                outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters , do_log = do_log
             )
             assign_idx = torch.argmin(fgw_values, dim=-1)
         
@@ -352,51 +474,89 @@ class GraphQuantizer(nn.Module):
         Dy_sel = Dy[assign_idx] # [B, H, K, K]
         b_sel = b[torch.arange(B).unsqueeze(1), assign_idx]
 
-        Fy_res_sel_detached, Dy_res_sel_detached, loss_dict = FGWUtils.reconstruct_FGW(
+        Fy_res_sel_detached, Dy_res_sel_detached, loss_dict, _, Pi_dict = FGWUtils.reconstruct_FGW(
             Fx.detach(), Fy_sel, Dx.detach(), Dy_sel, a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
-            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = False
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = False, do_log = do_log
         )
 
-        Fy_res_sel_live, Dy_res_sel_live, loss_enc = FGWUtils.reconstruct_FGW(
+        Fy_res_sel_live, Dy_res_sel_live, loss_enc, b_sel_updated , Pi_enc = FGWUtils.reconstruct_FGW(
             Fx, Fy_sel.detach(), Dx, Dy_sel.detach(), a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
-            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = True
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = True, do_log = do_log
         )
 
         Fy_res_sel_ste = Fy_res_sel_live + (Fy_res_sel_detached - Fy_res_sel_live).detach() 
         Dy_res_sel_ste = Dy_res_sel_live + (Dy_res_sel_detached - Dy_res_sel_live).detach()
         # --- 4. 최종 STE 출력 (디코더 입력) 상태 확인 ---
-
-        # print(f"   loss_dict: {loss_dict.item():.6f}")
-        # print(f"   loss_enc:  {loss_enc.item():.6f}")
-        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
-        # (모든 계산이 끝난 후, 100스텝마다 한 번씩 모든 STATS COMPARE 출력)
-        # (카운터 초기화)
         if not hasattr(self, 'step_counter'): self.step_counter = 0
         self.step_counter += 1
-        if self.step_counter % 1 == 0: 
-            print("\n" + "*"*50)
-            print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
-            print("  [CODEBOOK (Fy)]")
-            print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
-            print("  [ENCODER (Fx)]")
-            print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
-            
-            # --- [ ❗️❗️ 핵심 수정 ❗️❗️ ] ---
-            print("  [FGW 최종 성적표 (Sample 0, Head 0)]")
-            print(f"   Distances (Sample 0): {fgw_values[0, 0, :].cpu().numpy()}")
-            print(f"  [🏆 Selected LCGs (All Samples in Batch, Head 0)]")
-            # assign_idx[B, H]에서 B개 샘플의 0번 헤드 선택 [B]
-            print(f"   {assign_idx[:, 0].cpu().numpy()}") 
-            # --- [ 수정 끝 ] ---
+        if self.step_counter % 100 == 0: # 100 스텝마다
+            self.logger.info("\n" + "*"*50)
+            self.logger.info(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
+            avg_Fx_norm_sq = (Fx.detach()**2).sum(dim=-1).mean().item()
+            avg_Fy_norm_sq = (Fy.detach()**2).sum(dim=-1).mean().item() 
 
-            print("  [Calculated Losses]")
-            print(f"   loss_dict (Codebook pull): {loss_dict.item():.6f}")
-            print(f"   loss_enc (Encoder commit): {loss_enc.item():.6f}")
-            if lcg_diversifying_loss is not None:
-                print(f"   lcg_div_loss (Internal):   {lcg_diversifying_loss.item():.6f}")
-            print("*"*50 + "\n")
+            self.logger.info("  [CODEBOOK (Fy)]")
+            self.logger.info(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
+            self.logger.info(f"  Avg L2 norm^2 : {avg_Fy_norm_sq:.6f}")
+            self.logger.info("  [ENCODER (Fx)]")
+            self.logger.info(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
+            self.logger.info(f"  Avg L2 Norm^2: {avg_Fx_norm_sq:.6f}")
+            
+            self.logger.info("  [Updated LCG Marginal (b)]")
+            self.logger.info(f"   mean: {b_sel_updated.mean().item():.6f}, std: {b_sel_updated.std().item():.6f} b shape : {b.shape}")
+            self.logger.info(f"   (Sample 0, H 0): {b_sel_updated[0, 0, :].detach().cpu().numpy()}")
+            
+            B = Pi_enc.shape[0] 
+
+            num_samples_to_log   = min(10, B)
+            for i in range(num_samples_to_log):
+                # Pi_enc shape이 [B, H, N, K]이므로 [i, 0]으로 접근
+                Pi_sample = Pi_enc[i, 0].detach().cpu().numpy() 
+                
+                self.logger.info(f"--- (Sample {i}, Head 0) Pi Matrix (N x K) ---")
+                self.logger.info(f"    (Shape: {Pi_sample.shape})") 
+                
+                # ... (개별 샘플 통계 로깅은 동일) ...
+                lcg_node_importance = Pi_sample.sum(axis=0)
+                self.logger.info(f"   > LCG Node Importance (Sum over N): {np.array2string(lcg_node_importance, precision=4)}")
+                source_importance = Pi_sample.sum(axis=1)
+                self.logger.info(f"   > Source Node Importance (Sum over K): {np.array2string(source_importance, precision=4)}")
+                self.logger.info("   > Sampled Pi Matrix (N x K):")
+                self.logger.info(np.array2string(Pi_sample, precision=3, max_line_width=200, suppress_small=True))
+            
+            self.logger.info("  [FGW 최종 성적표 (Head 0)]")
+            batch_mean_distances = fgw_values[:, 0, :].mean(dim=0).cpu().numpy()
+            self.logger.info(f"   Avg Distances (Batch): {np.array2string(batch_mean_distances, precision=4)}")
+            self.logger.info(f"   Distances (Sample 0):  {np.array2string(fgw_values[0, 0, :].cpu().numpy(), precision=4)}")
+            
+            self.logger.info("  [🏆 Selected LCGs (by Source Index, Head 0)]")
+            # --- [ ❗️❗️ 여기가 버그 수정 ❗️❗️ ] ---
+            if 'src_idx' in batch:
+                try:
+                    # src_idx는 int (예: 1)
+                    src_idx_int = batch['src_idx'] 
+                    # assign_idx는 [B, H] (예: [32, 1])
+                    B = assign_idx.shape[0]
+                    
+                    # src_indices를 [1, 1, 1, ..., 1] (길이 B) 배열로 생성
+                    src_indices = np.full(B, src_idx_int) 
+                    
+                    assigned_indices_head0 = assign_idx[:, 0].cpu().numpy()
+                    
+                    df = pd.DataFrame({'Source_Idx': src_indices, 'LCG_Idx': assigned_indices_head0})
+                    assignment_summary = df.groupby('Source_Idx')['LCG_Idx'].value_counts().unstack(fill_value=0)
+                    self.logger.info(f"\n{assignment_summary.to_string()}")
+                    
+                except Exception as e:
+                    self.logger.warning(f"   Pandas 요약 실패 ({e}).")
+            # --- [ 버그 수정 끝 ] ---
+            else:
+                self.logger.info(f"   (Batch 'src_idx' not found) Raw (H0): {assign_idx[:, 0].cpu().numpy()}") 
+
+            # ... (loss_dict, loss_enc, lcg_div_loss 로깅은 동일) ...
+            self.logger.info("*"*50 + "\n")
         # --- [ 수정 끝 ] ---
         B, H = assign_idx.shape 
         M, K, D = Fy.shape
@@ -442,9 +602,9 @@ class GraphQuantizer(nn.Module):
         Fy_res_all = torch.cat([Fy_res_sel, Fy_res_unsel], dim = 2)
         Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
-        
+        pdb.set_trace()
         fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
-        
+        self.logger.info(f"loss_dict: {loss_dict.item():.6f}, loss_enc: {loss_enc.item():.6f}")
         if self.additional_FGW:
             fgw_loss += 0.3 * loss_som
         if getattr(self.args, "lcg_diversifying_loss", False) is True:
