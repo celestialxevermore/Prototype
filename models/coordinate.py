@@ -32,7 +32,7 @@ class CoordinatorMLP(nn.Module):
             nn.ReLU(),
             nn.Dropout(self.dropout),
 
-            nn.Linear(self.hidden_dim, self.n_graphs),
+            nn.Linear(self.hidden_dim, self.n_heads),
         )
         self._init_weights()
 

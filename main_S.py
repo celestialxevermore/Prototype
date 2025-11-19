@@ -95,6 +95,7 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
+    parser.add_argument('--eps_assign', type = float, default = 5.0)
     '''
         Basis GAT Configuration
     '''
@@ -108,7 +109,7 @@ def get_args():
     parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
 
     # Experiments Resampling
-    parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
+    parser.add_argument('--support_resamples', type=int, default=5, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,
@@ -278,8 +279,8 @@ def train_and_validate(args, model, train_loader, val_loader,
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
-        f"_vq_beta-{args.vq_beta}"
         f"_kl_gamma-{args.kl_gamma}"
+        f"_vq_beta-{args.vq_beta}"
         f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
@@ -805,8 +806,8 @@ def main():
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
-        f"_vq_beta-{args.vq_beta}"
         f"_kl_gamma-{args.kl_gamma}"
+        f"_vq_beta-{args.vq_beta}"
         f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
@@ -821,6 +822,7 @@ def main():
         model_full.load_state_dict(ckpt['model_state_dict'])
         logger.info(f"[Pretrain] Loaded checkpoint: {ckpt_path}")
         loaded_pretrain = True
+
     else:
         logger.info(f"[Pretrain] No checkpoint at {ckpt_dir} → run pretraining.")
         _metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
@@ -844,9 +846,9 @@ def main():
     logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
 
     # 5) KMeans 센트로이드 초기화
-    centroids = init_kmeans_centroids_from_sources(args, model_few, device)
-    model_few.set_kmeans_centroids(centroids)
-    model_few.set_coord_temperature(args.coord_softmax_temp)
+    #centroids = init_kmeans_centroids_from_sources(args, model_few, device)
+    #model_few.set_kmeans_centroids(centroids)
+    #model_few.set_coord_temperature(args.coord_softmax_temp)
 
     # 6) Target dataloaders
     logger.info(f"[Few-shot] target = {args.target_data}")

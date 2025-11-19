@@ -87,23 +87,45 @@ class LatentCompositeGNN(nn.Module):
             GraphReadout(self.input_dim, hidden_dim, self.input_dim, dropout) for _ in range(self.n_graphs)
         ])
 
-    def forward(self, Fy_res: torch.Tensor, Ay_sel: torch.Tensor):
+    def forward(self, Fy_res: torch.Tensor, Ay_sel: torch.Tensor, assign_idx: torch.Tensor) -> torch.Tensor:
         """
         Args:
             Fy_res: [B, H, M, K, D]
             Ay_sel: [B, H, M, K, K]
+            assign_idx : [B, H, M, K] # graph idx for each node
         Returns:
             graph_outputs: [B, H, M, K, D]
             graph_outputs: [B, H, M, D]
-        """
-        B, H, M, K, D = Fy_res.shape
-        expert_outputs = []
+        """# Fy_res는 GraphQuantizer에서 M=1 차원이 제거된 상태로 들어왔다고 가정합니다.
+        Fy_res = Fy_res.squeeze(2)  # [B, H, K, D]
+        Ay_sel = Ay_sel.squeeze(2)  # [B, H, K,
+        B, H, K, D = Fy_res.shape
+        H_outputs = [] 
 
-        for m in range(self.n_graphs):
-            node_out = self.graph_gnns[m](Fy_res[:, :, m].reshape(B * H, K, D), Ay_sel[:, :, m].reshape(B * H, K, K))  # [B, K, D]
-            graph_output = self.readouts[m](node_out)                    # [B, D]
-            graph_output = graph_output.view(B, H, -1)
-            expert_outputs.append(graph_output.unsqueeze(2))
-        expert_outputs = torch.cat(expert_outputs, dim=2)  # [B, H, D]
+        # ⭐️ B x H 이중 포문 시작 ⭐️
+        for i in range(B): # Batch 루프
+            head_outputs = []
+            for h in range(H): # Head 루프
+                # 1. 동적 Dispatch 인덱스 추출 (Python Integer)
+                m_idx = assign_idx[i, h].item() 
+                
+                # 2. 입력 슬라이싱 (현재 [K, D] 형태)
+                fy_input = Fy_res[i, h] 
+                ay_input = Ay_sel[i, h]
+                
+                # 3. GNN Expert 호출 (batch size 1로 unsqueeze(0) 필수)
+                node_out = self.graph_gnns[m_idx](fy_input.unsqueeze(0), ay_input.unsqueeze(0)) # [1, K, D]
+                
+                # 4. Readout 및 Squeeze (최종 [D] 벡터 획득)
+                # readouts[m]은 [1, D]를 출력하므로 squeeze(0)로 [D] 만듦
+                graph_output = self.readouts[m_idx](node_out).squeeze(0) 
+                
+                head_outputs.append(graph_output)
+            
+            # 5. H개의 결과를 [H, D] 형태로 쌓음
+            H_outputs.append(torch.stack(head_outputs, dim=0)) 
+            
+        # 6. B개의 결과를 [B, H, D] 형태로 최종 결합
+        expert_outputs = torch.stack(H_outputs, dim=0)
 
         return expert_outputs

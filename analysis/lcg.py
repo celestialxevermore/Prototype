@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
 import pandas as pd 
 from sklearn.decomposition import PCA
+import seaborn as sns
 # UMAP import
 try:
     import umap
@@ -131,8 +132,9 @@ class LCGVisualizer:
         전체 Transport Plan Pi [B, H, M, N, K]를 반환합니다.
         """
         bd = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
-              for k, v in batch.items()}
+                for k, v in batch.items()}
         
+        # --- [ 1. 모델에서 Fx, Dx, Fy, Dy 추출 ] ---
         _ = self.model.predict(bd) 
 
         basis_outputs = self.model.basis_outputs_for_viz
@@ -141,33 +143,121 @@ class LCGVisualizer:
         
         P_affinity = self.model._last_P_basis 
         Dx = LatentCompositeGraph.normalize_affinity(P_affinity)
-        Dx = LatentCompositeGraph.affinity_to_distance(Dx) # Dx는 거리
+        Dx = LatentCompositeGraph.affinity_to_distance(Dx) 
         
-        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
-        # 3개의 반환값을 모두 받되, diversity_loss는 무시 (시각화에 불필요)
-        Fy, Dy_affinity, _ = self.lcg() # lcg()가 3개를 반환
-        # --- [ 수정 끝 ] ---
-        
-        Dy = LatentCompositeGraph.affinity_to_distance(Dy_affinity) # Dy는 거리
+        Fy, Dy_affinity, _ = self.lcg() 
+        Dy = LatentCompositeGraph.affinity_to_distance(Dy_affinity)
 
         a = torch.ones(B, H, N, device = Fx.device) / N 
         b = torch.ones(B, self.M, self.K, device=Fx.device) / self.K 
 
-        # no_grad()로 argmin 계산
+        # --- [ 2. ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
+        # 로드된 모델의 GraphQuantizer에서 실제 학습에 사용된 파라미터를 가져옵니다.
+        quantizer = self.model.graph_quantizer
+
         Pi_all , fgw_values = FGWUtils.assign_FGW(
             Fx, Fy, Dx, Dy, a, b, # Dx, Dy 모두 거리
-            alpha = self.args.fgw_alpha, 
-            eps = 0.05, 
-            outer_iters = 10, 
-            sinkhorn_iters = 30
+            
+            # (수정) quantizer.alpha (e.g., 0.9) 사용
+            alpha = quantizer.alpha, 
+            
+            # (수정) quantizer.eps_assign (e.g., 5.0) 사용
+            eps = quantizer.eps_assign, 
+            
+            # (수정) quantizer에서 iter 값 읽어오기
+            outer_iters = quantizer.outer_iters, 
+            sinkhorn_iters = quantizer.sinkhorn_iters,
         ) 
+        # --- [ 수정 끝 ] ---
         
         assign_idx = torch.argmin(fgw_values, dim=-1) # [B, H]
         
         return assign_idx, Pi_all
-    
-    # ... (visualize_lcg_only, _analyze_lcg_distances, visualize_sources_and_lcg는 이전과 동일) ...
+    def visualize_transport_plans(self, sources: list, out_root: Path, num_samples=3):
+        """
+        [수정된 버전]
+        입력받은 '모든' 소스(sources: list)에 대해
+        Transport Plan (Pi)을 샘플별/헤드별로 시각화합니다.
+        """
+        print(f"[INFO] 🔄 Visualizing Transport Plans for {sources}...")
+        
+        # 1. 최상위 저장 폴더 생성
+        base_dir = out_root / "transport_plans"
+        ensure_dir(base_dir) # (ensure_dir가 lcg.py 어딘가에 정의되어 있어야 함)
 
+        for source_dataset in sources:
+            print(f"\n--- Processing Source: {source_dataset} ---")
+            
+            # 2. 소스별 데이터 로더 생성
+            loader = self._make_loader(source_dataset, batch_size=32)
+            try:
+                batch = next(iter(loader))
+            except StopIteration:
+                print(f"⚠️ [VIZ] No data in loader for {source_dataset}. Skipping.")
+                continue # 다음 소스로 넘어감
+
+            B = batch['y'].shape[0]
+            if B == 0:
+                print(f"⚠️ [VIZ] Batch has size 0. Skipping.")
+                continue
+                
+            # 3. Pi와 assign_idx 계산 (이 소스에 대해)
+            assign_idx, Pi_all = self._get_assignments_and_plans(batch)
+            assign_idx_np = assign_idx.cpu().numpy()
+            Pi_all_np = Pi_all.cpu().numpy()
+            
+            H = Pi_all_np.shape[1] # Head 수
+            N = Pi_all_np.shape[3] # Source 노드 수 (N)
+            K = Pi_all_np.shape[4] # LCG 노드 수 (K)
+            
+            # 4. 소스별 하위 폴더 생성
+            source_specific_dir = base_dir / source_dataset
+            ensure_dir(source_specific_dir)
+
+            num_to_viz = min(num_samples, B)
+            print(f"[VIZ] 🎨 Plotting {num_to_viz} samples in 1x{H} grids for {source_dataset}...")
+
+            for b in range(num_to_viz):
+                fig, axes = plt.subplots(1, H, figsize=(H * 4.5, 4.5), squeeze=False)
+                axes = axes.flatten()
+                
+                vmax = Pi_all_np[b].max() 
+                if vmax < 1e-6: vmax = 1.0 
+                
+                for h in range(H):
+                    ax = axes[h]
+                    m = assign_idx_np[b, h]
+                    pi_sample = Pi_all_np[b, h, m, :, :] # [N, K]
+                    
+                    sns.heatmap(
+                        pi_sample, 
+                        ax=ax, 
+                        cmap="viridis",
+                        cbar=True,
+                        vmin=0.0,
+                        vmax=vmax,
+                        annot=True, fmt=".2f", # 👈 숫자를 소수점 둘째자리까지 표시
+                        annot_kws={"size": 6}, # 👈 숫자 폰트 크기
+                        cbar_kws={'shrink': 0.75}
+                    )
+                    
+                    ax.set_title(f"Head {h} -> LCG {m}", fontsize=10)
+                    ax.set_xlabel(f"LCG Nodes (K={K})", fontsize=8)
+                
+                axes[0].set_ylabel(f"Source Nodes (N={N})", fontsize=8)
+                
+                sample_id = batch.get('id', [None]*B)[b]
+                title_id = f"ID: {sample_id}" if sample_id is not None else f"Index: {b}"
+                
+                fig.suptitle(f"Transport Plans (Pi) for Sample ({title_id})\n[Source: {source_dataset}]", fontsize=14, y=1.07)
+                plt.tight_layout()
+                
+                save_path = source_specific_dir / f"plan_sample_{sample_id or b}.png"
+                plt.savefig(save_path, dpi=200, bbox_inches="tight")
+                plt.close(fig)
+
+            print(f"[VIZ] ✅ Saved plans for {source_dataset} to: {source_specific_dir}")
+    
     def visualize_lcg_only(self, out_root: Path, method="pca"):
         """
         [수정]
@@ -298,15 +388,16 @@ class LCGVisualizer:
                                       max_samples=200, method="umap"):
         """
         [수정]
-        Multi-source 데이터 + LCG "K개 노드" 64개를 함께 시각화합니다.
-        (장식용 다이아몬드 대신 실제 노드 좌표 사용)
+        Multi-source 데이터 (Head별) + LCG "K개 노드"를 1xH 그리드로 시각화합니다.
+        LCG 노드에 'm-k' ID를 표시하고, 시각적 요소를 개선합니다.
         """
-        ensure_dir(out_root / "joint_space")
+        new_dir = out_root / "joint_space_per_head"
+        ensure_dir(new_dir)
         
         all_embeds, all_labels = [], []
         print("[INFO] 🔄 Collecting embeddings...")
         
-        # 1. 샘플(Fx) 임베딩 수집
+        # 1. 샘플(Fx) 임베딩 수집 ([CLS] 토큰)
         for s in sources:
             loader = self._make_loader(s, batch_size=32)
             temp_embeds = []
@@ -327,84 +418,130 @@ class LCGVisualizer:
         X_samples = np.concatenate(all_embeds, axis=0) # [Num_Samples, 1, D_full]
         if X_samples.ndim == 3: 
             X_samples = X_samples.reshape(-1, X_samples.shape[-1]) # [Num_Samples, D_full]
-            
-        X_samples_scaled = StandardScaler().fit_transform(X_samples)
+
+        # --- [ D_head 공통 공간 UMAP 로직 (동일) ] ---
         
-        # 2. LCG (Fy) "K개 노드" 임베딩 수집
-        # [M, K, D_head] -> [M*K, D_head]
+        # 2. LCG (Fy) "K개 노드" 임베딩 수집 (D_head 차원)
         lcg_nodes = self.lcg.node_embeddings.detach().cpu().numpy().reshape(-1, self.D)
         
-        # 3. UMAP/TSNE (차원 일치 확인)
-        # ❗️ Fx(D_full)와 Fy(D_head)의 차원이 다를 수 있습니다.
-        if lcg_nodes.shape[1] != X_samples_scaled.shape[1]:
-            print(f"⚠️ LCG 노드 차원({lcg_nodes.shape[1]})과 샘플 차원({X_samples_scaled.shape[1]})이 다릅니다!")
-            
-            
-            reducer_lcg = (
-                umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=42)
-                if (method == "umap" and umap is not None)
-                else TSNE(n_components=2, perplexity=min(30, lcg_nodes.shape[0]-1), random_state=42)
-            )
-            lcg_2d = reducer_lcg.fit_transform(lcg_nodes) # [M*K, 2]
-            
-            reducer_X = (
-                umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
-                if (method == "umap" and umap is not None)
-                else TSNE(n_components=2, perplexity=40, random_state=42)
-            )
-            X_2d = reducer_X.fit_transform(X_samples_scaled) # [Num_Samples, 2]
-            
-        else:
-            print("    -> 샘플과 LCG를 함께 UMAP/t-SNE 변환합니다.")
-            X_all = np.concatenate([X_samples_scaled, lcg_nodes], axis=0)
-            reducer = (
-                umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
-                if (method == "umap" and umap is not None)
-                else TSNE(n_components=2, perplexity=40, random_state=42)
-            )
-            X_2d_all = reducer.fit_transform(X_all)
-            X_2d = X_2d_all[:len(X_samples_scaled)] # 샘플 2D 좌표
-            lcg_2d = X_2d_all[len(X_samples_scaled):] # LCG "K개 노드" 64개의 2D 좌표
+        # 3. 샘플 (Fx) 임베딩을 [Num_Samples * H, D_head]로 분리
+        H = self.lcg.H 
+        D_head = self.D
         
-        # 4. 시각화
-        colors = {s: plt.colormaps.get_cmap("tab10")(i % 10) 
-                  for i, s in enumerate(sources)}
-        plt.figure(figsize=(10, 9))
+        X_samples_headed = X_samples.reshape(-1, H, D_head) # [Num_Samples, H, D_head]
+        X_samples_final = X_samples_headed.reshape(-1, D_head) # [Num_Samples * H, D_head]
         
-        # Plot Source 데이터 (점)
-        for s in sources:
-            idx = [i for i, l in enumerate(all_labels) if l == s]
-            plt.scatter(X_2d[idx, 0], X_2d[idx, 1],
-                        c=[colors[s]], s=15, alpha=0.5, label=f"{s}")
-        
-        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
-        # Plot LCG (K개 노드 64개)
-        cmap_lcg = plt.colormaps.get_cmap("Set3")
-        for m in range(self.M):
-            # lcg_2d ([M*K, 2])에서 K개 노드의 실제 2D 좌표를 가져옴
-            sub_nodes_2d = lcg_2d[m * self.K:(m + 1) * self.K]
-            color = cmap_lcg(m % 12)
-            
-            # 8개의 "진짜" 노드 위치를 다이아몬드로 그림
-            plt.scatter(sub_nodes_2d[:, 0], sub_nodes_2d[:, 1],
-                        color=color, s=100, edgecolor='black', 
-                        linewidth=1.0, label=f"LCG_{m}", marker='D',
-                        alpha=0.8) # (겹쳐 보이도록 alpha 추가)
-            
-            # LCG의 평균 중심점에 X자 마커
-            center = sub_nodes_2d.mean(axis=0)
-            plt.scatter(center[0], center[1], marker="X", 
-                        color="black", s=100, linewidth=1.5,
-                        alpha=0.5) # (X마커는 검은색으로 통일)
-        # --- [ 수정 끝 ] ---
+        # 4. UMAP용 데이터 준비 (모두 D_head 차원)
+        X_all = np.concatenate([X_samples_final, lcg_nodes], axis=0)
+        X_all_scaled = StandardScaler().fit_transform(X_all)
 
-        plt.legend(fontsize=8, frameon=True, loc='best', ncol=2)
-        plt.title("Multi-Source Samples + Trained LCG *Nodes* Distributions", fontsize=13) # 제목 수정
-        plt.xlabel("Dim-1"); plt.ylabel("Dim-2")
-        plt.grid(alpha=0.2)
-        plt.tight_layout()
+        # 5. UMAP/t-SNE (공통 공간)
+        print(f"    -> 샘플 (per-head, {H}개)과 LCG 노드를 'D_head' 공통 공간에서 변환합니다.")
+        reducer = (
+            umap.UMAP(n_neighbors=40, min_dist=0.2, metric="euclidean", random_state=42)
+            if (method == "umap" and umap is not None)
+            else TSNE(n_components=2, perplexity=min(30, X_all.shape[0]-1), random_state=42)
+        )
+        X_2d_all = reducer.fit_transform(X_all_scaled)
         
-        save_path = out_root / "joint_space" / "sources_and_lcg_nodes.png" # 새 이름
+        # 6. 좌표 분리
+        num_sample_heads = len(X_samples_final)
+        X_2d_samples = X_2d_all[:num_sample_heads] # [Num_Samples * H, 2]
+        lcg_2d = X_2d_all[num_sample_heads:]       # [M*K, 2]
+        
+        # --- [ ❗️ 7. 시각화 (방법 B: 1xH 그리드) ❗️ ] ---
+        
+        fig, axes = plt.subplots(1, H, figsize=(H * 6, 6), squeeze=False) # figsize 약간 키움
+        axes = axes.flatten()
+
+        print(f"[VIZ] 🎨 Plotting 1x{H} grid with LCG Node IDs...")
+
+        # LCG 노드 플로팅 준비
+        cmap_lcg = plt.colormaps.get_cmap("Set3") 
+        lcg_colors = {m: cmap_lcg(m % 12) for m in range(self.M)}
+        
+        # 소스 샘플 플로팅 준비
+        cmap_src = plt.colormaps.get_cmap("tab10") 
+        src_names = sorted(list(set(all_labels))) 
+        src_colors = {s: cmap_src(i % 10) for i, s in enumerate(src_names)}
+        
+        head_labels_tiled = np.tile(np.arange(H), len(all_labels)) 
+        src_labels_repeated = np.repeat(all_labels, H) 
+
+        for h in range(H):
+            ax = axes[h]
+            
+            # 1. 배경: LCG 노드 (M*K개) 그리기 및 ID 표기
+            for m in range(self.M):
+                sub_nodes_2d = lcg_2d[m * self.K:(m + 1) * self.K]
+                color = lcg_colors[m]
+                
+                # LCG 그룹을 나타내는 테두리 원 그리기 (선택 사항, 너무 복잡하면 제거)
+                # center_m = sub_nodes_2d.mean(axis=0)
+                # radius_m = np.max(np.linalg.norm(sub_nodes_2d - center_m, axis=1)) * 1.5
+                # circle = plt.Circle(center_m, radius_m, color=color, fill=False, linestyle='--', alpha=0.2, linewidth=1.0)
+                # ax.add_artist(circle)
+                
+                # LCG 노드 (사각형 마커)
+                ax.scatter(sub_nodes_2d[:, 0], sub_nodes_2d[:, 1],
+                           color=color, s=80, edgecolor='black', 
+                           linewidth=0.7, label=f"LCG_{m}" if h == 0 else "", # 첫 번째 플롯에만 범례 추가
+                           marker='s', # 'D' 대신 's' (정사각형) 사용
+                           alpha=0.7, zorder=3) # zorder로 샘플 위에 표시
+                
+                # 노드 ID 텍스트 추가
+                for k in range(self.K):
+                    node_id = f"{m}-{k}"
+                    ax.text(sub_nodes_2d[k, 0] + 0.3, sub_nodes_2d[k, 1] + 0.3, # 텍스트 위치 살짝 조정
+                            node_id, fontsize=7, color='black', ha='left', va='bottom',
+                            bbox=dict(boxstyle='round,pad=0.2', fc=color, alpha=0.6, ec='none'),
+                            zorder=4) # 텍스트가 노드 위에 오도록 zorder 조정
+
+            # 2. 전경: Head 'h'에 해당하는 샘플 그리기
+            head_sample_indices = np.where(head_labels_tiled == h)[0] 
+            X_2d_head_h = X_2d_samples[head_sample_indices] 
+            labels_head_h = src_labels_repeated[head_sample_indices] 
+            
+            for src_name in src_names:
+                src_idx = np.where(labels_head_h == src_name)[0]
+                ax.scatter(X_2d_head_h[src_idx, 0], X_2d_head_h[src_idx, 1],
+                           c=[src_colors[src_name]], s=15, alpha=0.4, # s=15, alpha=0.4로 조절
+                           label=f"{src_name}" if h == 0 else "", # 첫 번째 플롯에만 범례 추가
+                           zorder=2) # LCG 노드보다 뒤에 표시
+
+            ax.set_title(f"Head {h} View", fontsize=12)
+            ax.grid(alpha=0.3, linestyle=':') # 그리드 스타일 개선
+            ax.set_xlabel("Dim-1")
+            
+        axes[0].set_ylabel("Dim-2")
+        
+        # 3. 범례 개선 (LCG와 Source 범례 분리)
+        # LCG 범례
+        lcg_handles = [plt.Line2D([0], [0], marker='s', color='w', 
+                                  markerfacecolor=lcg_colors[m], 
+                                  markeredgecolor='black',
+                                  markersize=8, label=f"LCG {m}") for m in range(self.M)]
+        # Source 범례
+        src_handles = [plt.Line2D([0], [0], marker='o', color='w', 
+                                  markerfacecolor=src_colors[s], 
+                                  markeredgecolor='none',
+                                  markersize=7, label=f"{s}") for s in src_names]
+                                  
+        # 두 범례를 하나의 레이아웃으로 통합하여 오른쪽에 표시
+        # 범례를 두 열로 나누어 배치
+        first_col_len = max(len(lcg_handles), len(src_handles)) // 2 + 1 
+        
+        combined_handles = lcg_handles + src_handles
+        combined_labels = [h.get_label() for h in combined_handles]
+
+        fig.legend(combined_handles, combined_labels, 
+                   loc='center right', bbox_to_anchor=(1.0 + 0.01 * H, 0.5), # H에 따라 범례 위치 살짝 조정
+                   fontsize=9, frameon=True, ncol=1) # 한 열로 깔끔하게
+
+        fig.suptitle(f"D_head ({D_head}D) Common Space UMAP (1x{H} Grid)", fontsize=16, y=1.03)
+        plt.tight_layout(rect=[0, 0, 0.9, 1]) # 범례 공간 확보
+        
+        save_path = new_dir / f"sources_and_lcg_per_head_grid.png"
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"[VIZ] ✅ Saved: {save_path}")
@@ -607,9 +744,16 @@ def main():
     ap.add_argument("--max_samples", type=int, default=200)
     ap.add_argument("--method", type=str, default="umap", 
                     choices=["umap", "tsne"])
+    
+    # ❗️ [1. Plan 시각화를 위한 인자 추가] ❗️
+    ap.add_argument("--num_plan_samples", type=int, default=3,
+                    help="Number of samples for Transport Plan viz")
+    
     args = ap.parse_args()
 
-    viz = LCGVisualizer(args.checkpoint_dir)
+    # (LCSVisualizer 클래스와 ensure_dir 함수가 
+    #  이 파일 어딘가에 import/정의되어 있어야 함)
+    viz = LCGVisualizer(args.checkpoint_dir) 
     out_root = (Path(args.output_dir) if args.output_dir 
                 else Path(args.checkpoint_dir).parent / "visualization")
     ensure_dir(out_root)
@@ -637,6 +781,15 @@ def main():
     
     # (5) LCG K-노드 사용량(Pi) 시각화 (레이아웃 변경)
     viz.visualize_lcg_node_usage(sources, out_root)
+    
+    # ❗️ [2. 여기에 Transport Plan 시각화 호출 추가] ❗️
+    # (6) Transport Plan (Pi) 히트맵 시각화
+    print("\n[INFO] Visualizing Transport Plans (Pi)...")
+    viz.visualize_transport_plans(
+        sources=sources, # (2)번에서 만든 sources 리스트 재사용
+        out_root=out_root,
+        num_samples=args.num_plan_samples # 1번에서 추가한 인자 사용
+    )
     
     print(f"\n✅ 시각화 완료! 결과: {out_root}")
 
