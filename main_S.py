@@ -841,12 +841,12 @@ def main():
     model_few.set_freeze_target()
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
-    logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
+    # logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
 
-    # 5) KMeans 센트로이드 초기화
-    centroids = init_kmeans_centroids_from_sources(args, model_few, device)
-    model_few.set_kmeans_centroids(centroids)
-    model_few.set_coord_temperature(args.coord_softmax_temp)
+    # # 5) KMeans 센트로이드 초기화
+    # centroids = init_kmeans_centroids_from_sources(args, model_few, device)
+    # model_few.set_kmeans_centroids(centroids)
+    # model_few.set_coord_temperature(args.coord_softmax_temp)
 
     # 6) Target dataloaders
     logger.info(f"[Few-shot] target = {args.target_data}")
