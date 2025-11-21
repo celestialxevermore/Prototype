@@ -40,6 +40,9 @@ class FGWUtils:
             Fx : [B, H, N, D]
             Fy : [M, K, D]
             Return : C_feat [B, H, M, N, K]
+            
+            Normalized by feature dimension D to prevent high-dimensional features
+            from dominating the cost.
         """
         if Fy.dim() == 3 : # global dictionary (assign)
             B, H, N, D = Fx.shape
@@ -47,13 +50,15 @@ class FGWUtils:
             # Broadcast feature tensors 
             Fx_ = Fx.unsqueeze(2).unsqueeze(-2) #[B, H, 1, N, 1, D]
             Fy_ = Fy.unsqueeze(0).unsqueeze(0).unsqueeze(3) # [1, 1, M, 1, K, D]
-            return ((Fx_ - Fy_) ** 2).sum(dim=-1) #[B, H, M, N, K]
+            # Normalize by dimension D
+            return ((Fx_ - Fy_) ** 2).sum(dim=-1) / D #[B, H, M, N, K]
         else: # [B, H, K ,D] (reconstruct)
             B, H, N, D = Fx.shape
             _, _, K, _ = Fy.shape 
             Fx_ = Fx.unsqueeze(-2) # [B, H, N, 1, D]
             Fy_ = Fy.unsqueeze(2) # [B, H, 1, K ,D]
-            return ((Fx_ - Fy_) ** 2).sum(-1) # [B, H, N, K]
+            # Normalize by dimension D
+            return ((Fx_ - Fy_) ** 2).sum(-1) / D # [B, H, N, K]
 
     @staticmethod 
     def _Gromov_Wasserstein_cost(Dx, Dy, Pi):
@@ -112,6 +117,7 @@ class FGWUtils:
             C_feat = FGWUtils._pairwise_feature_cost(Fx, Fy_sel)
             C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy_sel, Pi)
             C = (1 - alpha) * C_feat + alpha * C_gw 
+            #pdb.set_trace()
             Pi = FGWUtils._sinkhorn_ot(a, b, C.unsqueeze(2), eps = eps, iters = sinkhorn_iters)[:, :, 0]
         
         fgw_loss = (C * Pi).sum((-2, -1)).mean() 
@@ -122,21 +128,10 @@ class FGWUtils:
             Pi_detached = Pi.detach()
             
             # 1. Fx_mapped 계산
-            # [32, 1, 13, 8] * [32, 1, 13, 768] -> [32, 1, 8, 768]
             Fx_mapped = torch.einsum("bhnk,bhnd->bhkd", Pi_detached, Fx)
             
-            # --- ❗️❗️ 여기가 핵심 수정 ❗️❗️ ---
-            # b_k_for_Fx shape을 [B, H, K, 1]로 만듭니다
-            
-            # Pi_detached.sum(dim=-2) -> [32, 1, 8] (B, H, K)
-            b_k_for_Fx = Pi_detached.sum(dim=-2) 
-            
-            # b_k_for_Fx.unsqueeze(-1) -> [32, 1, 8, 1] (B, H, K, 1)
-            b_k_for_Fx = b_k_for_Fx.unsqueeze(-1) 
-            
-            # [32, 1, 8, 768] / [32, 1, 8, 1] -> 브로드캐스팅 성공
+            b_k_for_Fx = Pi_detached.sum(dim=-2).unsqueeze(-1) 
             Fx_mapped = Fx_mapped / (b_k_for_Fx + 1e-8) 
-            # ------------------------------------
             
             Fy_res = Fx_mapped # 👈 Fx와 그래디언트가 연결됨
             
@@ -174,6 +169,7 @@ class FGWUtils:
         C_gw = FGWUtils._Gromov_Wasserstein_cost(Dx, Dy, Pi_init)
         # 4. Combine
         C_fused = (1 - alpha) * C_feat + alpha * C_gw
+        pdb.set_trace()
         return C_fused 
 
 class LatentCompositeGraph(nn.Module):
@@ -303,9 +299,11 @@ class GraphQuantizer(nn.Module):
                 P_affinity : [B, H, N, N]
                 basis_outputs : [B, N+1, H, D/H]
                 latent_graph : LatentCompositeGraph instance 
-                detach_encoder : bool (True -> encoder stopgrad, False -> dictionary stopgrad)       
             Returns:
-                assign_idx : [B, H] index of selected latent composite graph per head
+                Fy_res_all : [B, H, M, K, D]
+                Ay_res_all : [B, H, M, K, K]
+                fgw_loss : scalar
+                soft_assignments : [B, H, M]
         """
         # (0) dimension 
         B, H, N, _ = P_affinity.shape 
@@ -319,46 +317,39 @@ class GraphQuantizer(nn.Module):
         
         Fy, Dy, lcg_diversifying_loss = latent_graph()
 
-        # if not hasattr(self, 'step_counter'): self.step_counter = 0
-        # self.step_counter += 1
-        
-        # if self.step_counter % 1 == 0:
-        #     print("\n" + "*"*50)
-        #     print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
-        #     print("  [CODEBOOK (Fy)]")
-        #     print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
-        #     print("  [ENCODER (Fx)]")
-        #     print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
-        #     if Fx.std().item() > 1.0: # (std가 1.0 이상이면 폭주로 간주)
-        #         print("   -> ❗️❗️❗️ WARNING: Fx (인코더 출력)이 폭주하고 있습니다!")
-        #     print("*"*50 + "\n")
-        # print(f" min : {Fy.min()} max : {Fy.max()}, mean : {Fy.mean()} std : {Fy.std()} grad : {Fy.grad}")
-
         # (3) Uniform marginals 
         a = torch.ones(B, H, N, device = Fx.device) / N 
         b = torch.ones(B, latent_graph.M, latent_graph.K, device=Fx.device) / latent_graph.K 
 
-        # ---- Step 1. Fused Gromov-Wasserstein distance computation for selection ---- 
+        # ---- Step 1. Fused Gromov-Wasserstein distance computation for soft assignment ---- 
         with torch.no_grad():
             Pi_all, fgw_values = FGWUtils.assign_FGW(
                 Fx, Fy, Dx, Dy, a, b,
                 alpha = self.alpha, eps = self.eps, 
                 outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters 
             )
+            # Soft assignment
+            soft_assignments = F.softmax(-fgw_values, dim=-1)  # [B, H, M]
+            
+            # Hard assignment for indexing
             assign_idx = torch.argmin(fgw_values, dim=-1)
         
-        # ---- Step 2. Gather selected latent graphs ---- 
+        # ---- Step 2. Process ALL M latent graphs with STE ----
+        M, K, D = Fy.shape
+        
+        # 2-1. Selected LCG (1개)
         Fy_sel = Fy[assign_idx] # [B, H, K, D]
         Dy_sel = Dy[assign_idx] # [B, H, K, K]
         b_sel = b[torch.arange(B).unsqueeze(1), assign_idx]
 
-        Fy_res_sel_detached, Dy_res_sel_detached, loss_dict = FGWUtils.reconstruct_FGW(
+        # VQ-VAE with STE for selected
+        Fy_res_sel_detached, Dy_res_sel_detached, loss_sel_dict = FGWUtils.reconstruct_FGW(
             Fx.detach(), Fy_sel, Dx.detach(), Dy_sel, a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
             outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = False
         )
 
-        Fy_res_sel_live, Dy_res_sel_live, loss_enc = FGWUtils.reconstruct_FGW(
+        Fy_res_sel_live, Dy_res_sel_live, loss_sel_enc = FGWUtils.reconstruct_FGW(
             Fx, Fy_sel.detach(), Dx, Dy_sel.detach(), a, b_sel, 
             alpha = self.alpha, eps = self.eps, 
             outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters, map_encoder_output = True
@@ -366,76 +357,49 @@ class GraphQuantizer(nn.Module):
 
         Fy_res_sel_ste = Fy_res_sel_live + (Fy_res_sel_detached - Fy_res_sel_live).detach() 
         Dy_res_sel_ste = Dy_res_sel_live + (Dy_res_sel_detached - Dy_res_sel_live).detach()
-        # --- 4. 최종 STE 출력 (디코더 입력) 상태 확인 ---
 
-        # print(f"   loss_dict: {loss_dict.item():.6f}")
-        # print(f"   loss_enc:  {loss_enc.item():.6f}")
-        # --- [ ❗️❗️ 여기가 수정된 지점 ❗️❗️ ] ---
-        # (모든 계산이 끝난 후, 100스텝마다 한 번씩 모든 STATS COMPARE 출력)
-        # (카운터 초기화)
-        if not hasattr(self, 'step_counter'): self.step_counter = 0
-        self.step_counter += 1
-        if self.step_counter % 1 == 0: 
-            print("\n" + "*"*50)
-            print(f"--- 📊 STATS COMPARE (Step: {self.step_counter}) ---")
-            print("  [CODEBOOK (Fy)]")
-            print(f"   min: {Fy.min().item():.6f}, max: {Fy.max().item():.6f}, std: {Fy.std().item():.6f}")
-            print("  [ENCODER (Fx)]")
-            print(f"   min: {Fx.min().item():.6f}, max: {Fx.max().item():.6f}, std: {Fx.std().item():.6f}")
-            
-            # --- [ ❗️❗️ 핵심 수정 ❗️❗️ ] ---
-            print("  [FGW 최종 성적표 (Sample 0, Head 0)]")
-            print(f"   Distances (Sample 0): {fgw_values[0, 0, :].cpu().numpy()}")
-            print(f"  [🏆 Selected LCGs (All Samples in Batch, Head 0)]")
-            # assign_idx[B, H]에서 B개 샘플의 0번 헤드 선택 [B]
-            print(f"   {assign_idx[:, 0].cpu().numpy()}") 
-            # --- [ 수정 끝 ] ---
+        # 2-2. Unselected LCGs (M-1개) - 동일하게 STE 적용
+        mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
+        mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
+        unsel_idx = mask.nonzero(as_tuple = True)
 
-            print("  [Calculated Losses]")
-            print(f"   loss_dict (Codebook pull): {loss_dict.item():.6f}")
-            print(f"   loss_enc (Encoder commit): {loss_enc.item():.6f}")
-            if lcg_diversifying_loss is not None:
-                print(f"   lcg_div_loss (Internal):   {lcg_diversifying_loss.item():.6f}")
-            print("*"*50 + "\n")
-        # --- [ 수정 끝 ] ---
-        B, H = assign_idx.shape 
-        M, K, D = Fy.shape
+        Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
+        Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
 
-        if self.args.additional_FGW:
-            mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
-            mask.scatter_(2, assign_idx.unsqueeze(-1), False) 
-            unsel_idx = mask.nonzero(as_tuple = True)
+        Fx_rep = Fx.repeat_interleave(M-1, dim = 0)
+        Dx_rep = Dx.repeat_interleave(M-1, dim = 0)
+        a_rep = a.repeat_interleave(M-1, dim = 0)
+        b_rep = torch.ones_like(b_sel).repeat_interleave(M-1, dim = 0)
 
-            Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
-            Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
-
-            Fx_rep = Fx.detach().repeat_interleave(M-1, dim = 0)
-            Dx_rep = Dx.detach().repeat_interleave(M-1, dim = 0)
-            a_rep = a.repeat_interleave(M-1, dim = 0)
-            b_rep = torch.ones_like(b_sel).repeat_interleave(M-1, dim = 0)
-
+        Fy_unsel_flat = Fy_unsel.view(B * (M - 1), H, K, D)
+        Dy_unsel_flat = Dy_unsel.view(B * (M - 1), H, K, K)
         
-            Fy_unsel_flat = Fy_unsel.view(B * (M - 1), H, K, D)
-            Dy_unsel_flat = Dy_unsel.view(B * (M - 1), H, K, K)
-            Fy_res_unsel, Dy_res_unsel, loss_som = FGWUtils.reconstruct_FGW(
-                Fx_rep, Fy_unsel_flat, Dx_rep, Dy_unsel_flat, 
-                a_rep, b_rep, 
-                alpha = self.alpha, eps = self.eps, 
-                outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters
-            )
-
-            Fy_res_unsel = Fy_res_unsel.view(B, M - 1, H, K, D).transpose(1,2)
-            Dy_res_unsel = Dy_res_unsel.view(B, M - 1, H, K, K).transpose(1,2)
-        else:
-            mask = torch.ones((B, H, M), dtype = torch.bool, device = Fy.device)
-            mask.scatter_(2, assign_idx.unsqueeze(-1), False)
-            unsel_idx = mask.nonzero(as_tuple=True)
-            Fy_unsel = Fy[unsel_idx[2]].view(B, H, M-1, K, D)
-            Dy_unsel = Dy[unsel_idx[2]].view(B, H, M-1, K, K)
-            Fy_res_unsel = Fy_unsel 
-            Dy_res_unsel = Dy_unsel 
+        # Path (a): Dictionary update
+        Fy_res_unsel_detached, Dy_res_unsel_detached, loss_unsel_dict = FGWUtils.reconstruct_FGW(
+            Fx_rep.detach(), Fy_unsel_flat, Dx_rep.detach(), Dy_unsel_flat, 
+            a_rep, b_rep, 
+            alpha = self.alpha, eps = self.eps, 
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters,
+            map_encoder_output = False
+        )
         
-        # ---- Step 5. Merge results ----
+        # Path (b): Encoder update
+        Fy_res_unsel_live, Dy_res_unsel_live, loss_unsel_enc = FGWUtils.reconstruct_FGW(
+            Fx_rep, Fy_unsel_flat.detach(), Dx_rep, Dy_unsel_flat.detach(), 
+            a_rep, b_rep, 
+            alpha = self.alpha, eps = self.eps, 
+            outer_iters = self.outer_iters, sinkhorn_iters = self.sinkhorn_iters,
+            map_encoder_output = True
+        )
+        
+        # STE for unselected
+        Fy_res_unsel = Fy_res_unsel_live + (Fy_res_unsel_detached - Fy_res_unsel_live).detach()
+        Dy_res_unsel = Dy_res_unsel_live + (Dy_res_unsel_detached - Dy_res_unsel_live).detach()
+
+        Fy_res_unsel = Fy_res_unsel.view(B, M - 1, H, K, D).transpose(1,2)
+        Dy_res_unsel = Dy_res_unsel.view(B, M - 1, H, K, K).transpose(1,2)
+        
+        # ---- Step 3. Merge results ----
         Fy_res_sel = Fy_res_sel_ste.unsqueeze(2)
         Dy_res_sel = Dy_res_sel_ste.unsqueeze(2)
 
@@ -443,11 +407,12 @@ class GraphQuantizer(nn.Module):
         Dy_res_all = torch.cat([Dy_res_sel, Dy_res_unsel], dim = 2)
         Ay_res_all = 1.0 - Dy_res_all.clamp(0.0, 1.0)
         
-        fgw_loss = loss_dict.mean() + self.vq_beta * loss_enc.mean()
+        # ---- Step 4. Compute loss (모든 M개를 동등하게) ----
+        fgw_loss = (loss_sel_dict.mean() + self.vq_beta * loss_sel_enc.mean() + 
+                    loss_unsel_dict.mean() + self.vq_beta * loss_unsel_enc.mean())
         
-        if self.additional_FGW:
-            fgw_loss += 0.3 * loss_som
         if getattr(self.args, "lcg_diversifying_loss", False) is True:
             div_alpha = getattr(self.args, "lcg_div_alpha", 10)
             fgw_loss += div_alpha * lcg_diversifying_loss
-        return Fy_res_all, Ay_res_all, fgw_loss
+
+        return Fy_res_all, Ay_res_all, fgw_loss, soft_assignments

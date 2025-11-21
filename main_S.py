@@ -85,7 +85,7 @@ def get_args():
     parser.add_argument("--n_graphs", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
     parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
-    parser.add_argument('--fgw_alpha', type = float, default =0.01)
+    parser.add_argument('--fgw_alpha', type = float, default =0.5)
     parser.add_argument('--lcg_div_alpha', type = float, default = 0.1)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
     parser.add_argument('--kl_gamma', type = float, default = 0.2)
@@ -442,7 +442,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         p for name, p in model.named_parameters()
         if "latent_graph" in name and p.requires_grad
     ]
-    lcg_lr_multiplier = 1000.0 
+    lcg_lr_multiplier = 1.0 
     lcg_lr = args.source_lr * lcg_lr_multiplier 
     
     logger.info(f"--- 🚀 Applying Differential LR ---")
@@ -792,9 +792,9 @@ def main():
     logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
 
     # 5) KMeans 센트로이드 초기화
-    centroids = init_kmeans_centroids_from_sources(args, model_few, device)
-    model_few.set_kmeans_centroids(centroids)
-    model_few.set_coord_temperature(args.coord_softmax_temp)
+    #centroids = init_kmeans_centroids_from_sources(args, model_few, device)
+    #model_few.set_kmeans_centroids(centroids)
+    #model_few.set_coord_temperature(args.coord_softmax_temp)
 
     # 6) Target dataloaders
     logger.info(f"[Few-shot] target = {args.target_data}")
