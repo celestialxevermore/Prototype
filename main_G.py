@@ -247,21 +247,44 @@ def train_and_validate(args, model, train_loader, val_loader, criterion, optimiz
 def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None):
     """
     학습이 끝난 뒤, Test 로더에 대해 최종 성능을 측정.
-    threshold가 있으면 Binary 분류 시 threshold 적용.
+    (Dual Eval 호환 수정: Local 결과 사용)
     """
-    evaluate_func = binary_evaluate if is_binary else multi_evaluate
-    test_loss, y_true_test, y_pred_test = evaluate_func(model, test_loader, criterion, device)
+    #logger = logging.getLogger("my_experiment_logger")
 
+    # 1. 함수 매핑 (Dual)
+    evaluate_func = binary_evaluate if is_binary else multi_evaluate
+
+    # 2. 평가 실행
+    if is_binary:
+        # Unpack Dual Results
+        (loss_g, true_g, pred_g), (loss_l, true_l, pred_l) = evaluate_func(model, test_loader, criterion, device)
+        
+        # [선택] Global 성능도 로그에 찍어보기
+        auc_g = roc_auc_score(true_g, pred_g)
+        logger.info(f"[Test Check] Global AUC: {auc_g:.4f} (Just for Reference)")
+        
+        # 메인은 Local 결과 사용
+        test_loss = loss_l
+        y_true_test = true_l
+        y_pred_test = pred_l
+        
+    else:
+        # Multi-class (기존 로직 유지)
+        test_loss, y_true_test, y_pred_test = evaluate_func(model, test_loader, criterion, device)
+
+    # 3. Metric 계산 (기존 코드와 동일)
     if is_binary:
         test_auc = roc_auc_score(y_true_test, y_pred_test)
         if threshold is None:
             threshold = 0.5
         y_pred_test_bin = (y_pred_test > threshold).astype(int)
+        
         test_precision = precision_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_recall = recall_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_f1 = f1_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_acc = accuracy_score(y_true_test, y_pred_test_bin)
     else:
+        # Multi-class Metrics (기존 동일)
         n_classes = y_pred_test.shape[1]
         y_true_test_bin = label_binarize(y_true_test, classes=range(n_classes))
         test_auc = roc_auc_score(y_true_test_bin, y_pred_test, multi_class='ovr', average='macro')
@@ -275,7 +298,7 @@ def final_test_evaluate(model, test_loader, criterion, device, is_binary, thresh
                 f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
 
     return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
-
+    #return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
 def find_pt(dataset_name, model_dir = "/home/eungyeop/LLM/tabular/ProtoLLM/pretrained_models"):
     model_path = os.path.join(model_dir,dataset_name)
     if os.path.exists(model_path):

@@ -397,7 +397,7 @@ def save_results_(args, results):
         f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
         args.source_data,
         f"args_seed:{args.random_seed}",
-        f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nheads-{args.num_basis_heads}_nbasis-{args.num_basis_layers}_{args.basis_type}_{args.attn_type}_fgw_alpha_{args.fgw_alpha}_vqbeta_{args.vq_beta}_des_{args.des}"
+        f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nbasis-{args.num_basis_layers}_{args.basis_type}_{args.attn_type}_fgw_alpha_{args.fgw_alpha}_vqbeta_{args.vq_beta}_des_{args.des}"
     )
     os.makedirs(exp_dir, exist_ok=True)
     dataset_file_path = os.path.join(
@@ -410,7 +410,7 @@ def save_results_(args, results):
     filename = (
         f"f{args.few_shot}_b{args.batch_size}"
         f"_ngraphs{args.n_graphs}_nnodes{args.n_nodes}_gdim{args.graph_dim}"
-        f"_nheads{args.num_basis_heads}_nbasis{args.num_basis_layers}"
+        f"_nbasis{args.num_basis_layers}"
         f"_{args.basis_type}_{args.attn_type}_fgwalpha{args.fgw_alpha}_vqbeta{args.vq_beta}_{timestamp}.json"
     )
     filepath = os.path.join(exp_dir, filename)
@@ -431,7 +431,6 @@ def save_results_(args, results):
             "hidden_dim": args.hidden_dim,
             "num_shared_layers": args.num_shared_layers,
             "num_basis_layers": args.num_basis_layers,
-            "num_heads": args.num_basis_heads,
             "few_shot": args.few_shot,
             "n_graphs":args.n_graphs,
             "n_nodes":args.n_nodes, 
@@ -482,7 +481,7 @@ def save_results_A(args, results):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # 🔥 파일명에 시나리오 정보 추가
     scenario_id = results.get('scenario_info', {}).get('scenario_id', 'unknown')
-    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_h{args.num_basis_heads}_scenario{scenario_id}_{timestamp}.json"
+    filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_layers}_scenario{scenario_id}_{timestamp}.json"
     filepath = os.path.join(exp_dir, filename)
 
     data = {
@@ -500,7 +499,6 @@ def save_results_A(args, results):
             "dropout_rate": args.dropout_rate,
             "hidden_dim": args.hidden_dim,
             "num_layers": args.num_layers,
-            "num_heads": args.num_basis_heads,
             "few_shot": args.few_shot,
             "threshold": args.threshold,
         },

@@ -86,20 +86,24 @@ def get_args():
     '''
     parser.add_argument("--n_graphs", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
-    parser.add_argument("--graph_dim", type = int, default = 128, help = "Global node embedding dimensions")
-    parser.add_argument('--fgw_alpha', type = float, default =1)
+    parser.add_argument("--graph_dim", type = int, default = 768, help = "Global node embedding dimensions")
+    parser.add_argument('--fgw_alpha', type = float, default = 1)
+    parser.add_argument('--alpha' , type = float, default = 0.9)
+    parser.add_argument('--eps', type = float , default = 0.01)
+    parser.add_argument('--reg', type = float, default = 0.01)
     parser.add_argument('--lcg_div_alpha', type = float, default = 10)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
-    parser.add_argument('--kl_gamma', type = float, default = 0.2)
+    parser.add_argument('--kl_gamma', type = float, default = 2.0)
     parser.add_argument('--additional_FGW',action = 'store_true')
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
+    parser.add_argument('--lcg_strategy', type = str, default = 'round_robin', choices = ['hierarchical', 'round_robin', 'sequential'])
+    parser.add_argument('---lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
     '''
         Basis GAT Configuration
     '''
     parser.add_argument('--num_shared_layers', type=int, default=2, help = "Number of SharedGAT layers")
-    parser.add_argument('--num_basis_heads', type=int, default=1, help = "Number of BasisGAT Heads")
     parser.add_argument('--num_basis_layers', type=int, default=2, help= 'Number of stacked BasisGAT layers.')
     parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
     parser.add_argument('--threshold', type=float, default=0.5)
@@ -116,6 +120,88 @@ def get_args():
     args = parser.parse_args()
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args
+
+def init_lcg(args, model, device, strategy='hierarchical', injection_scale=1.0):
+    import logging
+    from sklearn.cluster import KMeans
+    # 로거 설정 (메인에 있다면 가져옴)
+    logger = logging.getLogger()
+    
+    logger.info(f"[LCG Init] Starts. Strategy: {strategy}, Injection: {injection_scale}")
+    
+    # Source Data 리스트 확보
+    src_names = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
+    
+    all_descs = []
+    model.eval()
+    
+    # 1. Description 수집
+    with torch.no_grad():
+        for name in src_names:
+            # load_one은 메인에 있는 함수라고 가정
+            train_loader, _, _, _ = load_one(args, name)
+            
+            for i, batch in enumerate(train_loader):
+                # Model 내부 메서드 사용
+                raw_desc = model.extract_description(batch)
+                
+                if raw_desc is not None:
+                    flat_desc = raw_desc.reshape(-1, raw_desc.shape[-1]).cpu().numpy()
+                    all_descs.append(flat_desc)
+                
+                if i > 50: break # 너무 많이 돌지 않도록 제한
+    
+    if not all_descs:
+        logger.warning("[LCG Init] No descriptions found. Skipping.")
+        return
+
+    data_desc = np.concatenate(all_descs, axis=0)
+    
+    # 2. Rescaling (Source Scale에 맞춤)
+    # (실제로는 Source Feature도 뽑아서 비율 계산하는 게 좋지만, 
+    #  복잡도를 줄이기 위해 실험적으로 얻은 비율 or 약 0.25 사용 추천)
+    rescale_factor = 0.25 
+    data_desc = data_desc * rescale_factor
+    
+    # 3. Clustering
+    M = model.latent_graph.M
+    K = model.latent_graph.K
+    D = model.latent_graph.D
+    
+    final_centroids = torch.zeros(M, K, D)
+    
+    if strategy == 'hierarchical':
+        kmeans_global = KMeans(n_clusters=M, n_init=10, random_state=42).fit(data_desc)
+        for m in range(M):
+            group = data_desc[kmeans_global.labels_ == m]
+            if len(group) < K:
+                supp = data_desc[np.random.choice(len(data_desc), K - len(group))]
+                group = np.concatenate([group, supp], axis=0)
+            
+            kmeans_local = KMeans(n_clusters=K, n_init=10, random_state=42).fit(group)
+            final_centroids[m] = torch.tensor(kmeans_local.cluster_centers_)
+            
+    elif strategy == 'round_robin':
+        kmeans = KMeans(n_clusters=M*K, n_init=10, random_state=42).fit(data_desc)
+        centers = torch.tensor(kmeans.cluster_centers_)
+        final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous()
+        
+    else: # sequential
+        kmeans = KMeans(n_clusters=M*K, n_init=10, random_state=42).fit(data_desc)
+        final_centroids = torch.tensor(kmeans.cluster_centers_).view(M, K, D)
+        
+    # 4. Variance Injection & Apply
+    # 노이즈를 약간 섞어서 초기 분포를 퍼뜨림
+    noise = torch.randn_like(final_centroids) * injection_scale
+    final_init = final_init = final_centroids + noise
+    
+    with torch.no_grad():
+        model.latent_graph.node_embeddings.data.copy_(final_init.to(device))
+        
+    logger.info("[LCG Init] Parameters Updated Successfully.")
+
+
+
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -210,26 +296,6 @@ def load_one(args, name):
     num_classes = res['num_classes']
     return train_loader, val_loader, test_loader, num_classes
 
-def init_kmeans_centroids_from_sources(args, model, device):
-    """
-    소스들의 train_loader만 모아 coordinates를 수집하고,
-    compute_coordinate_centroids_auto를 k=args.k_basis로 고정해 호출하여
-    센트로이드를 얻는다.
-    """
-    src_names = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
-    src_train_loaders = [load_one(args, s)[0] for s in src_names]  # [train_loader_i, ...]
-
-    # k를 고정하려면 k_min=k_max=K
-    K = max(2, int(args.num_basis_heads))
-    centroids, best_k, _scores = compute_coordinate_centroids_auto(
-        model, src_train_loaders, device,
-        k_min=K, k_max=K,         # 고정
-        max_batches=0, max_points=0,
-        silhouette_sample=50000,
-        random_state=args.random_seed
-    )
-    logger.info(f"[KMeans] centroids shape={tuple(centroids.shape)}, best_k={best_k}")
-    return centroids
 
 def find_optimal_threshold(y_true, y_pred):
     # y_pred: sigmoid 결과(확률)
@@ -241,14 +307,17 @@ def find_optimal_threshold(y_true, y_pred):
 
 def train_and_validate(args, model, train_loader, val_loader,
                        criterion, optimizer, device, epochs,
-                       is_binary, patience=10, mode="Full", scheduler=None, warmup_epochs = 0):
+                       is_binary, patience=10, mode="Full", scheduler=None, warmup_epochs=0):
     """
-    Train + Validation만 진행하고, Best Validation 성능을 기록한 모델 state를 반환.
-    마지막에 Best Threshold도 함께 반환해서 별도의 Test 단계에서 사용.
-    (스케줄러가 주어지면 epoch-wise로 step)
+    Train + Validation을 진행하며, Local/Global 성능을 동시에 모니터링하고
+    Best Validation 성능(Local 기준)을 기록한 모델 state를 반환.
     """
+    
+    # --- 1. Logger Setup ---
     logger_name = "my_experiment_logger" 
     logger = logging.getLogger(logger_name)
+    
+    # --- 2. Metrics Storage ---
     train_losses, val_losses = [], []
     train_aucs, val_aucs = [], []
     train_precisions, val_precisions = [], []
@@ -256,24 +325,27 @@ def train_and_validate(args, model, train_loader, val_loader,
     train_f1s, val_f1s = [], []
     train_accs, val_accs = [], []
 
-    train_func     = binary_train   if is_binary else multi_train
-    evaluate_func  = binary_evaluate if is_binary else multi_evaluate
+    # --- 3. Function Setup ---
+    train_func = binary_train if is_binary else multi_train
+    
+    # [중요] Binary일 경우 Dual Evaluation 함수 사용
+    # (binary_evaluate_dual 함수가 정의되어 있어야 함)
+    evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
-    best_val_auc   = 0.0
-    best_epoch     = 0
-    no_improve     = 0
-    warmup_epochs  = int(warmup_epochs)
+    # --- 4. Init State ---
+    best_val_auc = 0.0
+    best_epoch = 0
+    no_improve = 0
+    warmup_epochs = int(warmup_epochs)
     best_threshold = 0.5
     best_model_state = None
 
-    # 경로용 태그(리스트 방어)
+    # --- 5. Checkpoint Directory Setup ---
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-
     model_sig = (
         f"ngraphs-{args.n_graphs}"
         f"_nnodes-{args.n_nodes}"
         f"_gdim-{args.graph_dim}"
-        f"_nheads-{args.num_basis_heads}"
         f"_nbasis-{args.num_basis_layers}"
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
@@ -286,108 +358,163 @@ def train_and_validate(args, model, train_loader, val_loader,
     checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    log_file_path = os.path.join(checkpoint_dir, f"train_log_{experiment_id}.log")
+    log_file_path = os.path.join(checkpoint_dir, f"train_log.log")
 
-    # 2. 파일 핸들러 생성
+    # File Handler Setup
     file_handler = logging.FileHandler(log_file_path)
     file_handler.setLevel(logging.INFO)
-    
-    # 3. [수정] $ -> %로 변경
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     
-    # 4. "루트 로거"에 이 파일 핸들러를 "추가"
-    logging.getLogger().addHandler(file_handler)
-    
-    # 5. [수정] "f... -> f"... 로 변경
+    # Logger Handler Check
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file_path for h in logger.handlers):
         logger.addHandler(file_handler)
-        logger.info(f"--- Log file initialized (Few mode). Saving stats to: {log_file_path} ---")
+        logger.info(f"--- Log file initialized ({mode} mode). Saving stats to: {log_file_path} ---")
+
+    # --- 6. Training Loop ---
+    print(f"\n>>> [Start {mode} Training] Total Epochs: {epochs}")
+
     for epoch in range(epochs):
-        # -------- Train --------
         model.train()
+        
+        # [Logic] 모델에게 현재 Epoch 주입 (Switching Logic용)
+        if hasattr(model, 'current_epoch'):
+            model.current_epoch = epoch + 1
+            # Switching Log
+            if hasattr(model, 'switch_epoch') and model.current_epoch == model.switch_epoch:
+                 logger.info(f"\n>>> [PHASE CHANGE] Epoch {model.current_epoch}: Detach OFF & Global Inference ON\n")
+
+        # [검증] 학습 전 LCG 상태 저장
+        if hasattr(model, 'latent_graph'):
+            before_lcg = model.latent_graph.node_embeddings.clone().detach()
+
+        # -------- Train Step --------
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
 
-        # 스케줄러: epoch-wise step (per-step 원하면 train_func 내부에서 step 필요)
+        # [검증] LCG 파라미터 변화량 체크
+        if hasattr(model, 'latent_graph'):
+            after_lcg = model.latent_graph.node_embeddings.detach()
+            diff = (after_lcg - before_lcg).abs().mean().item()
+            fgw_val = getattr(model, 'fgw_loss', torch.tensor(0.0)).item()
+            
+            logger.info(f"[Epoch {epoch+1}] LCG Diff: {diff:.6f} | FGW Loss: {fgw_val:.4f}")
+            
+            if diff == 0.0 and epoch > 0:
+                logger.warning("🚨 WARNING: LCG Parameters did NOT change! Check optimizer.")
+
+        # Scheduler Step
         if scheduler is not None:
             try:
                 scheduler.step()
             except Exception as e:
                 logger.warning(f"[Scheduler] step() failed at epoch {epoch+1}: {e}")
 
-        # 현재 LR 로깅
+        # LR Logging
         try:
             curr_lr = optimizer.param_groups[0]['lr']
         except Exception:
             curr_lr = None
 
-        # -------- Evaluate (Train / Val) --------
-        _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
-        val_loss, y_true_val,   y_pred_val   = evaluate_func(model, val_loader,   criterion, device)
-        val_losses.append(val_loss)
-
+        # -------- Evaluate (Dual Evaluation) --------
+        # Binary인 경우 Dual Eval (Global/Local 분리)
         if is_binary:
-            # Binary
-            train_auc = roc_auc_score(y_true_train, y_pred_train)
-            val_auc   = roc_auc_score(y_true_val,   y_pred_val)
-            current_threshold = find_optimal_threshold(y_true_val, y_pred_val)
+            # Trainset Eval
+            (tr_loss_g, tr_true_g, tr_pred_g), (tr_loss_l, tr_true_l, tr_pred_l) = evaluate_func(model, train_loader, criterion, device)
+            # Validation Eval
+            (val_loss_g, val_true, val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
+            
+            # 메인 Loss 기록 (Local 기준)
+            val_losses.append(val_loss_l)
 
-            y_pred_train_bin = (y_pred_train > current_threshold).astype(int)
-            y_pred_val_bin   = (y_pred_val   > current_threshold).astype(int)
+            # Metrics Calculation
+            # 1. Local (GAT) Metrics - Best 갱신의 기준
+            train_auc_l = roc_auc_score(tr_true_l, tr_pred_l)
+            val_auc_l   = roc_auc_score(val_true_l, val_pred_l)
+            
+            current_threshold = find_optimal_threshold(val_true_l, val_pred_l)
+            y_pred_train_bin = (tr_pred_l > current_threshold).astype(int)
+            y_pred_val_bin   = (val_pred_l > current_threshold).astype(int)
+            
+            train_acc_l = accuracy_score(tr_true_l, y_pred_train_bin)
+            val_acc_l   = accuracy_score(val_true_l, y_pred_val_bin)
+            
+            # 2. Global (LCG) Metrics - 모니터링용
+            train_auc_g = roc_auc_score(tr_true_g, tr_pred_g)
+            val_auc_g   = roc_auc_score(val_true, val_pred_g)
+            
+            # 리스트 저장 (Local 기준)
+            train_aucs.append(train_auc_l); val_aucs.append(val_auc_l)
+            train_accs.append(train_acc_l); val_accs.append(val_acc_l)
+            
+            # 로그 메시지 작성
+            lr_str = f"LR:{curr_lr:.6f} | " if curr_lr else ""
+            log_msg = (
+                f"[{mode}][Epoch {epoch+1}/{epochs}] {lr_str}\n"
+                f"   >>> Local (GAT): TrLoss {tr_loss_l:.4f} ValLoss {val_loss_l:.4f} | TrAUC {train_auc_l:.4f} ValAUC {val_auc_l:.4f} | ValACC {val_acc_l:.4f}\n"
+                f"   >>> Global(LCG): TrLoss {tr_loss_g:.4f} ValLoss {val_loss_g:.4f} | TrAUC {train_auc_g:.4f} ValAUC {val_auc_g:.4f}"
+            )
 
-            train_precision = precision_score(y_true_train, y_pred_train_bin, zero_division=0)
-            val_precision   = precision_score(y_true_val,   y_pred_val_bin,   zero_division=0)
-            train_recall    = recall_score(y_true_train, y_pred_train_bin, zero_division=0)
-            val_recall      = recall_score(y_true_val,   y_pred_val_bin,   zero_division=0)
-            train_f1        = f1_score(y_true_train, y_pred_train_bin, zero_division=0)
-            val_f1          = f1_score(y_true_val,   y_pred_val_bin,   zero_division=0)
-            train_acc       = accuracy_score(y_true_train, y_pred_train_bin)
-            val_acc         = accuracy_score(y_true_val,   y_pred_val_bin)
         else:
-            # Multi-class
-            n_classes = y_pred_train.shape[1]
-            y_true_train_bin = label_binarize(y_true_train, classes=range(n_classes))
-            y_true_val_bin   = label_binarize(y_true_val,   classes=range(n_classes))
-
-            train_auc = roc_auc_score(y_true_train_bin, y_pred_train, multi_class='ovr', average='macro')
-            val_auc   = roc_auc_score(y_true_val_bin,   y_pred_val,   multi_class='ovr', average='macro')
-
-            preds_train_argmax = y_pred_train.argmax(axis=1)
-            preds_val_argmax   = y_pred_val.argmax(axis=1)
-
-            train_precision = precision_score(y_true_train, preds_train_argmax, average='macro', zero_division=0)
-            val_precision   = precision_score(y_true_val,   preds_val_argmax,   average='macro', zero_division=0)
-            train_recall    = recall_score(y_true_train, preds_train_argmax, average='macro', zero_division=0)
-            val_recall      = recall_score(y_true_val,   preds_val_argmax,   average='macro', zero_division=0)
-            train_f1        = f1_score(y_true_train, preds_train_argmax, average='macro', zero_division=0)
-            val_f1          = f1_score(y_true_val,   preds_val_argmax,   average='macro', zero_division=0)
-            train_acc       = accuracy_score(y_true_train, preds_train_argmax)
-            val_acc         = accuracy_score(y_true_val,   preds_val_argmax)
+            # Multi-class (기존 로직 유지 - Local Only)
+            _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
+            val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
+            val_losses.append(val_loss)
+            
+            # AUC 등 계산 (OVR)
+            n_cls = y_pred_train.shape[1]
+            y_bin_tr = label_binarize(y_true_train, classes=range(n_cls))
+            y_bin_va = label_binarize(y_true_val, classes=range(n_cls))
+            
+            train_auc = roc_auc_score(y_bin_tr, y_pred_train, multi_class='ovr', average='macro')
+            val_auc   = roc_auc_score(y_bin_va, y_pred_val, multi_class='ovr', average='macro')
+            
+            # Preds
+            preds_tr = y_pred_train.argmax(axis=1)
+            preds_va = y_pred_val.argmax(axis=1)
+            train_acc = accuracy_score(y_true_train, preds_tr)
+            val_acc   = accuracy_score(y_true_val, preds_va)
+            
+            train_aucs.append(train_auc); val_aucs.append(val_auc)
+            
+            val_auc_l = val_auc # Alias for consistency
             current_threshold = None
+            
+            log_msg = f"[{mode}][Epoch {epoch+1}/{epochs}] TrLoss {train_loss:.4f} ValLoss {val_loss:.4f} | TrAUC {train_auc:.4f} ValAUC {val_auc:.4f}"
 
-        # 로그
-        train_aucs.append(train_auc);    val_aucs.append(val_auc)
-        train_precisions.append(train_precision); val_precisions.append(val_precision)
-        train_recalls.append(train_recall);       val_recalls.append(val_recall)
-        train_f1s.append(train_f1);              val_f1s.append(val_f1)
-        train_accs.append(train_acc);            val_accs.append(val_acc)
+        logger.info(log_msg)
 
-        if curr_lr is not None:
-            logger.info(f"[{mode}][Epoch {epoch+1}/{epochs}] "
-                        f"LR:{curr_lr:.6f} | "
-                        f"Train Loss:{train_loss:.4f} Val Loss:{val_loss:.4f} | "
-                        f"Train AUC:{train_auc:.4f} Val AUC:{val_auc:.4f} | "
-                        f"Train ACC:{train_acc:.4f} Val ACC:{val_acc:.4f}")
-        else:
-            logger.info(f"[{mode}][Epoch {epoch+1}/{epochs}] "
-                        f"Train Loss:{train_loss:.4f} Val Loss:{val_loss:.4f} | "
-                        f"Train AUC:{train_auc:.4f} Val AUC:{val_auc:.4f} | "
-                        f"Train ACC:{train_acc:.4f} Val ACC:{val_acc:.4f}")
+        # --- 7. Visualization Snapshot ---
+        # 10 Epoch 마다 혹은 첫 Epoch에 수행
+        if (epoch + 1) % 10 == 0 or (epoch == 0):
+            try:
+                # 시각화용 임시 로더 (Train Loader)
+                # 로더 구조에 따라 딕셔너리 포장
+                if isinstance(train_loader, dict):
+                    temp_loaders = train_loader
+                else:
+                    # 단일 로더일 경우 임의 키 부여
+                    source_key = list(args.source_data)[0] if isinstance(args.source_data, (list, tuple)) else args.source_data
+                    temp_loaders = {source_key: train_loader}
 
-        # 베스트 갱신 & 체크포인트
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
+                # LCG 시각화 호출
+                if hasattr(model, 'latent_graph'):
+                    print(f"\n>>> Generating Snapshot for Epoch {epoch+1}...")
+                    from utils.visualization import visualize_training_snapshot_v2
+                    
+                    # Rand/Desc 인자 모두 현재 모델의 LCG로 넘김 (상태 확인용)
+                    visualize_training_snapshot_v2(
+                        model, temp_loaders, 
+                        model.latent_graph, model.latent_graph, 
+                        epoch+1, 0,
+                        save_dir=checkpoint_dir
+                    )
+            except Exception as e:
+                logger.warning(f"[Visualization Skipped] {e}")
+
+        # --- 8. Best Model Saving (Local AUC 기준) ---
+        if val_auc_l > best_val_auc:
+            best_val_auc = val_auc_l
             best_epoch   = epoch
             no_improve   = 0
             best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -398,10 +525,15 @@ def train_and_validate(args, model, train_loader, val_loader,
                 checkpoint_dir,
                 f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_S:{args.random_seed}_{experiment_id}.pt"
             )
+            
+            # Global Score도 함께 기록
+            val_auc_g_val = val_auc_g if is_binary else 0.0
+            
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
-                'val_auc': val_auc,
+                'val_auc': best_val_auc,
+                'val_auc_global': val_auc_g_val,
                 'threshold': best_threshold,
                 'args': args
             }, ckpt_path)
@@ -410,11 +542,12 @@ def train_and_validate(args, model, train_loader, val_loader,
                 no_improve += 1
             else: 
                 no_improve = 0 
+        
         if (epoch + 1 > warmup_epochs) and (no_improve >= patience):
             logger.info(f"[{mode}] Early stopping at epoch {epoch+1} (no improve {patience} epochs)")
             break
 
-    # 루프 종료 후 베스트로 복원
+    # --- 9. Finish ---
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
     else:
@@ -476,7 +609,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     opt = optim.Adam(
         [
             {'params': base_params},
-            {'params': lcg_params, 'lr': lcg_lr} # 👈 LCG 파라미터 그룹에만 lcg_lr 적용
+            {'params': lcg_params, 'lr': lcg_lr} 
         ], 
         lr=args.source_lr, # 기본 LR (base_params에 적용됨)
         weight_decay=1e-5
@@ -506,8 +639,6 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     best_state = None
     last_best_epoch = -1
 
-    
-
 
     # === 체크포인트 디렉토리 & 파일명 (고정 이름 + 히스토리) ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
@@ -515,13 +646,12 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         f"ngraphs-{args.n_graphs}"
         f"_nnodes-{args.n_nodes}"
         f"_gdim-{args.graph_dim}"
-        f"_nheads-{args.num_basis_heads}"
         f"_nbasis-{args.num_basis_layers}"
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
-        f"_kl_gamma-{args.kl_gamma}"
         f"_vq_beta-{args.vq_beta}"
+        f"_kl_gamma-{args.kl_gamma}"
         f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
@@ -546,27 +676,60 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         _ = train_fn(model, tr_step, crit, opt, device)
         if scheduler_ep is not None:
             scheduler_ep.step()
-
+        if hasattr(model, 'current_epoch'):
+            model.current_epoch = epoch + 1 
+            print(model.current_epoch)
+            if model.current_epoch == model.switch_epoch:
+                logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Detach OFF & Global Inference ON")
         # val도 src_idx가 들어간 래핑 로더로 평가
-        aucs = []
+        aucs_local = []
+        aucs_global = []
+        
+        # 각 Source별 검증 데이터 로더 순회
         for vl in val_steps:
-            _, y_true, y_pred = eval_fn(model, vl, crit, device)
+            # eval_fn 호출 (이제 두 쌍을 리턴함)
+            # res_g: (loss_g, true, pred_g)
+            # res_l: (loss_l, true, pred_l)
+            res_g, res_l = eval_fn(model, vl, crit, device)
+            
+            # Unpack Local
+            _, y_true_l, y_pred_l = res_l
+            # Unpack Global
+            _, y_true_g, y_pred_g = res_g
+            
+            # AUC 계산
             if is_bin:
-                aucs.append(roc_auc_score(y_true, y_pred))
+                score_l = roc_auc_score(y_true_l, y_pred_l)
+                score_g = roc_auc_score(y_true_g, y_pred_g)
             else:
-                n_cls = y_pred.shape[1]
-                y_bin = label_binarize(y_true, classes=range(n_cls))
-                aucs.append(roc_auc_score(y_bin, y_pred, multi_class='ovr', average='macro'))
+                # Multi-class 처리
+                n_cls = y_pred_l.shape[1]
+                y_bin_l = label_binarize(y_true_l, classes=range(n_cls))
+                y_bin_g = label_binarize(y_true_g, classes=range(n_cls)) # Global용
+                
+                score_l = roc_auc_score(y_bin_l, y_pred_l, multi_class='ovr', average='macro')
+                score_g = roc_auc_score(y_bin_g, y_pred_g, multi_class='ovr', average='macro')
+                
+            aucs_local.append(score_l)
+            aucs_global.append(score_g)
 
+        # === Best 갱신 로직 (Local 기준) ===
         improved = False
-        for i, a in enumerate(aucs):
+        for i, a in enumerate(aucs_local):
             if a > best_per_source[i]:
                 best_per_source[i] = a
                 improved = True
 
-        mean_auc = float(np.mean(aucs))
-        logger.info(f"[Pre][Epoch {epoch+1}/{total_epochs}] mean AUC: {mean_auc:.4f} per-source: {['%.4f'%x for x in aucs]}")
-
+        # === Dual Logging (핵심!) ===
+        mean_auc_l = float(np.mean(aucs_local))
+        mean_auc_g = float(np.mean(aucs_global))
+        
+        log_msg = (
+            f"[Pre][Epoch {epoch+1}/{total_epochs}]\n"
+            f"   >>> Local (GAT): Mean AUC {mean_auc_l:.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
+            f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
+        )
+        logger.info(log_msg)
         if improved:
             best_state = model.state_dict()
             last_best_epoch = epoch
@@ -575,8 +738,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
-                'val_auc_mean': mean_auc,
-                'val_aucs_per_source': aucs,
+                
+                # [수정] 변수명을 mean_auc_l, aucs_local로 변경
+                'val_auc_mean': mean_auc_l, 
+                'val_aucs_per_source': aucs_local,
+                
                 'args': args
             }, ckpt_latest)
             try:
@@ -610,14 +776,14 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
 
     for i in range(len(sources)):
         # ---- val (threshold 산출) ----
-        val_loss_i, y_true_val_i, y_pred_val_i = eval_fn(model, val_steps[i], crit, device)
+        _ , (val_loss_i, y_true_val_i, y_pred_val_i) = eval_fn(model, val_steps[i], crit, device)
         if is_bin:
             thr_i = find_optimal_threshold(y_true_val_i, y_pred_val_i)
         else:
             thr_i = None
 
         # ---- train 성능 ----
-        train_loss_i, y_true_tr_i, y_pred_tr_i = eval_fn(model, train_steps[i], crit, device)
+        _, (train_loss_i, y_true_tr_i, y_pred_tr_i) = eval_fn(model, train_steps[i], crit, device)
         if is_bin:
             train_auc_i = roc_auc_score(y_true_tr_i, y_pred_tr_i)
             y_bin_tr = (y_pred_tr_i > thr_i).astype(int)
@@ -654,7 +820,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
             val_acc_i       = accuracy_score(y_true_val_i, preds_val)
 
         # ---- test 성능 ----
-        test_loss_i, y_true_te_i, y_pred_te_i = eval_fn(model, test_steps[i], crit, device)
+        _, (test_loss_i, y_true_te_i, y_pred_te_i) = eval_fn(model, test_steps[i], crit, device)
         if is_bin:
             test_auc_i = roc_auc_score(y_true_te_i, y_pred_te_i)
             y_bin_te = (y_pred_te_i > thr_i).astype(int)
@@ -794,13 +960,21 @@ def main():
                        args.dropout_rate, args.llm_model,
                        experiment_id, mode="Few").to(device)
 
+    print(f"\n[Main] Initializing LCG parameters ...")
+    init_lcg(args, model_full, device, strategy = args.lcg_strategy, injection_scale = 1.0)
+    print("[Main] LCG Initialization Done.")
+
+
+
+
+
+
     # 2) 프리트레인 체크포인트 로드 시도 (고정 best.pt 우선, 없으면 최신 best_*.pt)
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
     model_sig = (
         f"ngraphs-{args.n_graphs}"
         f"_nnodes-{args.n_nodes}"
         f"_gdim-{args.graph_dim}"
-        f"_nheads-{args.num_basis_heads}"
         f"_nbasis-{args.num_basis_layers}"
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"

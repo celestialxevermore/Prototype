@@ -20,23 +20,60 @@ def binary_train(model, train_loader, criterion, optimizer, device):
 
 def binary_evaluate(model, loader, criterion, device):
     model.eval()
-    test_loss = 0
-    y_true, y_pred = [], []
     
-    #print(f"Dataloader length: {len(loader)}")
+    # 저장소 2개 준비
+    loss_g_sum, loss_l_sum = 0.0, 0.0
+    y_true = []
+    y_pred_g, y_pred_l = [], []
     
     with torch.no_grad():
         for batch in loader:
-            pred = model.predict(batch)
-            loss = model(batch, batch['y'])
+            # [핵심] return_all=True로 둘 다 받아옴
+            global_pred, local_pred = model.predict(batch, return_all=True)
             
-            test_loss += loss.item() * len(batch['y'])
+            # Loss 계산 (참고용)
+            # forward를 안 쓰고 직접 criterion 호출 (y값 필요)
+            target = batch['y'].to(device).view(-1, 1).float()
             
-            y_true.extend(batch['y'].cpu().numpy())
-            y_pred.extend(torch.sigmoid(pred).cpu().numpy())
+            loss_g = criterion(global_pred, target)
+            loss_l = criterion(local_pred, target)
+            
+            loss_g_sum += loss_g.item() * len(target)
+            loss_l_sum += loss_l.item() * len(target)
+            
+            y_true.extend(target.cpu().numpy())
+            y_pred_g.extend(torch.sigmoid(global_pred).cpu().numpy())
+            y_pred_l.extend(torch.sigmoid(local_pred).cpu().numpy())
+            
+    # 평균 Loss
+    loss_g_avg = loss_g_sum / len(loader.dataset)
+    loss_l_avg = loss_l_sum / len(loader.dataset)
     
-    test_loss /= len(loader.dataset)
-    return test_loss, np.array(y_true), np.array(y_pred)
+    # 결과 리턴 (Global 결과, Local 결과 분리)
+    # (loss_g, true, pred_g), (loss_l, true, pred_l)
+    return (loss_g_avg, np.array(y_true), np.array(y_pred_g)), \
+           (loss_l_avg, np.array(y_true), np.array(y_pred_l))
+
+# def binary_evaluate(model, loader, criterion, device):
+#     model.eval()
+#     test_loss = 0
+#     y_true, y_pred = [], []
+    
+#     #print(f"Dataloader length: {len(loader)}")
+    
+#     with torch.no_grad():
+#         for batch in loader:
+#             pred = model.predict(batch)
+#             loss = model(batch, batch['y'])
+            
+#             test_loss += loss.item() * len(batch['y'])
+            
+#             y_true.extend(batch['y'].cpu().numpy())
+#             y_pred.extend(torch.sigmoid(pred).cpu().numpy())
+    
+#     test_loss /= len(loader.dataset)
+#     return test_loss, np.array(y_true), np.array(y_pred)
+
 
 def multi_train(model, train_loader, criterion, optimizer, device):
     model.train()

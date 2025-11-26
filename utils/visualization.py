@@ -5,7 +5,7 @@ from datetime import datetime
 import pdb
 import torch
 import logging
-
+from sklearn.manifold import TSNE
 
 
 import matplotlib.pyplot as plt
@@ -24,8 +24,164 @@ import networkx as nx
 import numpy as np
 import os
 import logging
-
+from ot.batch import solve_gromov_batch
 logger = logging.getLogger(__name__)
+
+
+# --- FGW Loss 및 Cost 분리 계산 함수 ---
+def compute_fgw_loss_detailed(source_feat, source_struct, target_feat, target_struct, alpha=0.5, reg=0.01):
+    B, N, D = source_feat.shape
+    M, K, _ = target_feat.shape
+    
+    # Expand for Broadcasting
+    src_feat_exp = source_feat.unsqueeze(1).expand(B, M, N, D).reshape(B*M, N, D)
+    tgt_feat_exp = target_feat.unsqueeze(0).expand(B, M, K, D).reshape(B*M, K, D)
+    
+    src_str_exp = source_struct.unsqueeze(1).expand(B, M, N, N).reshape(B*M, N, N)
+    tgt_str_exp = target_struct.unsqueeze(0).expand(B, M, K, K).reshape(B*M, K, K)
+    
+    # 1. Feature Cost (M): Kernelized L2
+    dist_sq = torch.cdist(src_feat_exp, tgt_feat_exp, p=2) ** 2
+    
+    tau = 10.0 
+
+    M_cost = 1.0 - torch.exp(-dist_sq / (D * tau)) # 0~1
+    
+    # Weights
+    a = torch.ones(B*M, N, device=source_feat.device) / N
+    b = torch.ones(B*M, K, device=source_feat.device) / K
+    
+    # Solve
+    result = solve_gromov_batch(
+        src_str_exp, tgt_str_exp, M=M_cost, 
+        alpha=alpha, reg=reg, a=a, b=b
+    )
+    
+    # Transport Plan
+    plan = result.plan # [B*M, N, K]
+    
+    # 2. Cost Decomposition (Loss 분리)
+    # Total FGW Loss = (1-alpha)*FeatLoss + alpha*StructLoss
+    total_loss = result.value.mean() # Scalar
+    
+    # Feature Loss 직접 계산: <M, T>
+    feat_loss = (M_cost * plan).sum(dim=(1, 2)).mean()
+    
+    # Structure Loss 역산: (Total - (1-alpha)*Feat) / alpha
+    # (직접 계산하려면 연산량이 많으므로 역산 사용)
+    struct_loss = (total_loss - (1 - alpha) * feat_loss) / alpha
+    
+    return total_loss, feat_loss, struct_loss, plan.reshape(B, M, N, K)
+
+
+
+@torch.no_grad()
+def visualize_training_snapshot_v2(model, loaders, lcg_rand, lcg_desc, epoch, step, save_dir=None):
+    print(f"\n>>> [VISUALIZATION] Epoch {epoch} Step {step}")
+    
+    # --- 0. Dependency Import (함수 내부에서 처리) ---
+    try:
+        from __main__ import extract_source_graph, compute_fgw_loss_detailed
+    except ImportError:
+        # 만약 다른 파일에 있다면 여기서 import
+        pass 
+
+    # --- 1. Data Prep (Source) ---
+    first_loader = loaders[list(loaders.keys())[0]]
+    viz_batch = next(iter(first_loader))
+    
+    # FGW용 Sample
+    src_feat_sample, src_struct_sample = extract_source_graph(model, viz_batch)
+    
+    # t-SNE용 Pool
+    source_feats = []
+    count = 0
+    for batch in first_loader:
+        feats, _ = extract_source_graph(model, batch)
+        source_feats.append(feats.reshape(-1, feats.shape[-1]).cpu().numpy())
+        count += feats.shape[0]
+        if count > 500: break
+            
+    pool_src = np.concatenate(source_feats, axis=0)
+    if pool_src.shape[0] > 1000:
+        idx = np.random.choice(pool_src.shape[0], 1000, replace=False)
+        pool_src = pool_src[idx]
+        
+    # --- 2. LCG Prep ---
+    r_feat, r_struct = lcg_rand() 
+    r_affinity = 1.0 - r_struct 
+    
+    d_feat, d_struct = lcg_desc()
+    d_affinity = 1.0 - d_struct
+    
+    pts_rand = r_feat.detach().cpu().numpy().reshape(-1, lcg_rand.D)
+    pts_desc = d_feat.detach().cpu().numpy().reshape(-1, lcg_desc.D)
+    
+    # --- 3. Run Algorithms ---
+    # A. t-SNE
+    all_data = np.concatenate([pool_src, pts_rand, pts_desc], axis=0)
+    tsne = TSNE(n_components=2, perplexity=30, init='pca', learning_rate='auto').fit_transform(all_data)
+    idx_r, idx_d = pool_src.shape[0], pool_src.shape[0] + pts_rand.shape[0]
+    
+    # B. FGW Plans
+    _, _, _, plan_r = compute_fgw_loss_detailed(src_feat_sample, src_struct_sample, r_feat, r_struct)
+    _, _, _, plan_d = compute_fgw_loss_detailed(src_feat_sample, src_struct_sample, d_feat, d_struct)
+    
+    # --- 4. PLOTTING ---
+    fig = plt.figure(figsize=(16, 14))
+    
+    # [Row 1]
+    ax1 = plt.subplot2grid((3, 4), (0, 0), colspan=2)
+    ax1.scatter(tsne[:idx_r, 0], tsne[:idx_r, 1], c='lightgray', alpha=0.3, s=20, label='Source')
+    ax1.scatter(tsne[idx_r:idx_d, 0], tsne[idx_r:idx_d, 1], c='green', marker='x', s=60, label='Rand LCG')
+    ax1.scatter(tsne[idx_d:, 0], tsne[idx_d:, 1], c='red', marker='o', s=60, edgecolors='k', label='Desc LCG')
+    ax1.legend(); ax1.set_title(f"Distribution (Ep {epoch})")
+
+    ax2 = plt.subplot2grid((3, 4), (0, 2), colspan=2)
+    bins = np.linspace(0.0, 0.1, 50)
+    ax2.hist(plan_r.detach().cpu().numpy().flatten(), bins=bins, alpha=0.5, color='green', label='Rand', log=True)
+    ax2.hist(plan_d.detach().cpu().numpy().flatten(), bins=bins, alpha=0.5, color='red', label='Desc', log=True)
+    ax2.legend(); ax2.set_title("FGW Plan Sparsity (Log Scale)")
+
+    # [Row 2]
+    vmin, vmax = 0.0, 0.1
+    ax3 = plt.subplot2grid((3, 4), (1, 0), colspan=2)
+    im3 = ax3.imshow(plan_r[0, 0].detach().cpu().numpy(), cmap='Reds', aspect='auto', vmin=vmin, vmax=vmax)
+    ax3.set_title("Rand Transport Plan"); fig.colorbar(im3, ax=ax3)
+    
+    ax4 = plt.subplot2grid((3, 4), (1, 2), colspan=2)
+    im4 = ax4.imshow(plan_d[0, 0].detach().cpu().numpy(), cmap='Reds', aspect='auto', vmin=vmin, vmax=vmax)
+    ax4.set_title("Desc Transport Plan"); fig.colorbar(im4, ax=ax4)
+
+    # [Row 3]
+    ax5 = plt.subplot2grid((3, 4), (2, 0), colspan=2)
+    aff_r = r_affinity[0].detach().cpu().numpy()
+    im5 = ax5.imshow(aff_r, cmap='Blues', vmin=0, vmax=1)
+    ax5.set_title("Rand LCG Affinity"); fig.colorbar(im5, ax=ax5)
+    
+    ax6 = plt.subplot2grid((3, 4), (2, 2), colspan=2)
+    aff_d = d_affinity[0].detach().cpu().numpy()
+    im6 = ax6.imshow(aff_d, cmap='Blues', vmin=0, vmax=1)
+    ax6.set_title("Desc LCG Affinity"); fig.colorbar(im6, ax=ax6)
+    
+    plt.tight_layout()
+    
+    # [저장 로직]
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        filename = f"snapshot_ep{epoch}_step{step}.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=150)
+        print(f">>> Snapshot saved to: {save_path}")
+        
+    plt.show()
+    plt.close(fig)
+
+
+
+
+
+
 
 def visualize_cluster_centroids(clustering_info, clustering_dir, epoch, feature_names):
     """
@@ -1027,7 +1183,7 @@ def visualize_results(args, results, exp_dir):
 
     plt.suptitle(f'Training Progress - {title_src} (K={args.few_shot})', y=1.02, fontsize=16)
     plt.tight_layout()
-    metrics_plot_path = os.path.join(exp_dir, f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_h{args.num_basis_heads}_{timestamp}.png")
+    metrics_plot_path = os.path.join(exp_dir, f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_{timestamp}.png")
     plt.savefig(metrics_plot_path)
     plt.close()
     print(f"Metrics plot saved as {metrics_plot_path}")
