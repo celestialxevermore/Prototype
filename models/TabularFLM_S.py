@@ -143,22 +143,8 @@ class Model(nn.Module):
         # === 3. Base Classification losses === 
         global_loss = self.criterion(global_pred, target)
         local_loss = self.criterion(local_pred, target)
-        kl_loss = 0.0
-        if self.args.kl_gamma > 0.0:
-            # Teacher: Local (잘하는 놈 -> Detach 필수!)
-            # 확률 분포(Softmax)로 변환
-            p_teacher = F.softmax(local_pred.detach(), dim=-1)
-            
-            # Student: Global (배우는 놈 -> Log Softmax)
-            p_student = F.log_softmax(global_pred, dim=-1)
-            
-            # KL(Teacher || Student) 계산
-            kl_loss = F.kl_div(p_student, p_teacher, reduction='batchmean')
-
-        # 4. Total Loss 합산
-        # Local Loss + Global Loss + FGW Loss + KL Loss
-        total_loss = local_loss + global_loss + (self.args.fgw_alpha * self.fgw_loss) + (self.args.kl_gamma * kl_loss)
         
+        total_loss = local_loss + global_loss + (self.args.fgw_alpha * self.fgw_loss)
         return total_loss
 
     # ---- inference ----
@@ -202,9 +188,6 @@ class Model(nn.Module):
             # Phase 4: 완전체 (Detach OFF)
             source_feat_in = self.x_basis[:, 1:, :]
             source_struct_in = self._last_P_basis
-
-
-
         q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
             source_struct = source_struct_in, 
             source_feat = source_feat_in, 
