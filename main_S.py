@@ -520,8 +520,8 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
         f"_fgw_alpha-{args.fgw_alpha}"
-        f"_kl_gamma-{args.kl_gamma}"
         f"_vq_beta-{args.vq_beta}"
+        f"_kl_gamma-{args.kl_gamma}"
         f"_target_data-{args.target_data}"
         f"_description-{args.des}"
     )
@@ -843,10 +843,6 @@ def main():
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
     # logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
 
-    # # 5) KMeans 센트로이드 초기화
-    # centroids = init_kmeans_centroids_from_sources(args, model_few, device)
-    # model_few.set_kmeans_centroids(centroids)
-    # model_few.set_coord_temperature(args.coord_softmax_temp)
 
     # 6) Target dataloaders
     logger.info(f"[Few-shot] target = {args.target_data}")
