@@ -13,6 +13,7 @@ def binary_train(model, train_loader, criterion, optimizer, device):
         loss = model(batch, batch['y'])
         #output = model(data.x, data.edge_index, data.edge_attr, data.batch)
         loss.backward()
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
         total_loss += loss.item() * len(batch['y'])
         #print(f"Step [{step+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
@@ -21,38 +22,60 @@ def binary_train(model, train_loader, criterion, optimizer, device):
 def binary_evaluate(model, loader, criterion, device):
     model.eval()
     
-    # 저장소 2개 준비
+    # 저장소 초기화
     loss_g_sum, loss_l_sum = 0.0, 0.0
     y_true = []
     y_pred_g, y_pred_l = [], []
     
+    has_global = False # Global 결과가 있는지 확인용 플래그
+    
     with torch.no_grad():
         for batch in loader:
-            # [핵심] return_all=True로 둘 다 받아옴
-            global_pred, local_pred = model.predict(batch, return_all=True)
+            # 1. 모델 예측 호출
+            # Phase 1이면 1개(Local), Phase 2면 2개(Global, Local) 리턴됨
+            preds = model.predict(batch, return_all=True)
             
-            # Loss 계산 (참고용)
-            # forward를 안 쓰고 직접 criterion 호출 (y값 필요)
             target = batch['y'].to(device).view(-1, 1).float()
             
-            loss_g = criterion(global_pred, target)
+            # 2. 리턴값 개수에 따른 분기 처리
+            if isinstance(preds, tuple) and len(preds) == 2:
+                # [Phase 2] Global & Local 둘 다 있음
+                global_pred, local_pred = preds
+                has_global = True
+                
+                loss_g = criterion(global_pred, target)
+                loss_g_sum += loss_g.item() * len(target)
+                y_pred_g.extend(torch.sigmoid(global_pred).cpu().numpy())
+                
+            else:
+                # [Phase 1] Local만 있음 (preds 자체가 tensor)
+                local_pred = preds
+                has_global = False
+                # Global 쪽은 더미 값 처리 (안 씀)
+            
+            # Local은 항상 있음
             loss_l = criterion(local_pred, target)
-            
-            loss_g_sum += loss_g.item() * len(target)
             loss_l_sum += loss_l.item() * len(target)
-            
-            y_true.extend(target.cpu().numpy())
-            y_pred_g.extend(torch.sigmoid(global_pred).cpu().numpy())
             y_pred_l.extend(torch.sigmoid(local_pred).cpu().numpy())
             
-    # 평균 Loss
-    loss_g_avg = loss_g_sum / len(loader.dataset)
-    loss_l_avg = loss_l_sum / len(loader.dataset)
+            y_true.extend(target.cpu().numpy())
+            
+    # 3. 결과 정리
+    dataset_len = len(loader.dataset)
+    loss_l_avg = loss_l_sum / dataset_len
     
-    # 결과 리턴 (Global 결과, Local 결과 분리)
-    # (loss_g, true, pred_g), (loss_l, true, pred_l)
-    return (loss_g_avg, np.array(y_true), np.array(y_pred_g)), \
-           (loss_l_avg, np.array(y_true), np.array(y_pred_l))
+    res_l = (loss_l_avg, np.array(y_true), np.array(y_pred_l))
+    
+    if has_global:
+        loss_g_avg = loss_g_sum / dataset_len
+        res_g = (loss_g_avg, np.array(y_true), np.array(y_pred_g))
+    else:
+        # Global이 없으면 Local 값을 복사해서 리턴 (형식 맞추기 위해)
+        # 또는 None을 리턴하고 밖에서 처리 (여기선 복사가 안전함)
+        res_g = res_l 
+        
+    # 항상 2개 튜플 리턴 (Unpacking 에러 방지)
+    return res_g, res_l
 
 # def binary_evaluate(model, loader, criterion, device):
 #     model.eval()

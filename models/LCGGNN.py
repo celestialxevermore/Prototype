@@ -70,6 +70,10 @@ class LatentCompositeGNN(nn.Module):
     """
     M개의 Independent GNN Experts
     각 LCG(m)은 자신의 전담 GNN(m)을 통과함.
+    
+    [개선점]
+    __init__ 마지막에 _init_experts_as_identity()를 호출하여,
+    초기에 GNN이 입력값(K-Means Centroid)을 왜곡하지 않고 그대로 통과시키도록 설정함.
     """
     def __init__(self, args, input_dim: int, hidden_dim: int, dropout: float = 0.1):
         super().__init__()
@@ -86,6 +90,41 @@ class LatentCompositeGNN(nn.Module):
         self.readouts = nn.ModuleList([
             GraphReadout(self.input_dim, hidden_dim, self.input_dim, dropout) for _ in range(self.n_graphs)
         ])
+
+        # [핵심] 생성 직후 바로 Identity 초기화 적용
+        self._init_experts_as_identity()
+
+    def _init_experts_as_identity(self):
+        """
+        GNN Experts와 Readout의 가중치를 Identity(단위 행렬)에 가깝게 초기화하여
+        학습 초기에 K-Means로 찾은 LCG Centroid 정보가 
+        Random Weight에 의해 파괴되지 않고 그대로 전파되도록 함.
+        """
+        # 1. GNN Layer 초기화
+        for gnn in self.graph_gnns: 
+            # lightGraphNeuralNet 내부 구조: linear -> relu -> update -> residual
+            
+            # (1) Linear (Input -> Hidden)
+            if hasattr(gnn, 'linear'):
+                nn.init.eye_(gnn.linear.weight)
+                if gnn.linear.bias is not None:
+                    nn.init.zeros_(gnn.linear.bias)
+            
+            # (2) Update (Hidden -> Input)
+            if hasattr(gnn, 'update'):
+                nn.init.eye_(gnn.update.weight)
+                if gnn.update.bias is not None:
+                    nn.init.zeros_(gnn.update.bias)
+            
+        # 2. Readout Layer 초기화
+        for readout in self.readouts: 
+            # GraphReadout 내부 구조: proj (Linear -> ReLU -> Linear)
+            for m in readout.proj:
+                if isinstance(m, nn.Linear):
+                    # 차원이 달라도 eye_는 가능한 만큼 대각선에 1을 채워줌
+                    nn.init.eye_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
 
     def forward(self, Fy_res: torch.Tensor, Ay_sel: torch.Tensor):
         """

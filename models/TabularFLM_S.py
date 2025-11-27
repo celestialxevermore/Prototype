@@ -12,6 +12,7 @@ from models.coordinate import CoordinatorMLP
 from models.LCG import LatentCompositeGraph, GraphQuantizer 
 from models.LCGGNN import LatentCompositeGNN
 from models.BasisGraphAttention import BasisGATLayer_MUL, BasisGATLayer_IND
+import copy
 logger = logging.getLogger(__name__)
 
 
@@ -38,7 +39,15 @@ class Model(nn.Module):
         nn.init.uniform_(self.basis_cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
         self.switch_epoch = 40
         self.current_epoch = 0
-
+        self.use_ema = getattr(args, 'ema', False)
+        self.ema_decay = 0.999
+        if self.use_ema:
+            self.latent_graph_ema = copy.deepcopy(self.latent_graph)
+            for p in self.latent_graph_ema.parameters():
+                p.requires_grad = False 
+            print(">>> [Model] EMA Enabled for LCG.")
+        else: 
+            self.latent_graph_ema = None 
         #---- Latent Composite Graph Components ---- 
         # (1) LatentCompositeGraph : learnable latent composite graphs (codebook)
         self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
@@ -130,6 +139,18 @@ class Model(nn.Module):
            p.requires_grad = True
         for p in self.ghead.parameters(): # ghead unfreeze 시켜주는게 성능에는 더 좋고 Computational Cost도 적음. 
             p.requires_grad = True
+        for p in self.sheads.parameters():
+            p.requires_grad = True
+    @torch.no_grad()
+    def update_lcg_ema(self):
+        if not self.use_ema:
+            return 
+        msd = self.latent_graph.state_dict() 
+        esd = self.latent_graph_ema.state_dict() 
+        for key in msd:
+            esd[key].data.mul_(self.ema_decay)
+            esd[key].data.add_(msd[key].data * (1 - self.ema_decay))
+    
     # ---- training ----
     def forward(self, batch, y):
         total_loss = 0.0 
@@ -138,14 +159,25 @@ class Model(nn.Module):
             target = target.view(-1, 1).float()
         else:
             target = target.squeeze().long()
+        # ----
+        # [Phase 1] Vanilla GAT 
+        # ---- 
+        if not getattr(self.args, 'use_lcg', False):
+            local_pred = self.predict(batch)
+            return self.criterion(local_pred, target)
+        else:
+            global_pred, local_pred = self.predict(batch, return_all = True) 
+            local_loss = self.criterion(local_pred, target)
+            global_loss = self.criterion(global_pred, target)
 
-        global_pred, local_pred = self.predict(batch, return_all = True)
-        # === 3. Base Classification losses === 
-        global_loss = self.criterion(global_pred, target)
-        local_loss = self.criterion(local_pred, target)
-        
-        total_loss = local_loss + global_loss + (self.args.fgw_alpha * self.fgw_loss)
-        return total_loss
+            kl_loss = 0.0 
+            if getattr(self.args, 'kl_gamma', 0.0) > 0.0 and self.args.kl is True:
+                p_teacher = F.softmax(local_pred.detach(), dim=-1)
+                p_student = F.log_softmax(global_pred, dim = -1)
+                kl_loss = F.kl_div(p_student, p_teacher, reduction='batchmean')
+            fgw_loss = self.fgw_loss 
+            total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss) + (self.args.kl_gamma * kl_loss)
+            return total_loss
 
     # ---- inference ----
     def predict(self, batch, return_all = False):
@@ -165,8 +197,6 @@ class Model(nn.Module):
         name   = torch.cat(name_embeddings, dim = 1)
         value = torch.cat(value_embeddings, dim = 1)
 
-        # (2) latent composite graph, latent composite affinity 
-        lcg_feat, lcg_struct = self.latent_graph()
         # (3) basis GAT stack ---- 
         x_basis  = torch.cat([self.basis_cls.expand(value.size(0), 1, self.input_dim), value], dim=1)
         last_att = None
@@ -176,47 +206,46 @@ class Model(nn.Module):
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
             last_att = att
         self.x_basis = x_basis
-        if last_att is not None:
-            self._last_P_basis = 1.0 - last_att[:, 0, 1:, 1:] # P_affinity 
         self.basis_outputs_for_viz = basis_outputs
-        # [수정] Dynamic Detach 로직 추가 (필수)
-        if self.current_epoch < self.switch_epoch:
-            # Phase 1~3: GAT 보호 (Detach ON)
-            source_feat_in = self.x_basis[:, 1:, :].detach()
-            source_struct_in = self._last_P_basis.detach()
-        else:
-            # Phase 4: 완전체 (Detach OFF)
-            source_feat_in = self.x_basis[:, 1:, :]
-            source_struct_in = self._last_P_basis
-        q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
-            source_struct = source_struct_in, 
-            source_feat = source_feat_in, 
-            lcg_struct = lcg_struct, 
-            lcg_feat = lcg_feat, 
-            batch = batch
-        )
 
-        self.fgw_loss = fgw_loss
-        # # (5) LCG-wise GNN message passing & readout ---- 
-        expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) # [B, H, D]
-        # (6) Coordinator-weighted combination ----
-        # # (7) Global prediction
-        expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim = 1)
-        global_pred = self.ghead(expert_outputs)
-
-        # (8) Classificaion heads ---- 
         local_output = x_basis[:, 0, :]
-        if 'src_idx' in batch:
+        if 'src_idx' in batch: 
             local_pred = self.sheads[int(batch['src_idx'])](local_output)
         elif getattr(self.args, 'use_target_head', False):
             local_pred = self.thead(local_output)
         else:
             local_pred = self.thead(local_output)
-        self._last_local_pred = local_pred
-        if self.training or return_all:
-            return global_pred, local_pred
+        self._last_local_pred = local_pred 
+
+        # ==== 
+        # [Bridge]
+        # ==== 
+        # [Phase 1] Vanilla GAT 
+        if not getattr(self.args, 'use_lcg', False):
+            return local_pred 
         else:
-            if self.current_epoch < self.switch_epoch:
-                return local_pred 
+            if last_att is not None:
+                self._last_P_basis = 1.0 - last_att[:, 0, 1:, 1:]
             else:
-                return global_pred
+                B, N = value.shape[:2]
+                self._last_P_basis = torch.zeros(B, N, N, device = self.device)
+            lcg_feat, lcg_struct = self.latent_graph() 
+
+            # Graph Quantizer (Detach 적용 - GAT 보호)
+            q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
+            source_struct = self._last_P_basis.detach(), 
+            source_feat = self.x_basis[:, 1:, :].detach(), 
+            lcg_struct = lcg_struct, 
+            lcg_feat = lcg_feat, 
+            batch = batch
+        )
+        self.fgw_loss = fgw_loss
+
+        # [핵심 2] Head Sharing (Local Head 사용)
+        expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
+        expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
+        global_pred = self.ghead(expert_outputs)
+        if self.training or return_all:
+            return global_pred, local_pred 
+        else:
+            return global_pred

@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import logging
 import sys
+import shutil
 
 experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -93,12 +94,13 @@ def get_args():
     parser.add_argument('--reg', type = float, default = 0.01)
     parser.add_argument('--lcg_div_alpha', type = float, default = 10)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
+    parser.add_argument('--kl', action='store_true')
     parser.add_argument('--kl_gamma', type = float, default = 2.0)
     parser.add_argument('--additional_FGW',action = 'store_true')
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'round_robin', choices = ['hierarchical', 'round_robin', 'sequential'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential'])
     parser.add_argument('---lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
     '''
         Basis GAT Configuration
@@ -121,87 +123,67 @@ def get_args():
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args
 
-def init_lcg(args, model, device, strategy='hierarchical', injection_scale=1.0):
+def init_lcg(args, model, loaders, device, strategy='hierarchical', injection_scale=1.0):
     import logging
     from sklearn.cluster import KMeans
     # 로거 설정 (메인에 있다면 가져옴)
-    logger = logging.getLogger()
-    
+    logger = logging.getLogger("my_experiment_logger")
+    logger.info(f"\n{'='*20} [Bridge] LCG INIT from Pre-trained CLS {'='*20}")
+    all_cls_tokens = [] 
+    model.eval()
+    max_samples = 50000
     logger.info(f"[LCG Init] Starts. Strategy: {strategy}, Injection: {injection_scale}")
     
-    # Source Data 리스트 확보
-    src_names = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
-    
-    all_descs = []
-    model.eval()
-    
-    # 1. Description 수집
     with torch.no_grad():
-        for name in src_names:
-            # load_one은 메인에 있는 함수라고 가정
-            train_loader, _, _, _ = load_one(args, name)
-            
-            for i, batch in enumerate(train_loader):
-                # Model 내부 메서드 사용
-                raw_desc = model.extract_description(batch)
-                
-                if raw_desc is not None:
-                    flat_desc = raw_desc.reshape(-1, raw_desc.shape[-1]).cpu().numpy()
-                    all_descs.append(flat_desc)
-                
-                if i > 50: break # 너무 많이 돌지 않도록 제한
-    
-    if not all_descs:
-        logger.warning("[LCG Init] No descriptions found. Skipping.")
-        return
+        for src_name, loader in loaders.items():
+            logger.info(f"   - Collecting from: {src_name}")
+            for i, batch in enumerate(loader):
+                batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
 
-    data_desc = np.concatenate(all_descs, axis=0)
+                name_embs, val_embs = [], [] 
+                if 'cat_name_embeddings' in batch: name_embs.append(batch['cat_name_embeddings'])
+                if 'num_name_embeddings' in batch: name_embs.append(batch['num_name_embeddings'])
+                if 'cat_value_embeddings' in batch: val_embs.append(batch['cat_value_embeddings'])
+                if 'num_prompt_embeddings' in batch: val_embs.append(batch['num_prompt_embeddings'])
+                if not name_embs: continue 
+                name = torch.cat(name_embs, dim = 1)
+                val = torch.cat(val_embs, dim = 1)
+                x_basis = torch.cat([model.basis_cls.expand(val.size(0), 1, model.input_dim), val], dim = 1)
+                for l in range(model.num_basis_layers):
+                    norm_x = model.basis_layer_norms[l](x_basis)
+                    basis_outputs, _ = model.basis_layers[l](name, norm_x)
+                    x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), model.input_dim)
+                cls_token = x_basis[:, 0, :].cpu().numpy() 
+                all_cls_tokens.append(cls_token)
+                if len(all_cls_tokens) * cls_token.shape[0] >= max_samples: break 
+            if len(all_cls_tokens) * cls_token.shape[0] >= max_samples: break
+    data_pool = np.concatenate(all_cls_tokens, axis = 0)
+    logger.info(f">> Collected  {data_pool.shape[0]} CLS samples.")
     
-    # 2. Rescaling (Source Scale에 맞춤)
-    # (실제로는 Source Feature도 뽑아서 비율 계산하는 게 좋지만, 
-    #  복잡도를 줄이기 위해 실험적으로 얻은 비율 or 약 0.25 사용 추천)
-    rescale_factor = 0.25 
-    data_desc = data_desc * rescale_factor
-    
-    # 3. Clustering
-    M = model.latent_graph.M
+    # 2. KMeans
+    M = model.latent_graph.M 
     K = model.latent_graph.K
-    D = model.latent_graph.D
-    
+    D = model.latent_graph.D 
+    kmeans = KMeans(n_clusters = M * K, n_init = 10, random_state = 42).fit(data_pool)
+    centers = torch.tensor(kmeans.cluster_centers_, dtype = torch.float32)
+
+    # 3. Stregegy Assignemtn 
     final_centroids = torch.zeros(M, K, D)
+    if strategy == 'round_robin':
+        final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous() 
+    else: 
+        final_centroids = centers.view(M, K, D)
     
-    if strategy == 'hierarchical':
-        kmeans_global = KMeans(n_clusters=M, n_init=10, random_state=42).fit(data_desc)
-        for m in range(M):
-            group = data_desc[kmeans_global.labels_ == m]
-            if len(group) < K:
-                supp = data_desc[np.random.choice(len(data_desc), K - len(group))]
-                group = np.concatenate([group, supp], axis=0)
-            
-            kmeans_local = KMeans(n_clusters=K, n_init=10, random_state=42).fit(group)
-            final_centroids[m] = torch.tensor(kmeans_local.cluster_centers_)
-            
-    elif strategy == 'round_robin':
-        kmeans = KMeans(n_clusters=M*K, n_init=10, random_state=42).fit(data_desc)
-        centers = torch.tensor(kmeans.cluster_centers_)
-        final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous()
-        
-    else: # sequential
-        kmeans = KMeans(n_clusters=M*K, n_init=10, random_state=42).fit(data_desc)
-        final_centroids = torch.tensor(kmeans.cluster_centers_).view(M, K, D)
-        
-    # 4. Variance Injection & Apply
-    # 노이즈를 약간 섞어서 초기 분포를 퍼뜨림
-    noise = torch.randn_like(final_centroids) * injection_scale
-    final_init = final_init = final_centroids + noise
+    # 4. Variance Injection 
+    src_std = np.std(data_pool, axis=0)
+    noise = torch.randn_like(final_centroids) * torch.tensor(src_std) * injection_scale
+    final_init = final_centroids + noise
     
+    # 5. Update Parameter
     with torch.no_grad():
         model.latent_graph.node_embeddings.data.copy_(final_init.to(device))
         
-    logger.info("[LCG Init] Parameters Updated Successfully.")
-
-
-
+    logger.info(f">> ✅ LCG Parameters Updated. (Strategy: {strategy})")
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -303,6 +285,64 @@ def find_optimal_threshold(y_true, y_pred):
     f1s = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
     idx = int(np.argmax(f1s))
     return thresholds[idx] if idx < len(thresholds) else thresholds[-1]
+
+
+
+def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None):
+    """
+    학습이 끝난 뒤, Test 로더에 대해 최종 성능을 측정.
+    (Dual Eval 호환 수정: Local 결과 사용)
+    """
+    #logger = logging.getLogger("my_experiment_logger")
+
+    # 1. 함수 매핑 (Dual)
+    evaluate_func = binary_evaluate if is_binary else multi_evaluate
+
+    # 2. 평가 실행
+    if is_binary:
+        # Unpack Dual Results
+        (loss_g, true_g, pred_g), (loss_l, true_l, pred_l) = evaluate_func(model, test_loader, criterion, device)
+        
+        # [선택] Global 성능도 로그에 찍어보기
+        auc_g = roc_auc_score(true_g, pred_g)
+        logger.info(f"[Test Check] Global AUC: {auc_g:.4f} (Just for Reference)")
+        
+        # 메인은 Local 결과 사용
+        test_loss = loss_g
+        y_true_test = true_g
+        y_pred_test = pred_g
+        
+    else:
+        # Multi-class (기존 로직 유지)
+        test_loss, y_true_test, y_pred_test = evaluate_func(model, test_loader, criterion, device)
+
+    # 3. Metric 계산 (기존 코드와 동일)
+    if is_binary:
+        test_auc = roc_auc_score(y_true_test, y_pred_test)
+        if threshold is None:
+            threshold = 0.5
+        y_pred_test_bin = (y_pred_test > threshold).astype(int)
+        
+        test_precision = precision_score(y_true_test, y_pred_test_bin, zero_division=0)
+        test_recall = recall_score(y_true_test, y_pred_test_bin, zero_division=0)
+        test_f1 = f1_score(y_true_test, y_pred_test_bin, zero_division=0)
+        test_acc = accuracy_score(y_true_test, y_pred_test_bin)
+    else:
+        # Multi-class Metrics (기존 동일)
+        n_classes = y_pred_test.shape[1]
+        y_true_test_bin = label_binarize(y_true_test, classes=range(n_classes))
+        test_auc = roc_auc_score(y_true_test_bin, y_pred_test, multi_class='ovr', average='macro')
+        preds_argmax = y_pred_test.argmax(axis=1)
+        test_precision = precision_score(y_true_test, preds_argmax, average='macro', zero_division=0)
+        test_recall = recall_score(y_true_test, preds_argmax, average='macro', zero_division=0)
+        test_f1 = f1_score(y_true_test, preds_argmax, average='macro', zero_division=0)
+        test_acc = accuracy_score(y_true_test, preds_argmax)
+
+    logger.info(f"[Test] Loss: {test_loss:.4f}, AUC: {test_auc:.4f}, ACC: {test_acc:.4f}, "
+                f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
+
+    return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
+    #return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
 
 
 def train_and_validate(args, model, train_loader, val_loader,
@@ -931,7 +971,6 @@ def main():
     logger.setLevel(logging.INFO)
     logger.propagate = False # "복도"로 소리가 새어나가지 않게 함
 
-    # 2. "콘솔" 핸들러를 "무조건" 추가합니다 (디버깅용).
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setLevel(logging.INFO)
@@ -960,15 +999,6 @@ def main():
                        args.dropout_rate, args.llm_model,
                        experiment_id, mode="Few").to(device)
 
-    print(f"\n[Main] Initializing LCG parameters ...")
-    init_lcg(args, model_full, device, strategy = args.lcg_strategy, injection_scale = 1.0)
-    print("[Main] LCG Initialization Done.")
-
-
-
-
-
-
     # 2) 프리트레인 체크포인트 로드 시도 (고정 best.pt 우선, 없으면 최신 best_*.pt)
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
     model_sig = (
@@ -985,43 +1015,89 @@ def main():
         f"_description-{args.des}"
     )
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
-
+    os.makedirs(ckpt_dir, exist_ok = True)
+    ckpt_final = os.path.join(ckpt_dir, "best_joint.pt")
+    ckpt_vanilla = os.path.join(ckpt_dir, "best_vanilla.pt")
+    old_best = os.path.join(ckpt_dir, "best.pt")
+    if os.path.exists(old_best) and not os.path.exists(ckpt_final):
+        shutil.copy(old_best, ckpt_final)
     loaded_pretrain = False
     full_metrics = None
 
-    ckpt_path = find_pretrain_ckpt(ckpt_dir)
-    if ckpt_path and os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location=device)
+    
+    # ==================================================================
+    # [Logic] 2-Stage Pre-training Pipeline
+    # ==================================================================
+    
+    if os.path.exists(ckpt_final):
+        # Case A: 이미 최종 학습(Phase 2) 완료됨 -> 로드
+        logger.info(f"✅ [Pretrain] Found Final Checkpoint: {ckpt_final}")
+        ckpt = torch.load(ckpt_final, map_location=device)
         model_full.load_state_dict(ckpt['model_state_dict'])
-        logger.info(f"[Pretrain] Loaded checkpoint: {ckpt_path}")
         loaded_pretrain = True
+        
     else:
-        logger.info(f"[Pretrain] No checkpoint at {ckpt_dir} → run pretraining.")
-        _metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
-        # 4-shot 리포트는 아래에서 조건적으로 사용
-        full_metrics = _metrics if args.few_shot == 4 else None
+        # Case B: 학습 필요
+        logger.info(f"🚀 [Pretrain] Starting 2-Stage Training Pipeline...")
+        
+        # Loaders 준비 (Init용)
+        all_loaders = {}
+        src_list = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
+        for s in src_list:
+            tr, _, _, _ = load_one(args, s)
+            all_loaders[s] = tr
+
+        # --- [Step 1] Phase 1: Vanilla GAT ---
+        if os.path.exists(ckpt_vanilla):
+            logger.info(f"   -> Found Phase 1 Checkpoint. Loading...")
+            ckpt = torch.load(ckpt_vanilla, map_location=device)
+            model_full.load_state_dict(ckpt['model_state_dict'])
+        else:
+            logger.info(f"\n{'='*40}\n>>> [Phase 1] Start Vanilla GAT Training (LCG OFF)\n{'='*40}")
+            args.use_lcg = False 
+            # 학습 실행 (내부에서 best.pt 생성됨)
+            _ = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
+            
+            # 결과 백업
+            shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_vanilla)
+            logger.info(f"   -> Phase 1 Saved to {ckpt_vanilla}")
+
+        # --- [Step 2] Bridge: LCG Init ---
+        logger.info(f"\n{'='*40}\n>>> [Bridge] Initializing LCG from Pre-trained CLS\n{'='*40}")
+        # 여기서 model_full은 Vanilla 학습이 된 상태임
+        init_lcg(
+            args, model_full, all_loaders, device, 
+            strategy='round_robin', injection_scale=0.1
+        )
+
+        # --- [Step 3] Phase 2: Joint Training ---
+        logger.info(f"\n{'='*40}\n>>> [Phase 2] Start Joint Training (Global ON)\n{'='*40}")
+        args.use_lcg = True 
+        # 이어서 학습 (Fine-tuning)
+        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
+        
+        # 최종 저장
+        shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_final)
+        logger.info(f"   -> Phase 2 Saved to {ckpt_final}")
+        loaded_pretrain = True # 학습 완료
 
     # 3) (옵션) 4-shot일 때, 로드된 모델로 소스 리포트만 재평가(eval-only)
     if loaded_pretrain and args.few_shot == 4:
         logger.info("[Full] Using loaded pretrain for source metrics report (eval only).")
         _bak = args.train_epochs
         args.train_epochs = 0
+        args.use_lcg = True
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=0)
         args.train_epochs = _bak
-
     # 4) few-shot 적응: 가중치 복사 → freeze 정책 적용
+
+    
     args.use_target_head = True
     model_few.load_state_dict(model_full.state_dict(),strict=False)
     model_few.set_freeze_target()
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
     # logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
-
-    # # 5) KMeans 센트로이드 초기화
-    # centroids = init_kmeans_centroids_from_sources(args, model_few, device)
-    # model_few.set_kmeans_centroids(centroids)
-    # model_few.set_coord_temperature(args.coord_softmax_temp)
-
     # 6) Target dataloaders
     logger.info(f"[Few-shot] target = {args.target_data}")
     r_t = prepare_embedding_dataloaders(args, args.target_data)
