@@ -125,20 +125,20 @@ class Model(nn.Module):
     # Few-shot freeze policy
     def set_freeze_target(self):
         for p in self.parameters():
-            p.requires_grad = False
-        # for ln in self.basis_layer_norms:
-        #     for p in ln.parameters():
-        #         p.requires_grad = True
-        # for p in self.thead.parameters():
-        #     p.requires_grad = True
-        for p in self.latent_graph.parameters():
-            p.requires_grad = True 
-        for p in self.graph_quantizer.parameters():
-            p.requires_grad = True 
-        for p in self.gnn_experts.parameters():
-           p.requires_grad = True
-        for p in self.ghead.parameters(): # ghead unfreeze 시켜주는게 성능에는 더 좋고 Computational Cost도 적음. 
             p.requires_grad = True
+        # # for ln in self.basis_layer_norms:
+        # #     for p in ln.parameters():
+        # #         p.requires_grad = True
+        # # for p in self.thead.parameters():
+        # #     p.requires_grad = True
+        # for p in self.latent_graph.parameters():
+        #     p.requires_grad = True 
+        # for p in self.graph_quantizer.parameters():
+        #     p.requires_grad = True 
+        # for p in self.gnn_experts.parameters():
+        #    p.requires_grad = True
+        # for p in self.ghead.parameters(): # ghead unfreeze 시켜주는게 성능에는 더 좋고 Computational Cost도 적음. 
+        #     p.requires_grad = True
 
     @torch.no_grad()
     def update_lcg_ema(self):
@@ -169,13 +169,17 @@ class Model(nn.Module):
             local_loss = self.criterion(local_pred, target)
             global_loss = self.criterion(global_pred, target)
 
-            kl_loss = 0.0 
-            if getattr(self.args, 'kl_gamma', 0.0) > 0.0 and self.args.kl is True:
-                p_teacher = F.softmax(local_pred.detach(), dim=-1)
-                p_student = F.log_softmax(global_pred, dim = -1)
-                kl_loss = F.kl_div(p_student, p_teacher, reduction='batchmean')
             fgw_loss = self.fgw_loss 
-            total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss) + (self.args.kl_gamma * kl_loss)
+            current_mode = getattr(self, 'mode', 'Full')
+            if current_mode == 'Few':
+                total_loss = global_loss + (self.args.fgw_alpha * fgw_loss)
+            else: 
+                kl_loss = 0.0 
+                if getattr(self.args, 'kl_gamma', 0.0) > 0.0 and self.args.kl is True:
+                    p_teacher = F.softmax(local_pred.detach(), dim=-1)
+                    p_student = F.log_softmax(global_pred, dim = -1)
+                    kl_loss = F.kl_div(p_student, p_teacher, reduction='batchmean')
+                total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss) + (self.args.kl_gamma * kl_loss)
             return total_loss
 
     # ---- inference ----
