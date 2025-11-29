@@ -139,8 +139,7 @@ class Model(nn.Module):
            p.requires_grad = True
         for p in self.ghead.parameters(): # ghead unfreeze 시켜주는게 성능에는 더 좋고 Computational Cost도 적음. 
             p.requires_grad = True
-        for p in self.sheads.parameters():
-            p.requires_grad = True
+
     @torch.no_grad()
     def update_lcg_ema(self):
         if not self.use_ema:
@@ -233,8 +232,8 @@ class Model(nn.Module):
 
             # Graph Quantizer (Detach 적용 - GAT 보호)
             q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
-            source_struct = self._last_P_basis.detach(), 
-            source_feat = self.x_basis[:, 1:, :].detach(), 
+            source_struct = self._last_P_basis, 
+            source_feat = self.x_basis[:, 1:, :], 
             lcg_struct = lcg_struct, 
             lcg_feat = lcg_feat, 
             batch = batch
