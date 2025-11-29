@@ -126,11 +126,11 @@ class Model(nn.Module):
     def set_freeze_target(self):
         for p in self.parameters():
             p.requires_grad = False
-        for ln in self.basis_layer_norms:
-            for p in ln.parameters():
-                p.requires_grad = True
-        for p in self.thead.parameters():
-            p.requires_grad = True
+        # for ln in self.basis_layer_norms:
+        #     for p in ln.parameters():
+        #         p.requires_grad = True
+        # for p in self.thead.parameters():
+        #     p.requires_grad = True
         for p in self.latent_graph.parameters():
             p.requires_grad = True 
         for p in self.graph_quantizer.parameters():
