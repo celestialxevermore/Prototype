@@ -552,12 +552,21 @@ def train_and_validate(args, model, train_loader, val_loader,
             except Exception as e:
                 logger.warning(f"[Visualization Skipped] {e}")
 
+        if mode == 'Few':
+            monitor_auc = val_auc_g 
+            logger_prefix = "[Target/Global Best]"
+        else:
+            monitor_auc = val_auc_l
+            logger_prefix = "[Pretrain/Local Best]"
+    
+
         # --- 8. Best Model Saving (Local AUC 기준) ---
-        if val_auc_l > best_val_auc:
-            best_val_auc = val_auc_l
+        if monitor_auc > best_val_auc:
+            best_val_auc = monitor_auc
             best_epoch   = epoch
             no_improve   = 0
             best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            logger.info(f"{logger_prefix} New Best AUC: {best_val_auc:.4f} at epoch {epoch+1}")
             if current_threshold is not None:
                 best_threshold = current_threshold
 
@@ -633,25 +642,27 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     
     base_params = [
         p for name, p in model.named_parameters()
-        if "latent_graph" not in name and p.requires_grad
+        if "latent_graph" not in name and "gnn_experts" not in name and p.requires_grad
     ]
+    # lcg_params: LCG & Expert (Global) -> 정상 속도 학습 (1.0)
     lcg_params = [
         p for name, p in model.named_parameters()
-        if "latent_graph" in name and p.requires_grad
+        if ("latent_graph" in name or "gnn_experts" in name) and p.requires_grad
     ]
-    lcg_lr_multiplier = 1.0 
-    lcg_lr = args.source_lr * lcg_lr_multiplier 
     
-    logger.info(f"--- 🚀 Applying Differential LR ---")
-    logger.info(f"   Base LR: {args.source_lr}")
-    logger.info(f"   LCG LR:  {lcg_lr} (x{lcg_lr_multiplier})")
+    # GAT는 1e-5, Global은 1e-4
+    gat_lr = args.source_lr * 0.1  # 0.00001
+    global_lr = args.source_lr     # 0.0001
+
+    logger.info(f"--- 🚀 [Phase 2] Applying Differential LR ---")
+    logger.info(f"   GAT LR: {gat_lr} (Slow)")
+    logger.info(f"   Global LR: {global_lr} (Fast)")
     
     opt = optim.Adam(
         [
-            {'params': base_params},
-            {'params': lcg_params, 'lr': lcg_lr} 
+            {'params': base_params, 'lr': gat_lr}, 
+            {'params': lcg_params,  'lr': global_lr} 
         ], 
-        lr=args.source_lr, # 기본 LR (base_params에 적용됨)
         weight_decay=1e-5
     )
     
@@ -1137,16 +1148,41 @@ def main():
     import numpy as _np
 
     for r in range(R):
-        # ---- 모델/옵티마이저 리셋 ----
+        # 1. 모델 리셋 & Freeze/Unfreeze 설정
         model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
-        model_few.set_freeze_target()
+        
+        model_few.set_freeze_target() 
+
+        # 2. 파라미터 그룹 분리
+        gat_params_few = []
+        global_params_few = []
+        
+        for name, p in model_few.named_parameters():
+            if not p.requires_grad: continue
+            if 'basis' in name: # GAT
+                gat_params_few.append(p)
+            else: # Global (LCG, Expert, Head)
+                global_params_few.append(p)
+
+        # 3. LR 설정 (핵심!)
+        # GAT: 1e-6 (기존 source_lr_few의 1/10) -> 아주 살살 달래기
+        gat_lr_few = args.source_lr_few * 0.1 
+        
+        # Global: 1e-3 or 5e-4 (Pretrain보다 더 공격적으로) -> 빨리 적응하기
+        # few-shot LR이 너무 작으므로(1e-5), Global을 위해 50~100배 키웁니다.
+        global_lr_few = args.source_lr_few * 50.0 # 0.0005
+        
+        logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
 
         optimizer_few = optim.Adam(
-            (p for p in model_few.parameters() if p.requires_grad),
-            lr=args.source_lr_few,
+            [
+                {'params': gat_params_few,    'lr': gat_lr_few},
+                {'params': global_params_few, 'lr': global_lr_few}
+            ],
             weight_decay=3e-5
         )
-        warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
+        #warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
+        warmup_epochs_few = 0 
         scheduler_few = make_warmup_cosine_epochs(
             optimizer_few,
             total_epochs=args.train_epochs,
@@ -1178,7 +1214,7 @@ def main():
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
         ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+                               optimizer_few, device, args.train_epochs, is_binary_t, patience=50, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
         # ---- 테스트 ----
         (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,

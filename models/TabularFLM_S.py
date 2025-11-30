@@ -125,7 +125,11 @@ class Model(nn.Module):
     # Few-shot freeze policy
     def set_freeze_target(self):
         for p in self.parameters():
-            p.requires_grad = True
+            p.requires_grad = False
+        for p in self.latent_graph.parameters(): p.requires_grad = True
+        for p in self.graph_quantizer.parameters(): p.requires_grad = True
+        for p in self.gnn_experts.parameters(): p.requires_grad = True
+        for p in self.ghead.parameters(): p.requires_grad = True
         # # for ln in self.basis_layer_norms:
         # #     for p in ln.parameters():
         # #         p.requires_grad = True
@@ -234,7 +238,6 @@ class Model(nn.Module):
                 self._last_P_basis = torch.zeros(B, N, N, device = self.device)
             lcg_feat, lcg_struct = self.latent_graph() 
 
-            # Graph Quantizer (Detach 적용 - GAT 보호)
             q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
             source_struct = self._last_P_basis, 
             source_feat = self.x_basis[:, 1:, :], 
@@ -244,7 +247,6 @@ class Model(nn.Module):
         )
         self.fgw_loss = fgw_loss
 
-        # [핵심 2] Head Sharing (Local Head 사용)
         expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
         expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
         global_pred = self.ghead(expert_outputs)
