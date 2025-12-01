@@ -349,8 +349,10 @@ def train_and_validate(args, model, train_loader, val_loader,
                        criterion, optimizer, device, epochs,
                        is_binary, patience=10, mode="Full", scheduler=None, warmup_epochs=0):
     """
-    Train + Validation을 진행하며, Local/Global 성능을 동시에 모니터링하고
-    Best Validation 성능(Local 기준)을 기록한 모델 state를 반환.
+    Train + Validation을 진행하며, 
+    mode="Full" (Pretrain) -> Local 성능 기준
+    mode="Few"  (Adaptation) -> Global 성능 기준
+    으로 모니터링하고 Best Model을 저장함.
     """
     
     # --- 1. Logger Setup ---
@@ -367,9 +369,7 @@ def train_and_validate(args, model, train_loader, val_loader,
 
     # --- 3. Function Setup ---
     train_func = binary_train if is_binary else multi_train
-    
     # [중요] Binary일 경우 Dual Evaluation 함수 사용
-    # (binary_evaluate_dual 함수가 정의되어 있어야 함)
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
     # --- 4. Init State ---
@@ -456,58 +456,95 @@ def train_and_validate(args, model, train_loader, val_loader,
         except Exception:
             curr_lr = None
 
-        # -------- Evaluate (Dual Evaluation) --------
-        # Binary인 경우 Dual Eval (Global/Local 분리)
+        # -------- Evaluate (Dual Evaluation & Criteria Switching) --------
+        
         if is_binary:
-            # Trainset Eval
+            # 1. Trainset Eval (Dual)
             (tr_loss_g, tr_true_g, tr_pred_g), (tr_loss_l, tr_true_l, tr_pred_l) = evaluate_func(model, train_loader, criterion, device)
-            # Validation Eval
+            # 2. Validation Eval (Dual)
             (val_loss_g, val_true, val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
             
-            # 메인 Loss 기록 (Local 기준)
-            val_losses.append(val_loss_l)
+            # -----------------------------------------------------------
+            # [핵심 수정] Mode에 따른 Threshold 및 Best Metric 기준 설정
+            # -----------------------------------------------------------
+            if mode == 'Few':
+                # [Case A: Target Adaptation] -> Global(LCG) 기준
+                # Threshold: Global 예측값 기준
+                current_threshold = find_optimal_threshold(val_true, val_pred_g)
+                
+                # Best Model 선정 기준: Global AUC
+                monitor_auc = roc_auc_score(val_true, val_pred_g)
+                
+                # Accuracy 등 기타 지표 (Global 기준)
+                y_pred_val_bin = (val_pred_g > current_threshold).astype(int)
+                val_acc = accuracy_score(val_true, y_pred_val_bin)
+                
+                # 로깅 설정
+                main_val_loss = val_loss_g
+                logger_prefix = "[Target/Global Best]"
+                
+                # (참고용) Local 지표
+                val_auc_ref = roc_auc_score(val_true_l, val_pred_l)
 
-            # Metrics Calculation
-            # 1. Local (GAT) Metrics - Best 갱신의 기준
-            train_auc_l = roc_auc_score(tr_true_l, tr_pred_l)
-            val_auc_l   = roc_auc_score(val_true_l, val_pred_l)
-            
-            current_threshold = find_optimal_threshold(val_true_l, val_pred_l)
-            y_pred_train_bin = (tr_pred_l > current_threshold).astype(int)
-            y_pred_val_bin   = (val_pred_l > current_threshold).astype(int)
-            
-            train_acc_l = accuracy_score(tr_true_l, y_pred_train_bin)
-            val_acc_l   = accuracy_score(val_true_l, y_pred_val_bin)
-            
-            # 2. Global (LCG) Metrics - 모니터링용
-            train_auc_g = roc_auc_score(tr_true_g, tr_pred_g)
-            val_auc_g   = roc_auc_score(val_true, val_pred_g)
-            
-            # 리스트 저장 (Local 기준)
-            train_aucs.append(train_auc_l); val_aucs.append(val_auc_l)
-            train_accs.append(train_acc_l); val_accs.append(val_acc_l)
+            else:
+                # [Case B: Pretrain / Joint] -> Local(GAT) 기준
+                # Threshold: Local 예측값 기준
+                current_threshold = find_optimal_threshold(val_true_l, val_pred_l)
+                
+                # Best Model 선정 기준: Local AUC
+                monitor_auc = roc_auc_score(val_true_l, val_pred_l)
+                
+                # Accuracy 등 기타 지표 (Local 기준)
+                y_pred_val_bin = (val_pred_l > current_threshold).astype(int)
+                val_acc = accuracy_score(val_true_l, y_pred_val_bin)
+                
+                # 로깅 설정
+                main_val_loss = val_loss_l
+                logger_prefix = "[Pretrain/Local Best]"
+                
+                # (참고용) Global 지표
+                val_auc_ref = roc_auc_score(val_true, val_pred_g)
+
+            # -----------------------------------------------------------
+
+            # 메인 Loss 기록
+            val_losses.append(main_val_loss)
+
+            # 리스트 저장 (히스토리용 - 여기서는 편의상 모니터링 되는 값을 저장)
+            # (만약 Local/Global 히스토리를 다 남기고 싶으면 별도 리스트 필요하지만, 
+            #  여기서는 monitor_auc를 따라갑니다.)
+            train_auc_cur = roc_auc_score(tr_true_g, tr_pred_g) if mode == 'Few' else roc_auc_score(tr_true_l, tr_pred_l)
+            train_acc_cur = accuracy_score(tr_true_g, (tr_pred_g > current_threshold).astype(int)) if mode == 'Few' else accuracy_score(tr_true_l, (tr_pred_l > current_threshold).astype(int))
+
+            train_aucs.append(train_auc_cur); val_aucs.append(monitor_auc)
+            train_accs.append(train_acc_cur); val_accs.append(val_acc)
             
             # 로그 메시지 작성
             lr_str = f"LR:{curr_lr:.6f} | " if curr_lr else ""
             log_msg = (
                 f"[{mode}][Epoch {epoch+1}/{epochs}] {lr_str}\n"
-                f"   >>> Local (GAT): TrLoss {tr_loss_l:.4f} ValLoss {val_loss_l:.4f} | TrAUC {train_auc_l:.4f} ValAUC {val_auc_l:.4f} | ValACC {val_acc_l:.4f}\n"
-                f"   >>> Global(LCG): TrLoss {tr_loss_g:.4f} ValLoss {val_loss_g:.4f} | TrAUC {train_auc_g:.4f} ValAUC {val_auc_g:.4f}"
+                f"   >>> Main Metric ({'Global' if mode=='Few' else 'Local'}): AUC {monitor_auc:.4f} | ACC {val_acc:.4f} | Thr {current_threshold:.4f}\n"
+                f"   >>> Ref Metric  ({'Local' if mode=='Few' else 'Global'}): AUC {val_auc_ref:.4f}"
             )
 
         else:
-            # Multi-class (기존 로직 유지 - Local Only)
+            # Multi-class (Binary가 아닌 경우)
+            # 여기도 mode에 따라 monitor_auc를 바꿀 수 있으나, 
+            # Threshold 개념이 없으므로 비교적 단순함.
             _, y_true_train, y_pred_train = evaluate_func(model, train_loader, criterion, device)
             val_loss, y_true_val, y_pred_val = evaluate_func(model, val_loader, criterion, device)
-            val_losses.append(val_loss)
             
-            # AUC 등 계산 (OVR)
+            # Multi-class AUC (OVR)
             n_cls = y_pred_train.shape[1]
             y_bin_tr = label_binarize(y_true_train, classes=range(n_cls))
             y_bin_va = label_binarize(y_true_val, classes=range(n_cls))
             
             train_auc = roc_auc_score(y_bin_tr, y_pred_train, multi_class='ovr', average='macro')
             val_auc   = roc_auc_score(y_bin_va, y_pred_val, multi_class='ovr', average='macro')
+            
+            # Monitor AUC 설정
+            monitor_auc = val_auc
+            val_losses.append(val_loss)
             
             # Preds
             preds_tr = y_pred_train.argmax(axis=1)
@@ -517,32 +554,24 @@ def train_and_validate(args, model, train_loader, val_loader,
             
             train_aucs.append(train_auc); val_aucs.append(val_auc)
             
-            val_auc_l = val_auc # Alias for consistency
+            # Multi-class는 Threshold 없음
             current_threshold = None
-            
             log_msg = f"[{mode}][Epoch {epoch+1}/{epochs}] TrLoss {train_loss:.4f} ValLoss {val_loss:.4f} | TrAUC {train_auc:.4f} ValAUC {val_auc:.4f}"
 
         logger.info(log_msg)
 
         # --- 7. Visualization Snapshot ---
-        # 10 Epoch 마다 혹은 첫 Epoch에 수행
         if (epoch + 1) % 10 == 0 or (epoch == 0):
             try:
-                # 시각화용 임시 로더 (Train Loader)
-                # 로더 구조에 따라 딕셔너리 포장
                 if isinstance(train_loader, dict):
                     temp_loaders = train_loader
                 else:
-                    # 단일 로더일 경우 임의 키 부여
                     source_key = list(args.source_data)[0] if isinstance(args.source_data, (list, tuple)) else args.source_data
                     temp_loaders = {source_key: train_loader}
 
-                # LCG 시각화 호출
                 if hasattr(model, 'latent_graph'):
                     print(f"\n>>> Generating Snapshot for Epoch {epoch+1}...")
                     from utils.visualization import visualize_training_snapshot_v2
-                    
-                    # Rand/Desc 인자 모두 현재 모델의 LCG로 넘김 (상태 확인용)
                     visualize_training_snapshot_v2(
                         model, temp_loaders, 
                         model.latent_graph, model.latent_graph, 
@@ -552,21 +581,14 @@ def train_and_validate(args, model, train_loader, val_loader,
             except Exception as e:
                 logger.warning(f"[Visualization Skipped] {e}")
 
-        if mode == 'Few':
-            monitor_auc = val_auc_g 
-            logger_prefix = "[Target/Global Best]"
-        else:
-            monitor_auc = val_auc_l
-            logger_prefix = "[Pretrain/Local Best]"
-    
-
-        # --- 8. Best Model Saving (Local AUC 기준) ---
+        # --- 8. Best Model Saving (monitor_auc 기준) ---
         if monitor_auc > best_val_auc:
             best_val_auc = monitor_auc
             best_epoch   = epoch
             no_improve   = 0
             best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             logger.info(f"{logger_prefix} New Best AUC: {best_val_auc:.4f} at epoch {epoch+1}")
+            
             if current_threshold is not None:
                 best_threshold = current_threshold
 
@@ -575,15 +597,15 @@ def train_and_validate(args, model, train_loader, val_loader,
                 f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_S:{args.random_seed}_{experiment_id}.pt"
             )
             
-            # Global Score도 함께 기록
-            val_auc_g_val = val_auc_g if is_binary else 0.0
+            # 저장 시 Global 점수도 메타데이터로 남김 (참고용)
+            val_auc_g_val = roc_auc_score(val_true, val_pred_g) if is_binary else 0.0
             
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
-                'val_auc': best_val_auc,
-                'val_auc_global': val_auc_g_val,
-                'threshold': best_threshold,
+                'val_auc': best_val_auc,       # 모드에 따라 결정된 Best AUC
+                'val_auc_global': val_auc_g_val, # 절대적인 Global AUC (참고용)
+                'threshold': best_threshold,     # 모드에 따라 최적화된 Threshold
                 'args': args
             }, ckpt_path)
         else:
