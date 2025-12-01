@@ -92,6 +92,8 @@ class GraphQuantizer(nn.Module):
         self.register_buffer("has_printed_initial_weights", torch.tensor(False), persistent=False)
         self.register_buffer('log_step', torch.tensor(0), persistent=False) 
         self.log_interval = 50 
+        self.last_pi = None 
+        self.last_pln = None
 
     def compute_fgw(self, src_feat, src_str, tgt_feat, tgt_str):
         B, N, D = src_feat.shape 
@@ -191,6 +193,10 @@ class GraphQuantizer(nn.Module):
         # Step 4. Total VQ Loss 
         # ======
         pi_detached = pi.detach() 
+        self.last_pi = pi.detach() 
+        # plan: [B*M, N, K] -> [B, M, N, K]로 변환하여 저장
+        if plan_commit is not None:
+            self.last_plan = plan_commit.detach().reshape(B, M, N, K)
         loss_codebook = (pi_detached * d_codebook).sum(dim=1).mean() 
         loss_commitment = (pi_detached * d_commit).sum(dim=1).mean() 
         vq_loss = loss_codebook + self.vq_beta * loss_commitment 

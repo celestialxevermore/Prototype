@@ -102,7 +102,13 @@ class Model(nn.Module):
             nn.Dropout(self.dropout_rate),
             nn.Linear(hid, self.output_dim),
         )
-
+        self.ghead2 = nn.Sequential(
+            nn.LayerNorm(self.input_dim),
+            nn.Linear(self.input_dim, hid),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(hid, self.output_dim),
+        )
         # Loss
         self.criterion = nn.BCEWithLogitsLoss() if self.num_classes == 2 else nn.CrossEntropyLoss()
         self._init_weights()
@@ -114,35 +120,13 @@ class Model(nn.Module):
                 if m.bias is not None:
                     nn_init.zeros_(m.bias)
 
-    def extract_description(self, batch):
-        desc_embeddings = [] 
-        batch = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k,v in batch.items()}
-        if 'cat_desc_embeddings' in batch: desc_embeddings.append(batch['cat_desc_embeddings'])
-        if 'num_desc_embeddings' in batch: desc_embeddings.append(batch['num_desc_embeddings'])
-        if not desc_embeddings: return None 
-        return torch.cat(desc_embeddings, dim = 1)
-
-    # Few-shot freeze policy
     def set_freeze_target(self):
-        for p in self.parameters():
-            p.requires_grad = False
+        for p in self.parameters(): p.requires_grad = False
         for p in self.latent_graph.parameters(): p.requires_grad = True
         for p in self.graph_quantizer.parameters(): p.requires_grad = True
         for p in self.gnn_experts.parameters(): p.requires_grad = True
-        for p in self.ghead.parameters(): p.requires_grad = True
-        # # for ln in self.basis_layer_norms:
-        # #     for p in ln.parameters():
-        # #         p.requires_grad = True
-        # # for p in self.thead.parameters():
-        # #     p.requires_grad = True
-        # for p in self.latent_graph.parameters():
-        #     p.requires_grad = True 
-        # for p in self.graph_quantizer.parameters():
-        #     p.requires_grad = True 
-        # for p in self.gnn_experts.parameters():
-        #    p.requires_grad = True
-        # for p in self.ghead.parameters(): # ghead unfreeze 시켜주는게 성능에는 더 좋고 Computational Cost도 적음. 
-        #     p.requires_grad = True
+        for p in self.ghead2.parameters(): p.requires_grad = True
+        for p in self.thead.parameters(): p.requires_grad = True
 
     @torch.no_grad()
     def update_lcg_ema(self):
@@ -178,12 +162,7 @@ class Model(nn.Module):
             if current_mode == 'Few':
                 total_loss = global_loss + (self.args.fgw_alpha * fgw_loss)
             else: 
-                kl_loss = 0.0 
-                if getattr(self.args, 'kl_gamma', 0.0) > 0.0 and self.args.kl is True:
-                    p_teacher = F.softmax(local_pred.detach(), dim=-1)
-                    p_student = F.log_softmax(global_pred, dim = -1)
-                    kl_loss = F.kl_div(p_student, p_teacher, reduction='batchmean')
-                total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss) + (self.args.kl_gamma * kl_loss)
+                total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss)
             return total_loss
 
     # ---- inference ----
@@ -249,7 +228,11 @@ class Model(nn.Module):
 
         expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
         expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
-        global_pred = self.ghead(expert_outputs)
+        current_mode = getattr(self, 'mode', 'Full')
+        if current_mode == 'Few':
+            global_pred = self.ghead2(expert_outputs)
+        else:
+            global_pred = self.ghead(expert_outputs)
         if self.training or return_all:
             return global_pred, local_pred 
         else:

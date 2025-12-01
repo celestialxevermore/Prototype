@@ -90,8 +90,6 @@ class LatentCompositeGNN(nn.Module):
         self.readouts = nn.ModuleList([
             GraphReadout(self.input_dim, hidden_dim, self.input_dim, dropout) for _ in range(self.n_graphs)
         ])
-
-        # [핵심] 생성 직후 바로 Identity 초기화 적용
         self._init_experts_as_identity()
 
     def _init_experts_as_identity(self):
@@ -145,9 +143,6 @@ class LatentCompositeGNN(nn.Module):
             node_in = Fy_res[m]
             adj_in = Ay_sel[m]
             
-            # [핵심 수정] lightGraphNeuralNet은 3D 입력을 원함 ([B, K, D])
-            # 따라서 unsqueeze(0)으로 가상의 배치 차원(1)을 만들어줌
-            # [K, D] -> [1, K, D]
             node_in = node_in.unsqueeze(0)
             adj_in = adj_in.unsqueeze(0)
             
@@ -160,9 +155,6 @@ class LatentCompositeGNN(nn.Module):
             # 리스트에 추가
             expert_outputs.append(graph_vec.unsqueeze(1)) # [1, 1, D]
 
-        # Concat: [1, M, D]
-        # 이렇게 하면 나중에 [B, M, 1]인 coordinates와 곱할 때 
-        # 자동으로 Broadcasting([B, M, D]) 되어 계산됨. (메모리/속도 이득)
         expert_outputs = torch.cat(expert_outputs, dim=1)
         
         return expert_outputs

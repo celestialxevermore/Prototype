@@ -480,7 +480,12 @@ def train_and_validate(args, model, train_loader, val_loader,
             (tr_loss_g, tr_true_g, tr_pred_g), (tr_loss_l, tr_true_l, tr_pred_l) = evaluate_func(model, train_loader, criterion, device)
             # 2. Validation Eval (Dual)
             (val_loss_g, val_true, val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
+            # [추가] Train/Val AUC 모두 미리 계산 (로그 출력용)
+            auc_tr_g = roc_auc_score(tr_true_g, tr_pred_g)
+            auc_val_g = roc_auc_score(val_true, val_pred_g)
             
+            auc_tr_l = roc_auc_score(tr_true_l, tr_pred_l)
+            auc_val_l = roc_auc_score(val_true_l, val_pred_l)
             # -----------------------------------------------------------
             # [핵심 수정] Mode에 따른 Threshold 및 Best Metric 기준 설정
             # -----------------------------------------------------------
@@ -499,7 +504,12 @@ def train_and_validate(args, model, train_loader, val_loader,
                 # 로깅 설정
                 main_val_loss = val_loss_g
                 logger_prefix = "[Target/Global Best]"
-                
+                log_msg = (
+                    f"[{mode}][Ep {epoch+1}/{epochs}] LR: {curr_lr:.1e}\n"
+                    f"   >>> [Global] Loss: {tr_loss_g:.4f} / {val_loss_g:.4f} (Tr/Val)\n"
+                    f"   >>> [Global] AUC : {auc_tr_g:.4f} / {auc_val_g:.4f} (Tr/Val) | ACC: {val_acc:.4f} | Thr: {current_threshold:.4f}\n"
+                    f"   >>> [Local ] Ref Val AUC: {auc_val_l:.4f}"
+                )
                 # (참고용) Local 지표
                 val_auc_ref = roc_auc_score(val_true_l, val_pred_l)
 
@@ -518,10 +528,16 @@ def train_and_validate(args, model, train_loader, val_loader,
                 # 로깅 설정
                 main_val_loss = val_loss_l
                 logger_prefix = "[Pretrain/Local Best]"
-                
+                log_msg = (
+                    f"[{mode}][Ep {epoch+1}/{epochs}] LR: {curr_lr:.1e}\n"
+                    f"   >>> [Local ] Loss: {tr_loss_l:.4f} / {val_loss_l:.4f} (Tr/Val)\n"
+                    f"   >>> [Local ] AUC : {auc_tr_l:.4f} / {auc_val_l:.4f} (Tr/Val) | ACC: {val_acc:.4f} | Thr: {current_threshold:.4f}\n"
+                    f"   >>> [Global] Ref Val AUC: {auc_val_g:.4f}"
+                )
                 # (참고용) Global 지표
                 val_auc_ref = roc_auc_score(val_true, val_pred_g)
-
+                train_auc_cur = auc_tr_l
+                train_acc_cur = accuracy_score(tr_true_l, (tr_pred_l > current_threshold).astype(int))
             # -----------------------------------------------------------
 
             # 메인 Loss 기록
@@ -995,12 +1011,6 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     )
     return full_pack
 def find_pretrain_ckpt(ckpt_dir: str):
-    """
-    우선순위:
-    1) 고정 'best.pt'가 있으면 그걸 사용
-    2) 없으면 'best_*.pt' 중 최신 파일을 사용
-    3) 없으면 None
-    """
     stable = os.path.join(ckpt_dir, "best.pt")
     if os.path.exists(stable):
         return stable
@@ -1029,7 +1039,6 @@ def main():
         logger.addHandler(stream_handler)
         
     logger.info("--- 💡 Global logger initialized (Console) 💡 ---")
-    # cpu affinity(옵션): 안전 가드
     try:
         ncpu = os.cpu_count() or 1
         p.cpu_affinity(range(1, min(ncpu, 64)))
@@ -1114,7 +1123,6 @@ def main():
 
         # --- [Step 2] Bridge: LCG Init ---
         logger.info(f"\n{'='*40}\n>>> [Bridge] Initializing LCG from Pre-trained CLS\n{'='*40}")
-        # 여기서 model_full은 Vanilla 학습이 된 상태임
         init_lcg(
             args, model_full, all_loaders, device, 
             strategy='round_robin', injection_scale=0.1
@@ -1143,12 +1151,13 @@ def main():
 
     
     args.use_target_head = True
+    args.use_lcg = True 
+    model_few.args.use_lcg = True
     model_few.load_state_dict(model_full.state_dict(),strict=False)
     model_few.set_freeze_target()
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
-    # logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
-    # 6) Target dataloaders
+    logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
     logger.info(f"[Few-shot] target = {args.target_data}")
     r_t = prepare_embedding_dataloaders(args, args.target_data)
     train_loader_t, val_loader_t, test_loader_t = r_t['loaders']
@@ -1159,13 +1168,11 @@ def main():
     is_binary_t = (args.num_classes == 2)
     crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
 
-    # 7) Few-shot: support 재샘플링 R회 에피소드 평균
     R = int(getattr(args, 'support_resamples', 1))
     logger.info(f"[Few-shot] support resamples R = {R}")
 
     base_state_cpu = {k: v.cpu() for k, v in model_full.state_dict().items()}
 
-    # === 에피소드 누적 버퍼 (가변 길이 안전 버전) ===
     acc = {
         'train_losses':  init_accum(),
         'val_losses':    init_accum(),
@@ -1187,12 +1194,10 @@ def main():
     import numpy as _np
 
     for r in range(R):
-        # 1. 모델 리셋 & Freeze/Unfreeze 설정
         model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
         
         model_few.set_freeze_target() 
 
-        # 2. 파라미터 그룹 분리
         gat_params_few = []
         global_params_few = []
         
@@ -1202,13 +1207,7 @@ def main():
                 gat_params_few.append(p)
             else: # Global (LCG, Expert, Head)
                 global_params_few.append(p)
-
-        # 3. LR 설정 (핵심!)
-        # GAT: 1e-6 (기존 source_lr_few의 1/10) -> 아주 살살 달래기
         gat_lr_few = args.source_lr_few * 0.1 
-        
-        # Global: 1e-3 or 5e-4 (Pretrain보다 더 공격적으로) -> 빨리 적응하기
-        # few-shot LR이 너무 작으므로(1e-5), Global을 위해 50~100배 키웁니다.
         global_lr_few = args.source_lr_few * 50.0 # 0.0005
         
         logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
