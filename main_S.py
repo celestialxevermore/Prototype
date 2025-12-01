@@ -288,61 +288,78 @@ def find_optimal_threshold(y_true, y_pred):
 
 
 
-def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None):
+def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None, mode="Full"):
     """
     학습이 끝난 뒤, Test 로더에 대해 최종 성능을 측정.
-    (Dual Eval 호환 수정: Local 결과 사용)
+    [수정 사항] mode에 따라 Local(Pretrain) vs Global(Adaptation) 결과를 선택적으로 반환.
     """
-    #logger = logging.getLogger("my_experiment_logger")
+    logger = logging.getLogger("my_experiment_logger")
 
     # 1. 함수 매핑 (Dual)
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
     # 2. 평가 실행
     if is_binary:
-        # Unpack Dual Results
+        # Unpack Dual Results (Global, Local 각각 받음)
         (loss_g, true_g, pred_g), (loss_l, true_l, pred_l) = evaluate_func(model, test_loader, criterion, device)
         
-        # [선택] Global 성능도 로그에 찍어보기
-        auc_g = roc_auc_score(true_g, pred_g)
-        logger.info(f"[Test Check] Global AUC: {auc_g:.4f} (Just for Reference)")
-        
-        # 메인은 Local 결과 사용
-        test_loss = loss_g
-        y_true_test = true_g
-        y_pred_test = pred_g
-        
+        # [Case A] Target Adaptation (Few-shot) -> Global이 메인
+        if mode == 'Few':
+            test_loss = loss_g
+            y_true_test = true_g
+            y_pred_test = pred_g
+            
+            # 참고용 Local 로그
+            auc_l = roc_auc_score(true_l, pred_l)
+            logger.info(f"[Test Check] Mode={mode} (Global Selected). Local AUC: {auc_l:.4f} (Ref)")
+
+        # [Case B] Pretrain (Full) -> Local이 메인
+        else:
+            test_loss = loss_l
+            y_true_test = true_l
+            y_pred_test = pred_l
+            
+            # 참고용 Global 로그
+            auc_g = roc_auc_score(true_g, pred_g)
+            logger.info(f"[Test Check] Mode={mode} (Local Selected). Global AUC: {auc_g:.4f} (Ref)")
+
     else:
         # Multi-class (기존 로직 유지)
+        # 만약 Multi-class도 Dual Output을 낸다면 위와 똑같이 분기 처리 필요
+        # 현재는 단일 Output이라고 가정
         test_loss, y_true_test, y_pred_test = evaluate_func(model, test_loader, criterion, device)
 
-    # 3. Metric 계산 (기존 코드와 동일)
+    # 3. Metric 계산
     if is_binary:
         test_auc = roc_auc_score(y_true_test, y_pred_test)
+        
+        # Threshold 적용
         if threshold is None:
             threshold = 0.5
+        
         y_pred_test_bin = (y_pred_test > threshold).astype(int)
         
         test_precision = precision_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_recall = recall_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_f1 = f1_score(y_true_test, y_pred_test_bin, zero_division=0)
         test_acc = accuracy_score(y_true_test, y_pred_test_bin)
+        
     else:
-        # Multi-class Metrics (기존 동일)
+        # Multi-class Metrics
         n_classes = y_pred_test.shape[1]
         y_true_test_bin = label_binarize(y_true_test, classes=range(n_classes))
         test_auc = roc_auc_score(y_true_test_bin, y_pred_test, multi_class='ovr', average='macro')
+        
         preds_argmax = y_pred_test.argmax(axis=1)
         test_precision = precision_score(y_true_test, preds_argmax, average='macro', zero_division=0)
         test_recall = recall_score(y_true_test, preds_argmax, average='macro', zero_division=0)
         test_f1 = f1_score(y_true_test, preds_argmax, average='macro', zero_division=0)
         test_acc = accuracy_score(y_true_test, preds_argmax)
 
-    logger.info(f"[Test] Loss: {test_loss:.4f}, AUC: {test_auc:.4f}, ACC: {test_acc:.4f}, "
+    logger.info(f"[Test Final] Mode: {mode} | Loss: {test_loss:.4f}, AUC: {test_auc:.4f}, ACC: {test_acc:.4f}, "
                 f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
 
     return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
-    #return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
 
 
 def train_and_validate(args, model, train_loader, val_loader,
@@ -1241,7 +1258,7 @@ def main():
         # ---- 테스트 ----
         (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
          test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
-            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few
+            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few, mode='Few'
         )
 
         logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} ACC={test_acc_few:.4f} "
