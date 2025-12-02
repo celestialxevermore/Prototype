@@ -669,7 +669,7 @@ def train_and_validate(args, model, train_loader, val_loader,
 # 멀티 소스 프리트레인 (per-source patience) + 소스별 테스트 → 평균
 # -----------------------------
 def pretrain_and_eval_sources(args, model, device, sources, patience=10):
-    import shutil  # ← 추가
+    import shutil
     logger_name = "my_experiment_logger"
     logger = logging.getLogger(logger_name)
 
@@ -687,7 +687,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     # 학습은 다중 소스를 섞어서
     tr_step = make_step(trains, mode='random', seed=args.random_seed)
 
-    # 검증/테스트/개별-학습 평가용: 단일 로더를 래핑하고 src_idx "고정" 주입
+    # 검증/테스트/개별-학습 평가용
     val_steps   = [MultiSourceStepLoader([vals[i]],   mode='round', seed=args.random_seed, src_idx=i) for i in range(len(vals))]
     test_steps  = [MultiSourceStepLoader([tests[i]],  mode='round', seed=args.random_seed, src_idx=i) for i in range(len(tests))]
     train_steps = [MultiSourceStepLoader([trains[i]], mode='round', seed=args.random_seed, src_idx=i) for i in range(len(trains))]
@@ -699,15 +699,13 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         p for name, p in model.named_parameters()
         if "latent_graph" not in name and "gnn_experts" not in name and p.requires_grad
     ]
-    # lcg_params: LCG & Expert (Global) -> 정상 속도 학습 (1.0)
     lcg_params = [
         p for name, p in model.named_parameters()
         if ("latent_graph" in name or "gnn_experts" in name) and p.requires_grad
     ]
     
-    # GAT는 1e-5, Global은 1e-4
-    gat_lr = args.source_lr * 0.1  # 0.00001
-    global_lr = args.source_lr     # 0.0001
+    gat_lr = args.source_lr * 0.1 
+    global_lr = args.source_lr    
 
     logger.info(f"--- 🚀 [Phase 2] Applying Differential LR ---")
     logger.info(f"   GAT LR: {gat_lr} (Slow)")
@@ -721,112 +719,90 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         weight_decay=1e-5
     )
     
-    total_params = sum(p.numel() for group in opt.param_groups for p in group['params'])
-
     total_epochs = int(args.train_epochs)
     if total_epochs > 0:
         warmup_epochs = max(1, int(args.warmup_ratio * total_epochs))
-        scheduler_ep  = make_warmup_cosine_epochs(
-            opt,
-            total_epochs=total_epochs,
-            warmup_epochs=warmup_epochs,
-            min_lr_mult=args.min_lr_mult
-        )
+        scheduler_ep  = make_warmup_cosine_epochs(opt, total_epochs, warmup_epochs, args.min_lr_mult)
         logger.info(f"[Pretrain] LR schedule: warmup_epochs={warmup_epochs}, final_mult={args.min_lr_mult}")
     else:
         scheduler_ep = None
-        logger.info("[Pretrain] Eval-only run (train_epochs=0). Skipping LR scheduler and training loop.")
+        logger.info("[Pretrain] Eval-only run. Skipping training.")
 
     eval_fn  = binary_evaluate if is_bin else multi_evaluate
     train_fn = binary_train    if is_bin else multi_train
 
-    best_per_source = [-1.0] * len(vals)
+    # [수정 1] Mean AUC 기준을 위한 초기화
+    best_mean_auc = -1.0 
     no_improve = 0
     best_state = None
     last_best_epoch = -1
 
-
-    # === 체크포인트 디렉토리 & 파일명 (고정 이름 + 히스토리) ===
+    # === 체크포인트 설정 ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = (
-        f"ngraphs-{args.n_graphs}"
-        f"_nnodes-{args.n_nodes}"
-        f"_gdim-{args.graph_dim}"
-        f"_nbasis-{args.num_basis_layers}"
-        f"_basis-{args.basis_type}"
-        f"_attn-{args.attn_type}"
-        f"_fgw_alpha-{args.fgw_alpha}"
-        f"_vq_beta-{args.vq_beta}"
-        f"_kl_gamma-{args.kl_gamma}"
-        f"_target_data-{args.target_data}"
-        f"_description-{args.des}"
-    )
+    model_sig = (f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nbasis-{args.num_basis_layers}"
+                 f"_basis-{args.basis_type}_attn-{args.attn_type}_fgw_alpha-{args.fgw_alpha}_vq_beta-{args.vq_beta}"
+                 f"_kl_gamma-{args.kl_gamma}_target_data-{args.target_data}_description-{args.des}")
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     os.makedirs(ckpt_dir, exist_ok=True)
-    ckpt_latest = os.path.join(ckpt_dir, "best.pt")  # ← 고정 이름(재사용용)
-    ckpt_hist   = os.path.join(ckpt_dir, f"best_{experiment_id}.pt")  # ← 기록 보존용
+    ckpt_latest = os.path.join(ckpt_dir, "best.pt")
+    ckpt_hist   = os.path.join(ckpt_dir, f"best_{experiment_id}.pt")
     
-
     log_file_path = os.path.join(ckpt_dir, f"train_log_{experiment_id}.log")
     file_handler = logging.FileHandler(log_file_path)
     file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file_path for h in logger.handlers):
         logger.addHandler(file_handler)
-        logger.info(f"--- Log file initialized (Pre mode). Saving stats to: {log_file_path} ---")
+        logger.info(f"--- Log file initialized. Saving to: {log_file_path} ---")
 
-    # === 학습 루프 (total_epochs==0이면 스킵됨) ===
+    # === 학습 루프 ===
     for epoch in range(total_epochs):
         _ = train_fn(model, tr_step, crit, opt, device)
-        if scheduler_ep is not None:
-            scheduler_ep.step()
+        if scheduler_ep is not None: scheduler_ep.step()
+        
         if hasattr(model, 'current_epoch'):
             model.current_epoch = epoch + 1 
             print(model.current_epoch)
             if model.current_epoch == model.switch_epoch:
-                logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Detach OFF & Global Inference ON")
-        # val도 src_idx가 들어간 래핑 로더로 평가
+                logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Global Inference ON")
+        
         aucs_local = []
         aucs_global = []
         
-        # 각 Source별 검증 데이터 로더 순회
         for vl in val_steps:
-            # eval_fn 호출 (이제 두 쌍을 리턴함)
-            # res_g: (loss_g, true, pred_g)
-            # res_l: (loss_l, true, pred_l)
             res_g, res_l = eval_fn(model, vl, crit, device)
-            
-            # Unpack Local
             _, y_true_l, y_pred_l = res_l
-            # Unpack Global
             _, y_true_g, y_pred_g = res_g
             
-            # AUC 계산
             if is_bin:
                 score_l = roc_auc_score(y_true_l, y_pred_l)
                 score_g = roc_auc_score(y_true_g, y_pred_g)
             else:
-                # Multi-class 처리
                 n_cls = y_pred_l.shape[1]
                 y_bin_l = label_binarize(y_true_l, classes=range(n_cls))
-                y_bin_g = label_binarize(y_true_g, classes=range(n_cls)) # Global용
-                
+                y_bin_g = label_binarize(y_true_g, classes=range(n_cls))
                 score_l = roc_auc_score(y_bin_l, y_pred_l, multi_class='ovr', average='macro')
                 score_g = roc_auc_score(y_bin_g, y_pred_g, multi_class='ovr', average='macro')
-                
+            
             aucs_local.append(score_l)
             aucs_global.append(score_g)
 
-        # === Best 갱신 로직 (Local 기준) ===
+        # === [수정 2] Best 갱신 로직 (Mean 기준) ===
         improved = False
-        for i, a in enumerate(aucs_local):
-            if a > best_per_source[i]:
-                best_per_source[i] = a
-                improved = True
+        target_aucs = aucs_global if getattr(args, 'use_lcg', False) else aucs_local 
+        
+        current_lcg_status = getattr(args, 'use_lcg', False)
+        print(f"\n[DEBUG CHECK][Epoch {epoch+1}] args.use_lcg: {current_lcg_status} -> Watching: {'Global (LCG)' if current_lcg_status else 'Local (GAT)'}")
+        # 현재 평균 계산
+        current_mean_auc = float(np.mean(target_aucs))
+        
+        # 평균이 기존 최고 평균보다 높으면 저장
+        if current_mean_auc > best_mean_auc:
+            best_mean_auc = current_mean_auc
+            improved = True
 
-        # === Dual Logging (핵심!) ===
+        # === Logging ===
         mean_auc_l = float(np.mean(aucs_local))
         mean_auc_g = float(np.mean(aucs_global))
         
@@ -836,39 +812,37 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
             f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
         )
         logger.info(log_msg)
+        
         if improved:
             best_state = model.state_dict()
             last_best_epoch = epoch
             no_improve = 0
-            # 저장: 최신 고정 파일 + 히스토리 파일
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
-                
-                # [수정] 변수명을 mean_auc_l, aucs_local로 변경
-                'val_auc_mean': mean_auc_l, 
-                'val_aucs_per_source': aucs_local,
-                
+                # 저장되는 메타데이터도 Mean 값으로 기록
+                'val_auc_mean': best_mean_auc, 
+                'val_aucs_per_source': target_aucs,
                 'args': args
             }, ckpt_latest)
             try:
                 shutil.copyfile(ckpt_latest, ckpt_hist)
             except Exception as e:
-                logger.warning(f"[Pretrain] history copy failed: {e}")
+                logger.warning(f"History copy failed: {e}")
         else:
             if epoch + 1 > warmup_epochs: 
                 no_improve += 1 
             else: 
                 no_improve = 0 
             if no_improve >= patience : 
-                logger.info(f"[Pre] Early stop at epoch {epoch+1} (no improvement for {patience} epochs)")
+                logger.info(f"Early stop at epoch {epoch+1}")
                 break
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     # -----------------------------
-    # 소스별 threshold 산출(Val) → train/val/test 지표 계산
+    # 최종 리포트 (소스별 threshold 산출 -> train/val/test 지표)
     # -----------------------------
     per_train_loss, per_val_loss, per_test_loss = [], [], []
     per_train_auc,  per_val_auc,  per_test_auc  = [], [], []
@@ -881,15 +855,17 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
     all_y_pred_full_list = []
 
     for i in range(len(sources)):
-        # ---- val (threshold 산출) ----
-        _ , (val_loss_i, y_true_val_i, y_pred_val_i) = eval_fn(model, val_steps[i], crit, device)
+        # <--- [확인] Global 결과 우선 (res_g)
+        (val_loss_i, y_true_val_i, y_pred_val_i), _ = eval_fn(model, val_steps[i], crit, device)
+        
         if is_bin:
             thr_i = find_optimal_threshold(y_true_val_i, y_pred_val_i)
         else:
             thr_i = None
 
-        # ---- train 성능 ----
-        _, (train_loss_i, y_true_tr_i, y_pred_tr_i) = eval_fn(model, train_steps[i], crit, device)
+        # Train
+        (train_loss_i, y_true_tr_i, y_pred_tr_i), _ = eval_fn(model, train_steps[i], crit, device)
+        
         if is_bin:
             train_auc_i = roc_auc_score(y_true_tr_i, y_pred_tr_i)
             y_bin_tr = (y_pred_tr_i > thr_i).astype(int)
@@ -907,7 +883,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
             train_f1_i        = f1_score(y_true_tr_i, preds_tr, average='macro', zero_division=0)
             train_acc_i       = accuracy_score(y_true_tr_i, preds_tr)
 
-        # ---- val 성능 ----
+        # Val
         if is_bin:
             val_auc_i = roc_auc_score(y_true_val_i, y_pred_val_i)
             y_bin_val = (y_pred_val_i > thr_i).astype(int)
@@ -925,8 +901,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
             val_f1_i        = f1_score(y_true_val_i, preds_val, average='macro', zero_division=0)
             val_acc_i       = accuracy_score(y_true_val_i, preds_val)
 
-        # ---- test 성능 ----
-        _, (test_loss_i, y_true_te_i, y_pred_te_i) = eval_fn(model, test_steps[i], crit, device)
+        # Test
+        (test_loss_i, y_true_te_i, y_pred_te_i), _ = eval_fn(model, test_steps[i], crit, device)
+        
         if is_bin:
             test_auc_i = roc_auc_score(y_true_te_i, y_pred_te_i)
             y_bin_te = (y_pred_te_i > thr_i).astype(int)
@@ -952,38 +929,30 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         per_train_f1.append(train_f1_i);               per_val_f1.append(val_f1_i);               per_test_f1.append(test_f1_i)
         per_train_acc.append(train_acc_i);             per_val_acc.append(val_acc_i);             per_test_acc.append(test_acc_i)
 
-        # concat for all_y (Full 결과 저장용)
         all_y_true_full_list.append(y_true_te_i)
         all_y_pred_full_list.append(y_pred_te_i)
 
-    # 평균 집계 (Full 파트)
+    # 평균 집계
     train_losses_full = [float(np.mean(per_train_loss))]
     val_losses_full   = [float(np.mean(per_val_loss))]
     test_losses_full  = [float(np.mean(per_test_loss))]
-
     train_aucs_full = [float(np.mean(per_train_auc))]
     val_aucs_full   = [float(np.mean(per_val_auc))]
     test_auc_full   = float(np.mean(per_test_auc))
-
     train_precisions_full = [float(np.mean(per_train_precision))]
     val_precisions_full   = [float(np.mean(per_val_precision))]
     test_precision_full   = float(np.mean(per_test_precision))
-
     train_recalls_full = [float(np.mean(per_train_recall))]
     val_recalls_full   = [float(np.mean(per_val_recall))]
     test_recall_full   = float(np.mean(per_test_recall))
-
     train_f1s_full = [float(np.mean(per_train_f1))]
     val_f1s_full   = [float(np.mean(per_val_f1))]
     test_f1_full   = float(np.mean(per_test_f1))
-
     train_accs_full = [float(np.mean(per_train_acc))]
     val_accs_full   = [float(np.mean(per_val_acc))]
     test_acc_full   = float(np.mean(per_test_acc))
-
     all_y_true_full = np.concatenate(all_y_true_full_list, axis=0)
     all_y_pred_full = np.concatenate(all_y_pred_full_list, axis=0)
-
     best_epoch_full = last_best_epoch
 
     full_pack = dict(
@@ -1125,7 +1094,7 @@ def main():
         logger.info(f"\n{'='*40}\n>>> [Bridge] Initializing LCG from Pre-trained CLS\n{'='*40}")
         init_lcg(
             args, model_full, all_loaders, device, 
-            strategy='round_robin', injection_scale=0.1
+            strategy=args.lcg_strategy, injection_scale=0.1
         )
 
         # --- [Step 3] Phase 2: Joint Training ---
@@ -1208,7 +1177,7 @@ def main():
             else: # Global (LCG, Expert, Head)
                 global_params_few.append(p)
         gat_lr_few = args.source_lr_few * 0.1 
-        global_lr_few = args.source_lr_few * 50.0 # 0.0005
+        global_lr_few = args.source_lr_few #* 50.0 # 0.0005
         
         logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
 
@@ -1219,8 +1188,8 @@ def main():
             ],
             weight_decay=3e-5
         )
-        #warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
-        warmup_epochs_few = 0 
+        warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
+        #warmup_epochs_few = 0 
         scheduler_few = make_warmup_cosine_epochs(
             optimizer_few,
             total_epochs=args.train_epochs,

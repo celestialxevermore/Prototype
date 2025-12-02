@@ -121,23 +121,12 @@ class Model(nn.Module):
                     nn_init.zeros_(m.bias)
 
     def set_freeze_target(self):
-        for p in self.parameters(): p.requires_grad = False
+        for p in self.parameters(): p.requires_grad = True
         for p in self.latent_graph.parameters(): p.requires_grad = True
         for p in self.graph_quantizer.parameters(): p.requires_grad = True
         for p in self.gnn_experts.parameters(): p.requires_grad = True
         for p in self.ghead2.parameters(): p.requires_grad = True
         for p in self.thead.parameters(): p.requires_grad = True
-
-    @torch.no_grad()
-    def update_lcg_ema(self):
-        if not self.use_ema:
-            return 
-        msd = self.latent_graph.state_dict() 
-        esd = self.latent_graph_ema.state_dict() 
-        for key in msd:
-            esd[key].data.mul_(self.ema_decay)
-            esd[key].data.add_(msd[key].data * (1 - self.ema_decay))
-    
     # ---- training ----
     def forward(self, batch, y):
         total_loss = 0.0 
