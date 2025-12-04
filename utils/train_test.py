@@ -77,25 +77,25 @@ def binary_evaluate(model, loader, criterion, device):
     # 항상 2개 튜플 리턴 (Unpacking 에러 방지)
     return res_g, res_l
 
-# def binary_evaluate(model, loader, criterion, device):
-#     model.eval()
-#     test_loss = 0
-#     y_true, y_pred = [], []
+def binary_evaluate_(model, loader, criterion, device):
+    model.eval()
+    test_loss = 0
+    y_true, y_pred = [], []
     
-#     #print(f"Dataloader length: {len(loader)}")
+    #print(f"Dataloader length: {len(loader)}")
     
-#     with torch.no_grad():
-#         for batch in loader:
-#             pred = model.predict(batch)
-#             loss = model(batch, batch['y'])
+    with torch.no_grad():
+        for batch in loader:
+            pred = model.predict(batch)
+            loss = model(batch, batch['y'])
             
-#             test_loss += loss.item() * len(batch['y'])
+            test_loss += loss.item() * len(batch['y'])
             
-#             y_true.extend(batch['y'].cpu().numpy())
-#             y_pred.extend(torch.sigmoid(pred).cpu().numpy())
+            y_true.extend(batch['y'].cpu().numpy())
+            y_pred.extend(torch.sigmoid(pred).cpu().numpy())
     
-#     test_loss /= len(loader.dataset)
-#     return test_loss, np.array(y_true), np.array(y_pred)
+    test_loss /= len(loader.dataset)
+    return test_loss, np.array(y_true), np.array(y_pred)
 
 
 def multi_train(model, train_loader, criterion, optimizer, device):

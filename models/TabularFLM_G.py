@@ -12,7 +12,6 @@ from models.coordinate import CoordinatorMLP
 from models.LCG import LatentCompositeGraph, GraphQuantizer 
 from models.LCGGNN import LatentCompositeGNN
 from models.BasisGraphAttention import BasisGATLayer_MUL, BasisGATLayer_IND
-import copy
 logger = logging.getLogger(__name__)
 
 
@@ -32,48 +31,39 @@ class Model(nn.Module):
         self.num_classes  = args.num_classes
         self.n_graphs = self.args.n_graphs
         self.graph_dim = self.args.graph_dim
-        self.num_basis_layers = args.num_basis_layers
-        self.alpha = self.args.alpha 
-        self.eps = self.args.eps
+        
+        # CLS
         self.basis_cls = nn.Parameter(Tensor(1,1,self.input_dim))
         nn.init.uniform_(self.basis_cls, a=-1/math.sqrt(self.input_dim), b=1/math.sqrt(self.input_dim))
-        self.switch_epoch = 40
-        self.current_epoch = 0
-        self.use_ema = getattr(args, 'ema', False)
-        self.ema_decay = 0.999
-        if self.use_ema:
-            self.latent_graph_ema = copy.deepcopy(self.latent_graph)
-            for p in self.latent_graph_ema.parameters():
-                p.requires_grad = False 
-            print(">>> [Model] EMA Enabled for LCG.")
-        else: 
-            self.latent_graph_ema = None 
-        #---- Latent Composite Graph Components ---- 
-        # (1) LatentCompositeGraph : learnable latent composite graphs (codebook)
-        self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
-        
-        # (2) GraphQuantizer : FGW-based quantization module 
-        self.graph_quantizer = GraphQuantizer(args, alpha = self.alpha, eps = self.eps)
+        self.num_basis_layers = args.num_basis_layers
 
-        # (3) LatentCompositeGNN : Head-wise message passing + readout 
-        self.gnn_experts = LatentCompositeGNN(
-            args,input_dim = self.input_dim, hidden_dim = self.hidden_dim, dropout = self.dropout_rate
-        ) 
+        # ---- Latent Composite Graph Components ---- 
+        # (1) LatentCompositeGraph : learnable latent composite graphs (codebook)
+        # self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
+        # # (2) GraphQuantizer : FGW-based quantization module 
+        # self.graph_quantizer = GraphQuantizer(args, alpha = 0.9, eps = 0.1)
+
+        # # (3) LatentCompositeGNN : Head-wise message passing + readout 
+        # self.gnn_experts = LatentCompositeGNN(
+        #     args,input_dim = self.input_dim // args.num_basis_heads, hidden_dim = self.hidden_dim, num_basis_heads = args.num_basis_heads, dropout = self.dropout_rate
+        # ) 
 
         if args.basis_type == 'mul':
             self.basis_layers = nn.ModuleList([ 
-                BasisGATLayer_MUL(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = 1 , dropout = self.dropout_rate)
+                BasisGATLayer_MUL(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = args.num_basis_heads, dropout = self.dropout_rate)
                 for _ in range(self.num_basis_layers)
             ])
         elif args.basis_type == 'ind':
             self.basis_layers = nn.ModuleList([ 
-                BasisGATLayer_IND(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = 1, dropout = self.dropout_rate)
+                BasisGATLayer_IND(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = args.num_basis_heads, dropout = self.dropout_rate)
                 for _ in range(self.num_basis_layers)
             ])
         self.basis_layer_norms = nn.ModuleList([ 
             nn.LayerNorm(self.input_dim) for _ in range(self.num_basis_layers)
         ])
 
+        # Coordinator (weights over heads/bases)
+        self.coordinator = CoordinatorMLP(args, self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
 
         # Source/Target residual heads (on CLS)
         self.n_src = len(args.source_data) if isinstance(args.source_data, (list, tuple)) else 1
@@ -102,15 +92,11 @@ class Model(nn.Module):
             nn.Dropout(self.dropout_rate),
             nn.Linear(hid, self.output_dim),
         )
-        self.ghead2 = nn.Sequential(
-            nn.LayerNorm(self.input_dim),
-            nn.Linear(self.input_dim, hid),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_rate),
-            nn.Linear(hid, self.output_dim),
-        )
+
         # Loss
         self.criterion = nn.BCEWithLogitsLoss() if self.num_classes == 2 else nn.CrossEntropyLoss()
+
+        # init (Linear only)
         self._init_weights()
 
     def _init_weights(self):
@@ -120,13 +106,16 @@ class Model(nn.Module):
                 if m.bias is not None:
                     nn_init.zeros_(m.bias)
 
+    # Few-shot freeze policy
     def set_freeze_target(self):
-        for p in self.parameters(): p.requires_grad = True
-        for p in self.latent_graph.parameters(): p.requires_grad = True
-        for p in self.graph_quantizer.parameters(): p.requires_grad = True
-        for p in self.gnn_experts.parameters(): p.requires_grad = True
-        for p in self.ghead2.parameters(): p.requires_grad = True
-        for p in self.thead.parameters(): p.requires_grad = True
+        for p in self.parameters():
+            p.requires_grad = False
+        for ln in self.basis_layer_norms:
+            for p in ln.parameters():
+                p.requires_grad = True
+        for p in self.thead.parameters():
+            p.requires_grad = True
+        
     # ---- training ----
     def forward(self, batch, y):
         total_loss = 0.0 
@@ -135,27 +124,19 @@ class Model(nn.Module):
             target = target.view(-1, 1).float()
         else:
             target = target.squeeze().long()
-        # ----
-        # [Phase 1] Vanilla GAT 
-        # ---- 
-        if not getattr(self.args, 'use_lcg', False):
-            local_pred = self.predict(batch)
-            return self.criterion(local_pred, target)
-        else:
-            global_pred, local_pred = self.predict(batch, return_all = True) 
-            local_loss = self.criterion(local_pred, target)
-            global_loss = self.criterion(global_pred, target)
 
-            fgw_loss = self.fgw_loss 
-            current_mode = getattr(self, 'mode', 'Full')
-            if current_mode == 'Few':
-                total_loss = global_loss + (self.args.fgw_alpha * fgw_loss)
-            else: 
-                total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss)
-            return total_loss
+        # === Predict ===
+        local_pred = self.predict(batch)
+
+        # === Local output ===        
+        # === 3. Base Classification losses === 
+        local_loss = self.criterion(local_pred, target)
+        total_loss = local_loss         
+        return total_loss
+
 
     # ---- inference ----
-    def predict(self, batch, return_all = False):
+    def predict(self, batch):
         # gather
         desc_embeddings, name_embeddings, value_embeddings = [], [], []
         if all(k in batch for k in ['cat_name_embeddings', 'cat_value_embeddings', 'cat_desc_embeddings']):
@@ -169,10 +150,13 @@ class Model(nn.Module):
 
         if not desc_embeddings or not name_embeddings or not value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
+        desc = torch.cat(desc_embeddings, dim = 1)  # [B,S,D]
         name   = torch.cat(name_embeddings, dim = 1)
         value = torch.cat(value_embeddings, dim = 1)
 
+
         # (3) basis GAT stack ---- 
+        
         x_basis  = torch.cat([self.basis_cls.expand(value.size(0), 1, self.input_dim), value], dim=1)
         last_att = None
         for l in range(self.num_basis_layers):
@@ -181,49 +165,19 @@ class Model(nn.Module):
             x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), self.input_dim)
             last_att = att
         self.x_basis = x_basis
+        if last_att is not None:
+            self._last_P_basis = last_att[:, :, 1:, 1:] # P_affinity 
+        # (4) FGW-based quantization ---- 
         self.basis_outputs_for_viz = basis_outputs
 
+        # (8) Classificaion heads ---- 
         local_output = x_basis[:, 0, :]
-        if 'src_idx' in batch: 
+        if 'src_idx' in batch:
             local_pred = self.sheads[int(batch['src_idx'])](local_output)
         elif getattr(self.args, 'use_target_head', False):
             local_pred = self.thead(local_output)
         else:
             local_pred = self.thead(local_output)
-        self._last_local_pred = local_pred 
+        self._last_local_pred = local_pred
 
-        # ==== 
-        # [Bridge]
-        # ==== 
-        # [Phase 1] Vanilla GAT 
-        if not getattr(self.args, 'use_lcg', False):
-            return local_pred 
-        else:
-            if last_att is not None:
-                self._last_P_basis = 1.0 - last_att[:, 0, 1:, 1:]
-            else:
-                B, N = value.shape[:2]
-                self._last_P_basis = torch.zeros(B, N, N, device = self.device)
-            lcg_feat, lcg_struct = self.latent_graph() 
-
-            q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
-            source_struct = self._last_P_basis, 
-            source_feat = self.x_basis[:, 1:, :], 
-            lcg_struct = lcg_struct, 
-            lcg_feat = lcg_feat, 
-            batch = batch
-        )
-        self.fgw_loss = fgw_loss
-
-        expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
-        expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
-        current_mode = getattr(self, 'mode', 'Full')
-        print(f"current mode : {current_mode}")
-        if current_mode == 'Few':
-            global_pred = self.ghead2(expert_outputs)
-        else:
-            global_pred = self.ghead(expert_outputs)
-        if self.training or return_all:
-            return global_pred, local_pred 
-        else:
-            return global_pred
+        return local_pred
