@@ -53,7 +53,6 @@ class LatentCompositeGraph(nn.Module):
             # 1. Projection
             Q = self.q_proj(self.node_embeddings)
             K = self.k_proj(self.node_embeddings)
-            scale_factor = math.sqrt(self.struct_dim)
             scores = torch.matmul(Q, K.transpose(-2, -1)) / 10.0
             attn = torch.softmax(scores, dim = -1)
             return 1.0 - attn 

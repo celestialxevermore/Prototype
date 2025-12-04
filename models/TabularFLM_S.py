@@ -218,7 +218,6 @@ class Model(nn.Module):
         expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
         expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
         current_mode = getattr(self, 'mode', 'Full')
-        print(f"current mode : {current_mode}")
         if current_mode == 'Few':
             global_pred = self.ghead2(expert_outputs)
         else:
