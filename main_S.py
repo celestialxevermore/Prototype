@@ -855,170 +855,244 @@ def main():
     is_binary_t = (args.num_classes == 2)
     crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
 
-    # 7) Few-shot: support 재샘플링 R회 에피소드 평균
-    R = int(getattr(args, 'support_resamples', 1))
-    logger.info(f"[Few-shot] support resamples R = {R}")
-
-    base_state_cpu = {k: v.cpu() for k, v in model_full.state_dict().items()}
-
-    # === 에피소드 누적 버퍼 (가변 길이 안전 버전) ===
-    acc = {
-        'train_losses':  init_accum(),
-        'val_losses':    init_accum(),
-        'train_aucs':    init_accum(),
-        'val_aucs':      init_accum(),
-        'train_precs':   init_accum(),
-        'val_precs':     init_accum(),
-        'train_recalls': init_accum(),
-        'val_recalls':   init_accum(),
-        'train_f1s':     init_accum(),
-        'val_f1s':       init_accum(),
-        'train_accs':    init_accum(),
-        'val_accs':      init_accum(),
-    }
-    ep_best_epochs = []
-    ep_test_metrics = []  # (loss, auc, prec, rec, f1, acc)
-    y_true_last, y_pred_last = None, None
-
-    import numpy as _np
-
-    for r in range(R):
-        # ---- 모델/옵티마이저 리셋 ----
-        model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
-        model_few.set_freeze_target()
-
-        optimizer_few = optim.Adam(
-            (p for p in model_few.parameters() if p.requires_grad),
-            lr=args.source_lr_few,
-            weight_decay=3e-5
-        )
-        warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
-        scheduler_few = make_warmup_cosine_epochs(
-            optimizer_few,
-            total_epochs=args.train_epochs,
-            warmup_epochs=warmup_epochs_few,
-            min_lr_mult=args.min_lr_mult
-        )
-        logger.info(f"[Few-shot][Ep {r+1}] LR schedule: warmup_epochs={warmup_epochs_few}, final_mult={args.min_lr_mult}")
-
-        # ---- support 재샘플: reproducible하게 시드만 살짝 변경 ----
-        seed_bak = args.random_seed
-        args.random_seed = seed_bak + (r + 1)
-        fix_seed(args.random_seed)
-
-        if args.few_shot > 0:
-            train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
+    # ===== Zero-shot 처리 =====
+    if args.few_shot == 0:
+        logger.info("[Zero-shot] Evaluating pretrained model directly on target test set...")
+        
+        evaluate_func = binary_evaluate if is_binary_t else multi_evaluate
+        
+        # Validation set에서 threshold 결정
+        _, y_true_val, y_pred_val = evaluate_func(model_full, val_loader_t, crit_t, device)
+        
+        if is_binary_t:
+            best_threshold_zero = find_optimal_threshold(y_true_val, y_pred_val)
         else:
-            train_loader_epi = train_loader_t
-
-        # 시드 복원
-        args.random_seed = seed_bak
-        fix_seed(args.random_seed)
-
-        # ---- few-shot 학습/검증 ----
-        (train_losses_few, val_losses_few,
-         train_aucs_few,   val_aucs_few,
-         train_precisions_few, val_precisions_few,
-         train_recalls_few,    val_recalls_few,
-         train_f1s_few,        val_f1s_few,
-         train_accs_few,       val_accs_few,
-         best_epoch_few, best_val_auc_few, best_threshold_few
-        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
-
-        # ---- 테스트 ----
-        (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
-         test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
-            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few
+            best_threshold_zero = None
+        
+        # Test set 평가
+        (test_loss_zero, test_auc_zero, test_precision_zero, test_recall_zero, 
+         test_f1_zero, test_acc_zero, all_y_true_zero, all_y_pred_zero
+        ) = final_test_evaluate(
+            model_full, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_zero
         )
-
-        logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} ACC={test_acc_few:.4f} "
-                    f"Prec={test_precision_few:.4f} Rec={test_recall_few:.4f} F1={test_f1_few:.4f}")
-
-        # ---- 누적 합 (가변 길이 안전) ----
-        acc['train_losses']  = accum(acc['train_losses'],  train_losses_few)
-        acc['val_losses']    = accum(acc['val_losses'],    val_losses_few)
-        acc['train_aucs']    = accum(acc['train_aucs'],    train_aucs_few)
-        acc['val_aucs']      = accum(acc['val_aucs'],      val_aucs_few)
-        acc['train_precs']   = accum(acc['train_precs'],   train_precisions_few)
-        acc['val_precs']     = accum(acc['val_precs'],     val_precisions_few)
-        acc['train_recalls'] = accum(acc['train_recalls'], train_recalls_few)
-        acc['val_recalls']   = accum(acc['val_recalls'],   val_recalls_few)
-        acc['train_f1s']     = accum(acc['train_f1s'],     train_f1s_few)
-        acc['val_f1s']       = accum(acc['val_f1s'],       val_f1s_few)
-        acc['train_accs']    = accum(acc['train_accs'],    train_accs_few)
-        acc['val_accs']      = accum(acc['val_accs'],      val_accs_few)
-
-        ep_best_epochs.append(best_epoch_few)
-        ep_test_metrics.append((test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few, test_acc_few))
-
-        y_true_last, y_pred_last = all_y_true_few, all_y_pred_few  # 마지막 에피소드 저장
-
-    # ---- 에피소드 평균(시드 내부 평균) ----
-    train_losses_few_mean = finalize_mean(acc['train_losses'])
-    val_losses_few_mean   = finalize_mean(acc['val_losses'])
-    train_aucs_few_mean   = finalize_mean(acc['train_aucs'])
-    val_aucs_few_mean     = finalize_mean(acc['val_aucs'])
-    train_precs_few_mean  = finalize_mean(acc['train_precs'])
-    val_precs_few_mean    = finalize_mean(acc['val_precs'])
-    train_recalls_few_mean= finalize_mean(acc['train_recalls'])
-    val_recalls_few_mean  = finalize_mean(acc['val_recalls'])
-    train_f1s_few_mean    = finalize_mean(acc['train_f1s'])
-    val_f1s_few_mean      = finalize_mean(acc['val_f1s'])
-    train_accs_few_mean   = finalize_mean(acc['train_accs'])
-    val_accs_few_mean     = finalize_mean(acc['val_accs'])
-
-    ep_arr = _np.asarray(ep_test_metrics, dtype=_np.float32)  # [R, 6]
-    mean_test_loss, mean_test_auc, mean_test_prec, mean_test_rec, mean_test_f1, mean_test_acc = ep_arr.mean(axis=0).tolist()
-    Rf = float(max(len(ep_best_epochs), 1))
-    best_epoch_few_mean = int(round(sum(ep_best_epochs) / Rf))
-
-    # 8) 결과 래핑 (소스 리포트는 4샷일 때만 존재)
-    if full_metrics is not None:
-        full_ours_results = wrap_up_results_(
-            train_losses=full_metrics['train_losses_full'],
-            val_losses=full_metrics['val_losses_full'],
-            test_losses=full_metrics['test_losses_full'],
-            train_aucs=full_metrics['train_aucs_full'],
-            val_aucs=full_metrics['val_aucs_full'],
-            test_aucs=[full_metrics['test_auc_full']],
-            train_precisions=full_metrics['train_precisions_full'],
-            val_precisions=full_metrics['val_precisions_full'],
-            test_precisions=[full_metrics['test_precision_full']],
-            train_recalls=full_metrics['train_recalls_full'],
-            val_recalls=full_metrics['val_recalls_full'],
-            test_recalls=[full_metrics['test_recall_full']],
-            train_f1s=full_metrics['train_f1s_full'],
-            val_f1s=full_metrics['val_f1s_full'],
-            test_f1s=[full_metrics['test_f1_full']],
-            all_y_true=[full_metrics['all_y_true_full']],
-            all_y_pred=[full_metrics['all_y_pred_full']],
-            best_epoch=full_metrics['best_epoch_full'],
-            best_ours_auc=full_metrics['test_auc_full'],
-            best_ours_acc=full_metrics['test_acc_full'],
-            best_ours_precision=full_metrics['test_precision_full'],
-            best_ours_recall=full_metrics['test_recall_full'],
-            best_ours_f1=full_metrics['test_f1_full'],
-            train_accs=full_metrics['train_accs_full'],
-            val_accs=full_metrics['val_accs_full'],
-            test_accs=[full_metrics['test_acc_full']]
+        
+        logger.info(f"[Zero-shot] Test Results: "
+                   f"AUC={test_auc_zero:.4f} ACC={test_acc_zero:.4f} "
+                   f"Prec={test_precision_zero:.4f} Rec={test_recall_zero:.4f} F1={test_f1_zero:.4f}")
+        
+        # 결과 래핑
+        if full_metrics is not None:
+            full_ours_results = wrap_up_results_(
+                train_losses=full_metrics['train_losses_full'],
+                val_losses=full_metrics['val_losses_full'],
+                test_losses=full_metrics['test_losses_full'],
+                train_aucs=full_metrics['train_aucs_full'],
+                val_aucs=full_metrics['val_aucs_full'],
+                test_aucs=[full_metrics['test_auc_full']],
+                train_precisions=full_metrics['train_precisions_full'],
+                val_precisions=full_metrics['val_precisions_full'],
+                test_precisions=[full_metrics['test_precision_full']],
+                train_recalls=full_metrics['train_recalls_full'],
+                val_recalls=full_metrics['val_recalls_full'],
+                test_recalls=[full_metrics['test_recall_full']],
+                train_f1s=full_metrics['train_f1s_full'],
+                val_f1s=full_metrics['val_f1s_full'],
+                test_f1s=[full_metrics['test_f1_full']],
+                all_y_true=[full_metrics['all_y_true_full']],
+                all_y_pred=[full_metrics['all_y_pred_full']],
+                best_epoch=full_metrics['best_epoch_full'],
+                best_ours_auc=full_metrics['test_auc_full'],
+                best_ours_acc=full_metrics['test_acc_full'],
+                best_ours_precision=full_metrics['test_precision_full'],
+                best_ours_recall=full_metrics['test_recall_full'],
+                best_ours_f1=full_metrics['test_f1_full'],
+                train_accs=full_metrics['train_accs_full'],
+                val_accs=full_metrics['val_accs_full'],
+                test_accs=[full_metrics['test_acc_full']]
+            )
+        else:
+            full_ours_results = None
+        
+        zero_shot_results = wrap_up_results_(
+            train_losses=[], val_losses=[], test_losses=[],
+            train_aucs=[], val_aucs=[], test_aucs=[test_auc_zero],
+            train_precisions=[], val_precisions=[], test_precisions=[test_precision_zero],
+            train_recalls=[], val_recalls=[], test_recalls=[test_recall_zero],
+            train_f1s=[], val_f1s=[], test_f1s=[test_f1_zero],
+            all_y_true=[all_y_true_zero], all_y_pred=[all_y_pred_zero],
+            best_epoch=0, best_ours_auc=test_auc_zero, best_ours_acc=test_acc_zero,
+            best_ours_precision=test_precision_zero, best_ours_recall=test_recall_zero,
+            best_ours_f1=test_f1_zero,
+            train_accs=[], val_accs=[], test_accs=[test_acc_zero]
         )
+        
+        results = prepare_results_(full_ours_results, zero_shot_results)
+        
     else:
-        full_ours_results = None
+        # 7) Few-shot: support 재샘플링 R회 에피소드 평균
+        R = int(getattr(args, 'support_resamples', 1))
+        logger.info(f"[Few-shot] support resamples R = {R}")
 
-    few_ours_results = wrap_up_results_(
-        train_losses_few_mean, val_losses_few_mean, [],
-        train_aucs_few_mean,   val_aucs_few_mean,   [mean_test_auc],
-        train_precs_few_mean,  val_precs_few_mean,  [mean_test_prec],
-        train_recalls_few_mean,val_recalls_few_mean,[mean_test_rec],
-        train_f1s_few_mean,    val_f1s_few_mean,    [mean_test_f1],
-        [y_true_last], [y_pred_last],
-        best_epoch_few_mean, mean_test_auc, mean_test_acc,
-        mean_test_prec, mean_test_rec, mean_test_f1,
-        train_accs=train_accs_few_mean, val_accs=val_accs_few_mean, test_accs=[mean_test_acc]
-    )
+        base_state_cpu = {k: v.cpu() for k, v in model_full.state_dict().items()}
 
-    results = prepare_results_(full_ours_results, few_ours_results)
+        # === 에피소드 누적 버퍼 (가변 길이 안전 버전) ===
+        acc = {
+            'train_losses':  init_accum(),
+            'val_losses':    init_accum(),
+            'train_aucs':    init_accum(),
+            'val_aucs':      init_accum(),
+            'train_precs':   init_accum(),
+            'val_precs':     init_accum(),
+            'train_recalls': init_accum(),
+            'val_recalls':   init_accum(),
+            'train_f1s':     init_accum(),
+            'val_f1s':       init_accum(),
+            'train_accs':    init_accum(),
+            'val_accs':      init_accum(),
+        }
+        ep_best_epochs = []
+        ep_test_metrics = []  # (loss, auc, prec, rec, f1, acc)
+        y_true_last, y_pred_last = None, None
+
+        import numpy as _np
+
+        for r in range(R):
+            # ---- 모델/옵티마이저 리셋 ----
+            model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
+            model_few.set_freeze_target()
+
+            optimizer_few = optim.Adam(
+                (p for p in model_few.parameters() if p.requires_grad),
+                lr=args.source_lr_few,
+                weight_decay=3e-5
+            )
+            warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
+            scheduler_few = make_warmup_cosine_epochs(
+                optimizer_few,
+                total_epochs=args.train_epochs,
+                warmup_epochs=warmup_epochs_few,
+                min_lr_mult=args.min_lr_mult
+            )
+            logger.info(f"[Few-shot][Ep {r+1}] LR schedule: warmup_epochs={warmup_epochs_few}, final_mult={args.min_lr_mult}")
+
+            # ---- support 재샘플: reproducible하게 시드만 살짝 변경 ----
+            seed_bak = args.random_seed
+            args.random_seed = seed_bak + (r + 1)
+            fix_seed(args.random_seed)
+
+            if args.few_shot > 0:
+                train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
+            else:
+                train_loader_epi = train_loader_t
+
+            # 시드 복원
+            args.random_seed = seed_bak
+            fix_seed(args.random_seed)
+
+            # ---- few-shot 학습/검증 ----
+            (train_losses_few, val_losses_few,
+             train_aucs_few,   val_aucs_few,
+             train_precisions_few, val_precisions_few,
+             train_recalls_few,    val_recalls_few,
+             train_f1s_few,        val_f1s_few,
+             train_accs_few,       val_accs_few,
+             best_epoch_few, best_val_auc_few, best_threshold_few
+            ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
+                                   optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+
+            # ---- 테스트 ----
+            (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
+             test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
+                model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few
+            )
+
+            logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} ACC={test_acc_few:.4f} "
+                        f"Prec={test_precision_few:.4f} Rec={test_recall_few:.4f} F1={test_f1_few:.4f}")
+
+            # ---- 누적 합 (가변 길이 안전) ----
+            acc['train_losses']  = accum(acc['train_losses'],  train_losses_few)
+            acc['val_losses']    = accum(acc['val_losses'],    val_losses_few)
+            acc['train_aucs']    = accum(acc['train_aucs'],    train_aucs_few)
+            acc['val_aucs']      = accum(acc['val_aucs'],      val_aucs_few)
+            acc['train_precs']   = accum(acc['train_precs'],   train_precisions_few)
+            acc['val_precs']     = accum(acc['val_precs'],     val_precisions_few)
+            acc['train_recalls'] = accum(acc['train_recalls'], train_recalls_few)
+            acc['val_recalls']   = accum(acc['val_recalls'],   val_recalls_few)
+            acc['train_f1s']     = accum(acc['train_f1s'],     train_f1s_few)
+            acc['val_f1s']       = accum(acc['val_f1s'],       val_f1s_few)
+            acc['train_accs']    = accum(acc['train_accs'],    train_accs_few)
+            acc['val_accs']      = accum(acc['val_accs'],      val_accs_few)
+
+            ep_best_epochs.append(best_epoch_few)
+            ep_test_metrics.append((test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few, test_acc_few))
+
+            y_true_last, y_pred_last = all_y_true_few, all_y_pred_few  # 마지막 에피소드 저장
+
+        # ---- 에피소드 평균(시드 내부 평균) ----
+        train_losses_few_mean = finalize_mean(acc['train_losses'])
+        val_losses_few_mean   = finalize_mean(acc['val_losses'])
+        train_aucs_few_mean   = finalize_mean(acc['train_aucs'])
+        val_aucs_few_mean     = finalize_mean(acc['val_aucs'])
+        train_precs_few_mean  = finalize_mean(acc['train_precs'])
+        val_precs_few_mean    = finalize_mean(acc['val_precs'])
+        train_recalls_few_mean= finalize_mean(acc['train_recalls'])
+        val_recalls_few_mean  = finalize_mean(acc['val_recalls'])
+        train_f1s_few_mean    = finalize_mean(acc['train_f1s'])
+        val_f1s_few_mean      = finalize_mean(acc['val_f1s'])
+        train_accs_few_mean   = finalize_mean(acc['train_accs'])
+        val_accs_few_mean     = finalize_mean(acc['val_accs'])
+
+        ep_arr = _np.asarray(ep_test_metrics, dtype=_np.float32)  # [R, 6]
+        mean_test_loss, mean_test_auc, mean_test_prec, mean_test_rec, mean_test_f1, mean_test_acc = ep_arr.mean(axis=0).tolist()
+        Rf = float(max(len(ep_best_epochs), 1))
+        best_epoch_few_mean = int(round(sum(ep_best_epochs) / Rf))
+
+        # 8) 결과 래핑 (소스 리포트는 4샷일 때만 존재)
+        if full_metrics is not None:
+            full_ours_results = wrap_up_results_(
+                train_losses=full_metrics['train_losses_full'],
+                val_losses=full_metrics['val_losses_full'],
+                test_losses=full_metrics['test_losses_full'],
+                train_aucs=full_metrics['train_aucs_full'],
+                val_aucs=full_metrics['val_aucs_full'],
+                test_aucs=[full_metrics['test_auc_full']],
+                train_precisions=full_metrics['train_precisions_full'],
+                val_precisions=full_metrics['val_precisions_full'],
+                test_precisions=[full_metrics['test_precision_full']],
+                train_recalls=full_metrics['train_recalls_full'],
+                val_recalls=full_metrics['val_recalls_full'],
+                test_recalls=[full_metrics['test_recall_full']],
+                train_f1s=full_metrics['train_f1s_full'],
+                val_f1s=full_metrics['val_f1s_full'],
+                test_f1s=[full_metrics['test_f1_full']],
+                all_y_true=[full_metrics['all_y_true_full']],
+                all_y_pred=[full_metrics['all_y_pred_full']],
+                best_epoch=full_metrics['best_epoch_full'],
+                best_ours_auc=full_metrics['test_auc_full'],
+                best_ours_acc=full_metrics['test_acc_full'],
+                best_ours_precision=full_metrics['test_precision_full'],
+                best_ours_recall=full_metrics['test_recall_full'],
+                best_ours_f1=full_metrics['test_f1_full'],
+                train_accs=full_metrics['train_accs_full'],
+                val_accs=full_metrics['val_accs_full'],
+                test_accs=[full_metrics['test_acc_full']]
+            )
+        else:
+            full_ours_results = None
+
+        few_ours_results = wrap_up_results_(
+            train_losses_few_mean, val_losses_few_mean, [],
+            train_aucs_few_mean,   val_aucs_few_mean,   [mean_test_auc],
+            train_precs_few_mean,  val_precs_few_mean,  [mean_test_prec],
+            train_recalls_few_mean,val_recalls_few_mean,[mean_test_rec],
+            train_f1s_few_mean,    val_f1s_few_mean,    [mean_test_f1],
+            [y_true_last], [y_pred_last],
+            best_epoch_few_mean, mean_test_auc, mean_test_acc,
+            mean_test_prec, mean_test_rec, mean_test_f1,
+            train_accs=train_accs_few_mean, val_accs=val_accs_few_mean, test_accs=[mean_test_acc]
+        )
+
+        results = prepare_results_(full_ours_results, few_ours_results)
 
     # 9) 저장
     logger.info("Saving results...")
