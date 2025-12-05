@@ -100,8 +100,8 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential'])
-    parser.add_argument('---lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'round_robin', choices = ['hierarchical', 'round_robin', 'sequential'])
+    parser.add_argument('--lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
     '''
         Basis GAT Configuration
     '''
@@ -1002,6 +1002,7 @@ def find_pretrain_ckpt(ckpt_dir: str):
 def main():
     start_time = time.time()
     args = get_args()
+
     fix_seed(args.random_seed)
     # 1. "전용 로거"를 가져옵니다.
     logger_name = "my_experiment_logger" 
@@ -1118,13 +1119,15 @@ def main():
         loaded_pretrain = True # 학습 완료
 
     # 3) (옵션) 4-shot일 때, 로드된 모델로 소스 리포트만 재평가(eval-only)
-    if loaded_pretrain and args.few_shot == 4:
+    if loaded_pretrain and (args.few_shot == 4 or args.few_shot ==0):
         logger.info("[Full] Using loaded pretrain for source metrics report (eval only).")
         _bak = args.train_epochs
         args.train_epochs = 0
         args.use_lcg = True
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=0)
         args.train_epochs = _bak
+    else:
+        full_metrics = None
     # 4) few-shot 적응: 가중치 복사 → freeze 정책 적용
 
     
@@ -1132,10 +1135,7 @@ def main():
     args.use_lcg = True 
     model_few.args.use_lcg = True
     model_few.load_state_dict(model_full.state_dict(),strict=False)
-    model_few.set_freeze_target()
-
-    trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
-    logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
+    
     logger.info(f"[Few-shot] target = {args.target_data}")
     r_t = prepare_embedding_dataloaders(args, args.target_data)
     train_loader_t, val_loader_t, test_loader_t = r_t['loaders']
@@ -1146,6 +1146,102 @@ def main():
     is_binary_t = (args.num_classes == 2)
     crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
 
+    if args.few_shot == 0:
+        logger.info("\n>>> [Zero-shot] Evaluating pretrained model directly on target test set...")
+        
+        evaluate_func = binary_evaluate if is_binary_t else multi_evaluate
+        
+        res_val = evaluate_func(model_full, val_loader_t, crit_t, device)
+        
+        if isinstance(res_val, tuple) and len(res_val) == 2:
+            res_g_val, res_l_val = res_val
+            _, y_true_val, y_pred_val = res_g_val # Global 선택
+        else:
+            _, y_true_val, y_pred_val = res_val
+        
+        if is_binary_t:
+            best_threshold_zero = find_optimal_threshold(y_true_val, y_pred_val)
+        else:
+            best_threshold_zero = None
+        
+        # Test set 평가
+        # [핵심] mode='Full' (학습된 ghead 사용), args=args (Global 점수 리턴)
+        (test_loss_zero, test_auc_zero, test_precision_zero, test_recall_zero, 
+         test_f1_zero, test_acc_zero, all_y_true_zero, all_y_pred_zero
+        ) = final_test_evaluate(
+            model_full, test_loader_t, crit_t, device, is_binary_t, 
+            threshold=best_threshold_zero, mode='Full', args=args
+        )
+        
+        logger.info(f"[Zero-shot] Test Results: "
+                   f"AUC={test_auc_zero:.4f} ACC={test_acc_zero:.4f} "
+                   f"Prec={test_precision_zero:.4f} Rec={test_recall_zero:.4f} F1={test_f1_zero:.4f}")
+        
+        # 결과 래핑 및 저장 후 종료
+        if full_metrics is not None:
+            full_ours_results = wrap_up_results_(
+                train_losses=full_metrics['train_losses_full'],
+                val_losses=full_metrics['val_losses_full'],
+                test_losses=full_metrics['test_losses_full'],
+                train_aucs=full_metrics['train_aucs_full'],
+                val_aucs=full_metrics['val_aucs_full'],
+                test_aucs=[full_metrics['test_auc_full']],
+                train_precisions=full_metrics['train_precisions_full'],
+                val_precisions=full_metrics['val_precisions_full'],
+                test_precisions=[full_metrics['test_precision_full']],
+                train_recalls=full_metrics['train_recalls_full'],
+                val_recalls=full_metrics['val_recalls_full'],
+                test_recalls=[full_metrics['test_recall_full']],
+                train_f1s=full_metrics['train_f1s_full'],
+                val_f1s=full_metrics['val_f1s_full'],
+                test_f1s=[full_metrics['test_f1_full']],
+                all_y_true=[full_metrics['all_y_true_full']],
+                all_y_pred=[full_metrics['all_y_pred_full']],
+                best_epoch=full_metrics['best_epoch_full'],
+                best_ours_auc=full_metrics['test_auc_full'],
+                best_ours_acc=full_metrics['test_acc_full'],
+                best_ours_precision=full_metrics['test_precision_full'],
+                best_ours_recall=full_metrics['test_recall_full'],
+                best_ours_f1=full_metrics['test_f1_full'],
+                train_accs=full_metrics['train_accs_full'],
+                val_accs=full_metrics['val_accs_full'],
+                test_accs=[full_metrics['test_acc_full']]
+            )
+        else:
+            full_ours_results = None
+        
+        zero_shot_results = wrap_up_results_(
+            train_losses=[], val_losses=[], test_losses=[],
+            train_aucs=[], val_aucs=[], test_aucs=[test_auc_zero],
+            train_precisions=[], val_precisions=[], test_precisions=[test_precision_zero],
+            train_recalls=[], val_recalls=[], test_recalls=[test_recall_zero],
+            train_f1s=[], val_f1s=[], test_f1s=[test_f1_zero],
+            all_y_true=[all_y_true_zero], all_y_pred=[all_y_pred_zero],
+            best_epoch=0, best_ours_auc=test_auc_zero, best_ours_acc=test_acc_zero,
+            best_ours_precision=test_precision_zero, best_ours_recall=test_recall_zero,
+            best_ours_f1=test_f1_zero,
+            train_accs=[], val_accs=[], test_accs=[test_acc_zero]
+        )
+        
+        results = prepare_results_(full_ours_results, zero_shot_results)
+        
+        logger.info("Saving Zero-shot results...")
+        import copy
+        args_for_save = copy.deepcopy(args)
+        if isinstance(args_for_save.source_data, (list, tuple)):
+            args_for_save.source_data = "+".join(map(str, args_for_save.source_data))
+        else:
+            args_for_save.source_data = str(args_for_save.source_data)
+
+        save_results_(args_for_save, results)
+        logger.info("Results saved")
+        return # 종료!
+
+    model_few.set_freeze_target()
+
+    trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
+    logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
+    
     R = int(getattr(args, 'support_resamples', 1))
     logger.info(f"[Few-shot] support resamples R = {R}")
 
