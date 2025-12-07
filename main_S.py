@@ -375,7 +375,7 @@ def final_test_evaluate(model, test_loader, criterion, device, is_binary, thresh
 
 def train_and_validate(args, model, train_loader, val_loader,
                        criterion, optimizer, device, epochs,
-                       is_binary, patience=50, mode="Full", scheduler=None, warmup_epochs=0):
+                       is_binary, patience=20, mode="Full", scheduler=None, warmup_epochs=0):
     """
     Train + Validation을 진행하며, 
     - Phase 1 (Vanilla): Local 성능 기준
@@ -1093,7 +1093,7 @@ def main():
             logger.info(f"\n{'='*40}\n>>> [Phase 1] Start Vanilla GAT Training (LCG OFF)\n{'='*40}")
             args.use_lcg = False 
             # 학습 실행 (내부에서 best.pt 생성됨)
-            _ = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=20)
+            _ = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
             
             # 결과 백업
             shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_vanilla)
@@ -1315,7 +1315,7 @@ def main():
              train_accs_few,       val_accs_few,
              best_epoch_few, best_val_auc_few, best_threshold_few
             ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                                   optimizer_few, device, args.train_epochs, is_binary_t, patience=50, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+                                   optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
             # ---- 테스트 ----
             (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
