@@ -55,7 +55,7 @@ def get_args():
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
                                  'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
-                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog'])
+                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_disease'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -1111,7 +1111,7 @@ def main():
         args.use_lcg = True 
         
         # [수정] patience 50으로 증가 (Global 학습 충분히)
-        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=50)
+        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
         
         # 최종 저장
         shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_final)
