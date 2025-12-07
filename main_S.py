@@ -100,7 +100,7 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'round_robin', choices = ['hierarchical', 'round_robin', 'sequential'])
     parser.add_argument('---lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
     '''
         Basis GAT Configuration
@@ -1125,9 +1125,109 @@ def main():
         args.use_lcg = True
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=0)
         args.train_epochs = _bak
-    # 4) few-shot 적응: 가중치 복사 → freeze 정책 적용
-
     
+    # ==================================================================
+    # [Zero-shot Mode] 학습 없이 바로 테스트만 수행
+    # ==================================================================
+    if args.few_shot == 0:
+        logger.info("="*60)
+        logger.info(">>> [Zero-shot Mode] No training, direct evaluation on target")
+        logger.info("="*60)
+        
+        # 타겟 데이터 준비
+        args.use_target_head = True
+        args.use_lcg = True 
+        model_few.args.use_lcg = True
+        model_few.load_state_dict(model_full.state_dict(), strict=False)
+        model_few.eval()  # Zero-shot이므로 evaluation 모드
+        
+        logger.info(f"[Zero-shot] target = {args.target_data}")
+        r_t = prepare_embedding_dataloaders(args, args.target_data)
+        train_loader_t, val_loader_t, test_loader_t = r_t['loaders']
+        num_classes_t = r_t['num_classes']
+        args.num_classes = num_classes_t
+        args.output_dim  = num_classes_t if num_classes_t > 2 else 1
+
+        is_binary_t = (args.num_classes == 2)
+        crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
+
+        # Zero-shot 테스트 (학습 없이 바로 평가)
+        logger.info("[Zero-shot] Evaluating on test set...")
+        (test_loss_zero, test_auc_zero, test_precision_zero, test_recall_zero, test_f1_zero,
+         test_acc_zero, all_y_true_zero, all_y_pred_zero) = final_test_evaluate(
+            model_full, test_loader_t, crit_t, device, is_binary_t, threshold=0.5, mode='FUll', args=args
+        )
+
+        logger.info(f"[Zero-shot Results] AUC={test_auc_zero:.4f} ACC={test_acc_zero:.4f} "
+                    f"Prec={test_precision_zero:.4f} Rec={test_recall_zero:.4f} F1={test_f1_zero:.4f}")
+
+        # 결과 래핑 (zero-shot은 train/val이 없으므로 빈 리스트)
+        if full_metrics is not None:
+            full_ours_results = wrap_up_results_(
+                train_losses=full_metrics['train_losses_full'],
+                val_losses=full_metrics['val_losses_full'],
+                test_losses=full_metrics['test_losses_full'],
+                train_aucs=full_metrics['train_aucs_full'],
+                val_aucs=full_metrics['val_aucs_full'],
+                test_aucs=[full_metrics['test_auc_full']],
+                train_precisions=full_metrics['train_precisions_full'],
+                val_precisions=full_metrics['val_precisions_full'],
+                test_precisions=[full_metrics['test_precision_full']],
+                train_recalls=full_metrics['train_recalls_full'],
+                val_recalls=full_metrics['val_recalls_full'],
+                test_recalls=[full_metrics['test_recall_full']],
+                train_f1s=full_metrics['train_f1s_full'],
+                val_f1s=full_metrics['val_f1s_full'],
+                test_f1s=[full_metrics['test_f1_full']],
+                all_y_true=[full_metrics['all_y_true_full']],
+                all_y_pred=[full_metrics['all_y_pred_full']],
+                best_epoch=full_metrics['best_epoch_full'],
+                best_ours_auc=full_metrics['test_auc_full'],
+                best_ours_acc=full_metrics['test_acc_full'],
+                best_ours_precision=full_metrics['test_precision_full'],
+                best_ours_recall=full_metrics['test_recall_full'],
+                best_ours_f1=full_metrics['test_f1_full'],
+                train_accs=full_metrics['train_accs_full'],
+                val_accs=full_metrics['val_accs_full'],
+                test_accs=[full_metrics['test_acc_full']]
+            )
+        else:
+            full_ours_results = None
+
+        # Zero-shot 결과 (train/val 없음)
+        few_ours_results = wrap_up_results_(
+            [], [], [],  # train/val/test losses (empty for zero-shot)
+            [], [], [test_auc_zero],  # aucs
+            [], [], [test_precision_zero],  # precisions
+            [], [], [test_recall_zero],  # recalls
+            [], [], [test_f1_zero],  # f1s
+            [all_y_true_zero], [all_y_pred_zero],
+            0, test_auc_zero, test_acc_zero,  # best_epoch=0 for zero-shot
+            test_precision_zero, test_recall_zero, test_f1_zero,
+            train_accs=[], val_accs=[], test_accs=[test_acc_zero]
+        )
+
+        results = prepare_results_(full_ours_results, few_ours_results)
+
+        # 저장
+        logger.info("Saving zero-shot results...")
+        import copy
+        args_for_save = copy.deepcopy(args)
+        if isinstance(args_for_save.source_data, (list, tuple)):
+            args_for_save.source_data = "+".join(map(str, args_for_save.source_data))
+        else:
+            args_for_save.source_data = str(args_for_save.source_data)
+
+        save_results_(args_for_save, results)
+        logger.info("Results saved")
+        logger.info(f"Total experiment time: {format_time(time.time() - start_time)}")
+        return
+
+    # ==================================================================
+    # [Few-shot Mode] 기존 few-shot 학습 로직
+    # ==================================================================
+    
+    # 4) few-shot 적응: 가중치 복사 → freeze 정책 적용
     args.use_target_head = True
     args.use_lcg = True 
     model_few.args.use_lcg = True
@@ -1212,10 +1312,7 @@ def main():
         args.random_seed = seed_bak + (r + 1)
         fix_seed(args.random_seed)
 
-        if args.few_shot > 0:
-            train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-        else:
-            train_loader_epi = train_loader_t
+        train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
 
         # 시드 복원
         args.random_seed = seed_bak
@@ -1230,7 +1327,7 @@ def main():
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
         ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, patience=50, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+                               optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
         # ---- 테스트 ----
         (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
