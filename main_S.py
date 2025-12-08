@@ -173,14 +173,10 @@ def init_lcg(args, model, loaders, device, strategy='hierarchical', injection_sc
     else: 
         final_centroids = centers.view(M, K, D)
     
-    # 4. Variance Injection 
-    src_std = np.std(data_pool, axis=0)
-    noise = torch.randn_like(final_centroids) * torch.tensor(src_std) * injection_scale
-    final_init = final_centroids + noise
     
     # 5. Update Parameter
     with torch.no_grad():
-        model.latent_graph.node_embeddings.data.copy_(final_init.to(device))
+        model.latent_graph.node_embeddings.data.copy_(final_centroids.to(device))
         
     logger.info(f">> ✅ LCG Parameters Updated. (Strategy: {strategy})")
 
@@ -1154,7 +1150,7 @@ def main():
         logger.info("\n>>> [Zero-shot] Evaluating pretrained model directly on target test set...")
         
         evaluate_func = binary_evaluate if is_binary_t else multi_evaluate
-        
+        model_full.eval()
         # Validation set에서 threshold 결정
         res_val = evaluate_func(model_full, val_loader_t, crit_t, device)
         
