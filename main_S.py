@@ -1,7 +1,9 @@
-import torch
+
 #torch.cuda.set_device(0)
 #torch.use_deterministic_algorithms(False)
 import os
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
+import torch
 import random, time
 import argparse
 import pandas as pd
@@ -30,6 +32,7 @@ import numpy as np
 import logging
 import sys
 import shutil
+import wandb 
 
 experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -48,14 +51,15 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
     parser.add_argument('--input_dim', type=int, default=768)
     parser.add_argument('--hidden_dim', type=int, default=192)
+    parser.add_argument('--struct_hidden_dim', type=int, default = 192)
     parser.add_argument('--output_dim', type=int, default=1)
     parser.add_argument('--dropout_rate', type=float, default=0.1)
     parser.add_argument('--source_data', nargs='+',
-                        default=['Heart_disease_statlog', 'Cardiovascular_Disease_Dataset', 'heart_target_3', 'heart_target_4'],
+                        default=[ 'Medicaldataset','Cardiovascular_Disease_Dataset', 'Heart_disease_statlog','Erbil_Cardiovascular_Health_Dataset', 'cardio_SAheart', 'heart_failure_clinical_records'],
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
                                  'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
-                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_disease'])
+                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -91,6 +95,9 @@ def get_args():
     parser.add_argument('--alpha' , type = float, default = 0.9)
     parser.add_argument('--eps', type = float , default = 0.01)
     parser.add_argument('--reg', type = float, default = 0.01)
+    parser.add_argument('--tau', type = float, default=0.5)
+    parser.add_argument('--soft_tau', type = float, default=0.01)
+    parser.add_argument('--entropy_reg', type = float, default = 0.01)
     parser.add_argument('--lcg_div_alpha', type = float, default = 10)
     parser.add_argument('--vq_beta', type = float, default = 0.3)
     parser.add_argument('--kl', action='store_true')
@@ -122,12 +129,111 @@ def get_args():
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args
 
-def init_lcg(args, model, loaders, device, strategy='hierarchical', injection_scale=1.0):
+WANDB_KEYS = [
+    "alpha", "tau", "soft_tau", "vq_beta",
+    "source_lr", "source_lr_few", "dropout_rate"
+]
+def wandb_make_serializable_config(args):
+    """args -> wandb.config에 안전하게 들어가도록 직렬화 가능한 dict로 변환"""
+    cfg = {}
+    for k, v in vars(args).items():
+        if isinstance(v, (int, float, str, bool)) or v is None:
+            cfg[k] = v
+        elif isinstance(v, (list, tuple)):
+            cfg[k] = list(v)
+        else:
+            cfg[k] = str(v)
+    return cfg
+
+def wandb_init_and_override_args(args):
+    """
+    - wandb.init(config=vars(args))로 전체 args를 "초기 기록"은 하되,
+    - sweep(agent)로 넘어온 wandb.config 값은 WANDB_KEYS만 args에 덮어쓴다.
+    """
+    try:
+        run = wandb.init(
+            project=os.getenv("WANDB_PROJECT", "ProtoLLM-Sweep"),
+            entity=os.getenv("WANDB_ENTITY", None),
+            config=vars(args),
+            name=os.getenv("WANDB_RUN_NAME", None),
+        )
+    except Exception as e:
+        print(f"[wandb] init skipped: {e}")
+        return None
+
+    cfg = wandb.config
+
+    # ✅ sweep 값 주입: WANDB_KEYS만!
+    for k in WANDB_KEYS:
+        if k in cfg:
+            try:
+                setattr(args, k, cfg[k])
+            except Exception:
+                pass
+
+    # ✅ wandb.config에도 "WANDB_KEYS만" 다시 반영 (UI에서 보기 좋게)
+    try:
+        wandb.config.update(
+            {k: getattr(args, k) for k in WANDB_KEYS if hasattr(args, k)},
+            allow_val_change=True
+        )
+    except Exception:
+        pass
+
+    return run
+
+def wandb_safe_log(d, step=None):
+    if wandb.run is None:
+        return
+    try:
+        if step is None:
+            wandb.log(d)
+        else:
+            wandb.log(d, step=step)
+    except Exception:
+        pass
+
+def wandb_safe_summary_set(d):
+    if wandb.run is None:
+        return
+    try:
+        for k, v in d.items():
+            wandb.run.summary[k] = v
+    except Exception:
+        pass
+
+
+def wandb_update_config_minimal(args):
+    """
+    wandb.config를 WANDB_KEYS만 업데이트.
+    (args 전체를 다 올리지 않음)
+    """
+    try:
+        import wandb
+        if wandb.run is None:
+            return
+        cfg = {k: getattr(args, k) for k in WANDB_KEYS if hasattr(args, k)}
+        wandb.config.update(cfg, allow_val_change=True)
+    except Exception:
+        pass
+
+
+
+
+def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', injection_scale=1.0):
     import logging
     from sklearn.cluster import KMeans
-    # 로거 설정 (메인에 있다면 가져옴)
+
     logger = logging.getLogger("my_experiment_logger")
     logger.info(f"\n{'='*20} [Bridge] LCG INIT from Pre-trained CLS {'='*20}")
+
+    temp_seed = args.random_seed 
+    random.seed(temp_seed)
+    np.random.seed(temp_seed)
+    torch.manual_seed(temp_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(temp_seed)
+    logger.info(f">>> [LCG Init] Seed reset to {temp_seed} for deterministic data sampling.")
     all_cls_tokens = [] 
     model.eval()
     max_samples = 50000
@@ -163,7 +269,7 @@ def init_lcg(args, model, loaders, device, strategy='hierarchical', injection_sc
     M = model.latent_graph.M 
     K = model.latent_graph.K
     D = model.latent_graph.D 
-    kmeans = KMeans(n_clusters = M * K, n_init = 10, random_state = 42).fit(data_pool)
+    kmeans = KMeans(n_clusters = M * K, n_init = 10, random_state = args.random_seed).fit(data_pool)
     centers = torch.tensor(kmeans.cluster_centers_, dtype = torch.float32)
 
     # 3. Stregegy Assignemtn 
@@ -173,12 +279,12 @@ def init_lcg(args, model, loaders, device, strategy='hierarchical', injection_sc
     else: 
         final_centroids = centers.view(M, K, D)
     
-    
     # 5. Update Parameter
     with torch.no_grad():
         model.latent_graph.node_embeddings.data.copy_(final_centroids.to(device))
         
     logger.info(f">> ✅ LCG Parameters Updated. (Strategy: {strategy})")
+
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -222,7 +328,6 @@ class MultiSourceStepLoader:
             batch = next(iters[idx])
             pos[idx] += 1
             src_i = self.src_idx if self.src_idx is not None else idx
-            # 배치가 dict라고 가정 (prepare_embedding_dataloaders 출력과 일치)
             batch['src_idx'] = src_i
             yield batch
 
@@ -368,22 +473,13 @@ def final_test_evaluate(model, test_loader, criterion, device, is_binary, thresh
 
     return test_loss, test_auc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
 
-
 def train_and_validate(args, model, train_loader, val_loader,
                        criterion, optimizer, device, epochs,
                        is_binary, patience=50, mode="Full", scheduler=None, warmup_epochs=0):
-    """
-    Train + Validation을 진행하며, 
-    - Phase 1 (Vanilla): Local 성능 기준
-    - Phase 2 (Joint) & Phase 3 (Adaptation): Global 성능 기준
-    으로 모니터링하고 Best Model을 저장함. (생략 없는 Full Version)
-    """
-    
-    # --- 1. Logger Setup ---
-    logger_name = "my_experiment_logger" 
+
+    logger_name = "my_experiment_logger"
     logger = logging.getLogger(logger_name)
-    
-    # --- 2. Metrics Storage ---
+
     train_losses, val_losses = [], []
     train_aucs, val_aucs = [], []
     train_precisions, val_precisions = [], []
@@ -391,12 +487,9 @@ def train_and_validate(args, model, train_loader, val_loader,
     train_f1s, val_f1s = [], []
     train_accs, val_accs = [], []
 
-    # --- 3. Function Setup ---
     train_func = binary_train if is_binary else multi_train
-    # Binary/Multi 모두 Dual Output((Global_Res), (Local_Res))을 리턴한다고 가정
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
-    # --- 4. Init State ---
     best_val_auc = 0.0
     best_epoch = 0
     no_improve = 0
@@ -404,7 +497,6 @@ def train_and_validate(args, model, train_loader, val_loader,
     best_threshold = 0.5
     best_model_state = None
 
-    # --- 5. Checkpoint Directory Setup ---
     src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
     model_sig = (
         f"ngraphs-{args.n_graphs}"
@@ -413,250 +505,266 @@ def train_and_validate(args, model, train_loader, val_loader,
         f"_nbasis-{args.num_basis_layers}"
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
+        f"_struct_hidden_dim-{args.struct_hidden_dim}"
         f"_fgw_alpha-{args.fgw_alpha}"
+        f"_alpha-{args.alpha}"
         f"_vq_beta-{args.vq_beta}"
         f"_kl_gamma-{args.kl_gamma}"
+        f"_tau-{args.tau}"
         f"_target_data-{args.target_data}"
+        f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
     checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     log_file_path = os.path.join(checkpoint_dir, f"train_log.log")
-
-    # File Handler Setup
     file_handler = logging.FileHandler(log_file_path)
     file_handler.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
-    
-    # Logger Handler Check
+
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file_path for h in logger.handlers):
         logger.addHandler(file_handler)
         logger.info(f"--- Log file initialized ({mode} mode). Saving stats to: {log_file_path} ---")
 
-    # --- 6. Training Loop ---
+    # ✅ wandb: 시작 시점에 WANDB_KEYS만 기록
+    try:
+        hp_dict = {f"hp/{k}": getattr(args, k, None) for k in WANDB_KEYS}
+        wandb_safe_log({
+            "Mode/name": mode,
+            "Mode/is_binary": 1 if is_binary else 0,
+            "Train/epochs": int(epochs),
+            "Train/patience": int(patience),
+            "Train/warmup_epochs": int(warmup_epochs),
+            **hp_dict
+        })
+    except Exception:
+        pass
+
     print(f"\n>>> [Start {mode} Training] Total Epochs: {epochs}")
 
     for epoch in range(epochs):
         model.train()
-        
-        # [Logic] 모델에게 현재 Epoch 주입 (Switching Logic용)
+
         if hasattr(model, 'current_epoch'):
             model.current_epoch = epoch + 1
             if hasattr(model, 'switch_epoch') and model.current_epoch == model.switch_epoch:
-                 logger.info(f"\n>>> [PHASE CHANGE] Epoch {model.current_epoch}: Detach OFF & Global Inference ON\n")
+                logger.info(f"\n>>> [PHASE CHANGE] Epoch {model.current_epoch}: Detach OFF & Global Inference ON\n")
+                try:
+                    wandb_safe_log({
+                        f"{mode}/phase_change": 1,
+                        f"{mode}/switch_epoch": int(getattr(model, "switch_epoch", -1)),
+                    }, step=epoch + 1)
+                except Exception:
+                    pass
 
-        # [검증] 학습 전 LCG 상태 저장
         if hasattr(model, 'latent_graph'):
             before_lcg = model.latent_graph.node_embeddings.clone().detach()
 
-        # -------- Train Step --------
         train_loss = train_func(model, train_loader, criterion, optimizer, device)
         train_losses.append(train_loss)
 
-        # [검증] LCG 파라미터 변화량 체크
+        diff = 0.0
+        fgw_val = 0.0
         if hasattr(model, 'latent_graph'):
             after_lcg = model.latent_graph.node_embeddings.detach()
             diff = (after_lcg - before_lcg).abs().mean().item()
             fgw_val = getattr(model, 'fgw_loss', torch.tensor(0.0)).item()
-            
             logger.info(f"[Epoch {epoch+1}] LCG Diff: {diff:.6f} | FGW Loss: {fgw_val:.4f}")
-            
             if diff == 0.0 and epoch > 0 and mode != 'Few':
                 logger.warning("🚨 WARNING: LCG Parameters did NOT change! Check optimizer.")
 
-        # Scheduler Step
         if scheduler is not None:
             try:
                 scheduler.step()
             except Exception as e:
                 logger.warning(f"[Scheduler] step() failed at epoch {epoch+1}: {e}")
 
-        # LR Logging
         try:
             curr_lr = optimizer.param_groups[0]['lr']
         except Exception:
             curr_lr = None
 
-        # -------- Evaluate (Dual Evaluation & Criteria Switching) --------
-        
-        # Global 기준 저장 여부 판단 (Phase 2 or 3)
         use_global_criteria = (mode == 'Few') or getattr(args, 'use_lcg', False)
 
         if is_binary:
-            # 1. Trainset Eval (Dual)
             (tr_loss_g, tr_true_g, tr_pred_g), (tr_loss_l, tr_true_l, tr_pred_l) = evaluate_func(model, train_loader, criterion, device)
-            # 2. Validation Eval (Dual)
-            (val_loss_g, val_true, val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
-            
-            # AUC 계산
-            auc_tr_g = roc_auc_score(tr_true_g, tr_pred_g)
-            auc_val_g = roc_auc_score(val_true, val_pred_g)
-            
-            auc_tr_l = roc_auc_score(tr_true_l, tr_pred_l)
-            auc_val_l = roc_auc_score(val_true_l, val_pred_l)
-            
+            (val_loss_g, val_true,   val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
+
+            auc_tr_g  = roc_auc_score(tr_true_g, tr_pred_g)
+            auc_val_g = roc_auc_score(val_true,  val_pred_g)
+            auc_tr_l  = roc_auc_score(tr_true_l, tr_pred_l)
+            auc_val_l = roc_auc_score(val_true_l,val_pred_l)
+
             if use_global_criteria:
-                # [Global 기준]
                 monitor_auc = auc_val_g
                 current_threshold = find_optimal_threshold(val_true, val_pred_g)
-                
-                # Accuracy (Global)
                 y_pred_val_bin = (val_pred_g > current_threshold).astype(int)
                 val_acc = accuracy_score(val_true, y_pred_val_bin)
-                
                 main_val_loss = val_loss_g
                 logger_prefix = f"[{mode}/Global Best]"
-                
                 log_msg = (
                     f"[{mode}][Ep {epoch+1}/{epochs}] LR: {curr_lr:.1e}\n"
                     f"   >>> [Global] Loss: {tr_loss_g:.4f} / {val_loss_g:.4f} \n"
                     f"   >>> [Global] AUC : {auc_tr_g:.4f} / {auc_val_g:.4f} | ACC: {val_acc:.4f} | Thr: {current_threshold:.4f}\n"
                     f"   >>> [Local ] Ref AUC: {auc_val_l:.4f}"
                 )
-                
-                # 히스토리 (Global)
                 train_auc_cur = auc_tr_g
                 train_acc_cur = accuracy_score(tr_true_g, (tr_pred_g > current_threshold).astype(int))
-
             else:
-                # [Local 기준]
                 monitor_auc = auc_val_l
                 current_threshold = find_optimal_threshold(val_true_l, val_pred_l)
-                
-                # Accuracy (Local)
                 y_pred_val_bin = (val_pred_l > current_threshold).astype(int)
                 val_acc = accuracy_score(val_true_l, y_pred_val_bin)
-                
                 main_val_loss = val_loss_l
                 logger_prefix = "[Pretrain/Local Best]"
-                
                 log_msg = (
                     f"[{mode}][Ep {epoch+1}/{epochs}] LR: {curr_lr:.1e}\n"
                     f"   >>> [Local ] Loss: {tr_loss_l:.4f} / {val_loss_l:.4f} \n"
                     f"   >>> [Local ] AUC : {auc_tr_l:.4f} / {auc_val_l:.4f} | ACC: {val_acc:.4f} | Thr: {current_threshold:.4f}\n"
                     f"   >>> [Global] Ref AUC: {auc_val_g:.4f}"
                 )
-                
-                # 히스토리 (Local)
                 train_auc_cur = auc_tr_l
                 train_acc_cur = accuracy_score(tr_true_l, (tr_pred_l > current_threshold).astype(int))
         else:
-            # [Multi-class]
-            # multi_evaluate도 Dual Output ((Loss, True, Pred), (Loss, True, Pred))을 리턴한다고 가정
             (tr_loss_g, tr_true_g, tr_pred_g), (tr_loss_l, tr_true_l, tr_pred_l) = evaluate_func(model, train_loader, criterion, device)
-            (val_loss_g, val_true, val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
+            (val_loss_g, val_true,   val_pred_g), (val_loss_l, val_true_l, val_pred_l) = evaluate_func(model, val_loader, criterion, device)
 
             n_cls = val_pred_g.shape[1]
-            
-            # --- AUC (Global) ---
             y_bin_val_g = label_binarize(val_true, classes=range(n_cls))
-            auc_val_g = roc_auc_score(y_bin_val_g, val_pred_g, multi_class='ovr', average='macro')
-            
-            # --- AUC (Local) ---
             y_bin_val_l = label_binarize(val_true_l, classes=range(n_cls))
+            auc_val_g = roc_auc_score(y_bin_val_g, val_pred_g, multi_class='ovr', average='macro')
             auc_val_l = roc_auc_score(y_bin_val_l, val_pred_l, multi_class='ovr', average='macro')
 
             if use_global_criteria:
-                # [Global 기준]
                 monitor_auc = auc_val_g
                 preds_val = val_pred_g.argmax(axis=1)
                 val_acc = accuracy_score(val_true, preds_val)
                 main_val_loss = val_loss_g
                 logger_prefix = f"[{mode}/Global Best]"
-                
                 log_msg = (
                     f"[{mode}][Ep {epoch+1}/{epochs}] LR: {curr_lr:.1e}\n"
                     f"   >>> [Global] Loss: {tr_loss_g:.4f} / {val_loss_g:.4f} \n"
                     f"   >>> [Global] AUC : {auc_val_g:.4f} | ACC: {val_acc:.4f}\n"
                     f"   >>> [Local ] Ref AUC: {auc_val_l:.4f}"
                 )
-                train_auc_cur = 0.0 # Train AUC 계산 생략 시
-                train_acc_cur = 0.0
             else:
-                # [Local 기준]
                 monitor_auc = auc_val_l
                 preds_val = val_pred_l.argmax(axis=1)
                 val_acc = accuracy_score(val_true_l, preds_val)
                 main_val_loss = val_loss_l
                 logger_prefix = "[Pretrain/Local Best]"
-                
                 log_msg = (
                     f"[{mode}][Ep {epoch+1}/{epochs}] LR: {curr_lr:.1e}\n"
                     f"   >>> [Local ] Loss: {tr_loss_l:.4f} / {val_loss_l:.4f} \n"
                     f"   >>> [Local ] AUC : {auc_val_l:.4f} | ACC: {val_acc:.4f}\n"
                     f"   >>> [Global] Ref AUC: {auc_val_g:.4f}"
                 )
-                train_auc_cur = 0.0
-                train_acc_cur = 0.0
-            
             current_threshold = None
+            train_auc_cur = 0.0
+            train_acc_cur = 0.0
 
-        # --- 공통 저장 로직 ---
         val_losses.append(main_val_loss)
         train_aucs.append(train_auc_cur); val_aucs.append(monitor_auc)
         train_accs.append(train_acc_cur); val_accs.append(val_acc)
-        
+
         logger.info(log_msg)
 
-        # --- 7. Visualization Snapshot ---
-        if (epoch + 1) % 10 == 0 or (epoch == 0):
-            try:
-                if isinstance(train_loader, dict):
-                    temp_loaders = train_loader
-                else:
-                    source_key = list(args.source_data)[0] if isinstance(args.source_data, (list, tuple)) else args.source_data
-                    temp_loaders = {source_key: train_loader}
+        # ✅ wandb: epoch 로그 (hp는 WANDB_KEYS만)
+        try:
+            log_dict = {
+                f"{mode}/epoch": epoch + 1,
+                f"{mode}/train_loss": float(train_loss),
+                f"{mode}/val_loss_main": float(main_val_loss),
+                f"{mode}/monitor_auc": float(monitor_auc),
+                f"{mode}/val_acc": float(val_acc),
+                f"{mode}/use_global_criteria": 1 if use_global_criteria else 0,
+                f"{mode}/lr": curr_lr,
+                f"{mode}/best_val_auc_so_far": float(best_val_auc),
+                f"{mode}/no_improve": int(no_improve),
+            }
 
-                if hasattr(model, 'latent_graph'):
-                    print(f"\n>>> Generating Snapshot for Epoch {epoch+1}...")
-                    from utils.visualization import visualize_training_snapshot_v2
-                    visualize_training_snapshot_v2(
-                        model, temp_loaders, 
-                        model.latent_graph, model.latent_graph, 
-                        epoch+1, 0,
-                        save_dir=checkpoint_dir
-                    )
-            except Exception as e:
-                logger.warning(f"[Visualization Skipped] {e}")
+            if hasattr(model, 'latent_graph'):
+                log_dict.update({
+                    f"{mode}/lcg_diff": float(diff),
+                    f"{mode}/fgw_loss": float(fgw_val),
+                })
 
-        # --- 8. Best Model Saving (monitor_auc 기준) ---
+            if is_binary:
+                log_dict.update({
+                    f"{mode}/auc_val_g": float(auc_val_g),
+                    f"{mode}/auc_val_l": float(auc_val_l),
+                })
+                if current_threshold is not None:
+                    log_dict[f"{mode}/threshold"] = float(current_threshold)
+            else:
+                log_dict.update({
+                    f"{mode}/auc_val_g": float(auc_val_g),
+                    f"{mode}/auc_val_l": float(auc_val_l),
+                })
+
+            # hp는 "WANDB_KEYS만" (매 epoch 찍고 싶으면 유지)
+            log_dict.update({f"hp/{k}": getattr(args, k, None) for k in WANDB_KEYS})
+
+            wandb_safe_log(log_dict, step=epoch + 1)
+        except Exception:
+            pass
+
         if monitor_auc > best_val_auc:
             best_val_auc = monitor_auc
-            best_epoch   = epoch
-            no_improve   = 0
+            best_epoch = epoch
+            no_improve = 0
             best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             logger.info(f"{logger_prefix} New Best AUC: {best_val_auc:.4f} at epoch {epoch+1}")
-            
-            if current_threshold is not None:
+
+            if is_binary and (current_threshold is not None):
                 best_threshold = current_threshold
 
             ckpt_path = os.path.join(
                 checkpoint_dir,
                 f"Embed:{args.embed_type}_Edge:{args.edge_type}_A:{args.attn_type}_S:{args.random_seed}_{experiment_id}.pt"
             )
-            
+
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
                 'val_auc': best_val_auc,
-                # 나중에 로드해서 확인할 때 헷갈리지 않게 Global 점수도 별도 키로 저장
-                'val_auc_global': auc_val_g if is_binary else auc_val_g,
                 'threshold': best_threshold,
                 'args': args
             }, ckpt_path)
+
+            try:
+                wandb_safe_log({
+                    f"{mode}/best_update": 1,
+                    f"{mode}/best_epoch": int(best_epoch) + 1,
+                    f"{mode}/best_val_auc": float(best_val_auc),
+                    f"{mode}/best_threshold": float(best_threshold) if best_threshold is not None else None,
+                }, step=epoch + 1)
+                if wandb.run is not None:
+                    wandb.run.summary[f"{mode}/best_val_auc"] = float(best_val_auc)
+                    wandb.run.summary[f"{mode}/best_epoch"] = int(best_epoch) + 1
+            except Exception:
+                pass
         else:
             if epoch + 1 > warmup_epochs:
-                no_improve += 1 
-            else: 
-                no_improve = 0 
-        
+                no_improve += 1
+            else:
+                no_improve = 0
+
         if (epoch + 1 > warmup_epochs) and (no_improve >= patience):
             logger.info(f"[{mode}] Early stopping at epoch {epoch+1} (no improve {patience} epochs)")
+            try:
+                wandb_safe_log({
+                    f"{mode}/early_stop": 1,
+                    f"{mode}/early_stop_epoch": epoch + 1,
+                    f"{mode}/best_val_auc": float(best_val_auc),
+                    f"{mode}/best_epoch": int(best_epoch) + 1,
+                }, step=epoch + 1)
+            except Exception:
+                pass
             break
 
-    # --- 9. Finish ---
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
     else:
@@ -744,9 +852,23 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
 
     # === 체크포인트 설정 ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = (f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nbasis-{args.num_basis_layers}"
-                 f"_basis-{args.basis_type}_attn-{args.attn_type}_fgw_alpha-{args.fgw_alpha}_vq_beta-{args.vq_beta}"
-                 f"_kl_gamma-{args.kl_gamma}_target_data-{args.target_data}_description-{args.des}")
+    model_sig = (
+        f"ngraphs-{args.n_graphs}"
+        f"_nnodes-{args.n_nodes}"
+        f"_gdim-{args.graph_dim}"
+        f"_nbasis-{args.num_basis_layers}"
+        f"_basis-{args.basis_type}"
+        f"_attn-{args.attn_type}"
+        f"_struct_hidden_dim-{args.struct_hidden_dim}"
+        f"_fgw_alpha-{args.fgw_alpha}"
+        f"_alpha-{args.alpha}"
+        f"_vq_beta-{args.vq_beta}"
+        f"_kl_gamma-{args.kl_gamma}"
+        f"_tau-{args.tau}"
+        f"_target_data-{args.target_data}"
+        f"_entropic_reg-{args.entropy_reg}"
+        f"_description-{args.des}"
+    )
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     os.makedirs(ckpt_dir, exist_ok=True)
     ckpt_latest = os.path.join(ckpt_dir, "best.pt")
@@ -761,10 +883,33 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         logger.addHandler(file_handler)
         logger.info(f"--- Log file initialized. Saving to: {log_file_path} ---")
 
+    from utils.util import fix_seed 
+    fix_seed(args.random_seed)
+
+    # ===========================
+    # ✅ wandb: 함수 시작 시점에 현재 HP 한번 로깅 (로직 영향 X)
+    # ===========================
+    try:
+        wandb_safe_log({
+            "hp/alpha": getattr(args, "alpha", None),
+            "hp/tau": getattr(args, "tau", None),
+            "hp/soft_tau": getattr(args, "soft_tau", None),
+            "hp/vq_beta": getattr(args, "vq_beta", None),
+            "hp/source_lr": getattr(args, "source_lr", None),
+            "hp/source_lr_few": getattr(args, "source_lr_few", None),
+            "hp/dropout_rate": getattr(args, "dropout_rate", None),
+            "Pre/total_epochs": total_epochs,
+            "Pre/warmup_epochs": warmup_epochs if total_epochs > 0 else 0,
+            "Pre/use_lcg": 1 if getattr(args, "use_lcg", False) else 0,
+        })
+    except Exception:
+        pass
+    
     # === 학습 루프 ===
     for epoch in range(total_epochs):
         _ = train_fn(model, tr_step, crit, opt, device)
-        if scheduler_ep is not None: scheduler_ep.step()
+        if scheduler_ep is not None: 
+            scheduler_ep.step()
         
         if hasattr(model, 'current_epoch'):
             model.current_epoch = epoch + 1 
@@ -817,6 +962,33 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
         )
         logger.info(log_msg)
+
+        # ===========================
+        # ✅ wandb: epoch 로그 (로직 영향 X)
+        # ===========================
+        try:
+            lr_gat = opt.param_groups[0]["lr"] if len(opt.param_groups) > 0 else None
+            lr_global = opt.param_groups[1]["lr"] if len(opt.param_groups) > 1 else None
+            wandb_safe_log({
+                "Pre/mean_auc_local": mean_auc_l,
+                "Pre/mean_auc_global": mean_auc_g,
+                "Pre/mean_auc_watched": current_mean_auc,
+                "Pre/best_mean_auc": best_mean_auc,
+                "Pre/improved": 1 if improved else 0,
+                "Pre/use_lcg": 1 if getattr(args, "use_lcg", False) else 0,
+                "lr/gat": lr_gat,
+                "lr/global": lr_global,
+                "Pre/epoch": epoch + 1,
+                # sweep에서 보고 싶은 hp도 계속 찍어두기
+                "hp/alpha": getattr(args, "alpha", None),
+                "hp/tau": getattr(args, "tau", None),
+                "hp/soft_tau": getattr(args, "soft_tau", None),
+                "hp/vq_beta": getattr(args, "vq_beta", None),
+                "hp/source_lr": getattr(args, "source_lr", None),
+                "hp/dropout_rate": getattr(args, "dropout_rate", None),
+            }, step=epoch + 1)
+        except Exception:
+            pass
         
         if improved:
             best_state = model.state_dict()
@@ -834,6 +1006,15 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 shutil.copyfile(ckpt_latest, ckpt_hist)
             except Exception as e:
                 logger.warning(f"History copy failed: {e}")
+
+            # ✅ wandb: best 갱신 이벤트(선택)
+            try:
+                wandb_safe_log({
+                    "Pre/best_epoch": last_best_epoch + 1,
+                    "Pre/best_mean_auc": best_mean_auc,
+                }, step=epoch + 1)
+            except Exception:
+                pass
         else:
             if epoch + 1 > warmup_epochs: 
                 no_improve += 1 
@@ -841,6 +1022,17 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 no_improve = 0 
             if no_improve >= patience : 
                 logger.info(f"Early stop at epoch {epoch+1}")
+
+                # ✅ wandb: early stop 표시(선택)
+                try:
+                    wandb_safe_log({
+                        "Pre/early_stop": 1,
+                        "Pre/early_stop_epoch": epoch + 1,
+                        "Pre/best_mean_auc": best_mean_auc,
+                    }, step=epoch + 1)
+                except Exception:
+                    pass
+
                 break
 
     if best_state is not None:
@@ -960,6 +1152,25 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     all_y_pred_full = np.concatenate(all_y_pred_full_list, axis=0)
     best_epoch_full = last_best_epoch
 
+    # ===========================
+    # ✅ wandb: 최종 요약 로그(선택)
+    # ===========================
+    try:
+        # 이건 step 없이 찍어도 됨 (summary용으로)
+        wandb_safe_log({
+            "Pre/final_train_auc_mean": float(np.mean(per_train_auc)) if len(per_train_auc) else None,
+            "Pre/final_val_auc_mean": float(np.mean(per_val_auc)) if len(per_val_auc) else None,
+            "Pre/final_test_auc_mean": float(np.mean(per_test_auc)) if len(per_test_auc) else None,
+            "Pre/final_test_acc_mean": float(np.mean(per_test_acc)) if len(per_test_acc) else None,
+            "Pre/best_epoch": int(best_epoch_full) + 1 if best_epoch_full is not None and best_epoch_full >= 0 else None,
+            "Pre/best_mean_auc": float(best_mean_auc),
+        })
+        if wandb.run is not None:
+            wandb.run.summary["Pre/best_mean_auc"] = float(best_mean_auc)
+            wandb.run.summary["Pre/best_epoch"] = int(best_epoch_full) + 1 if best_epoch_full is not None and best_epoch_full >= 0 else None
+    except Exception:
+        pass
+
     full_pack = dict(
         train_losses_full=train_losses_full,
         val_losses_full=val_losses_full,
@@ -984,6 +1195,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         best_epoch_full=best_epoch_full
     )
     return full_pack
+
 def find_pretrain_ckpt(ckpt_dir: str):
     stable = os.path.join(ckpt_dir, "best.pt")
     if os.path.exists(stable):
@@ -998,6 +1210,42 @@ def find_pretrain_ckpt(ckpt_dir: str):
 def main():
     start_time = time.time()
     args = get_args()
+    wandb_init_and_override_args(args)  # ✅ 추가 (sweep 값이 args로 들어옴)
+    wandb_update_config_minimal(args)
+    # ✅ [wandb 추가 1] 안전 로거/컨피그 업데이트 (로직 영향 X)
+    def _wandb_log(d, step=None):
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log(d, step=step)
+        except Exception:
+            pass
+
+    def _wandb_summary_set(d):
+        try:
+            import wandb
+            if wandb.run is not None:
+                for k, v in d.items():
+                    wandb.run.summary[k] = v
+        except Exception:
+            pass
+
+    # args 전체를 wandb.config에 저장 (가능한 값만/문자열 fallback)
+    try:
+        import wandb
+        if wandb.run is not None:
+            cfg = {}
+            for k, v in vars(args).items():
+                if isinstance(v, (int, float, str, bool)) or v is None:
+                    cfg[k] = v
+                elif isinstance(v, (list, tuple)):
+                    cfg[k] = list(v)
+                else:
+                    cfg[k] = str(v)
+            wandb.config.update(cfg, allow_val_change=True)
+    except Exception:
+        pass
+
     fix_seed(args.random_seed)
     
     # 1. 로거 설정
@@ -1025,6 +1273,16 @@ def main():
     logger.info(f"Device: {device}")
     logger.info("Preparing Tabular datasets...")
 
+    # ✅ [wandb 추가 2] 기본 런 정보 (로직 영향 X)
+    _wandb_log({
+        "env/device": str(device),
+        "env/use_gpu": int(bool(getattr(args, "use_gpu", False))),
+        "data/source_data": "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data),
+        "data/target_data": str(getattr(args, "target_data", "")),
+        "exp/random_seed": int(getattr(args, "random_seed", -1)),
+        "exp/experiment_id": str(experiment_id),
+    })
+
     # 1) 모델 생성
     model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
                        args.dropout_rate, args.llm_model,
@@ -1042,10 +1300,14 @@ def main():
         f"_nbasis-{args.num_basis_layers}"
         f"_basis-{args.basis_type}"
         f"_attn-{args.attn_type}"
+        f"_struct_hidden_dim-{args.struct_hidden_dim}"
         f"_fgw_alpha-{args.fgw_alpha}"
+        f"_alpha-{args.alpha}"
         f"_vq_beta-{args.vq_beta}"
         f"_kl_gamma-{args.kl_gamma}"
+        f"_tau-{args.tau}"
         f"_target_data-{args.target_data}"
+        f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
@@ -1058,6 +1320,13 @@ def main():
     loaded_pretrain = False
     full_metrics = None
 
+    # ✅ [wandb 추가 3] 경로/세팅 로그 (로직 영향 X)
+    _wandb_log({
+        "ckpt/pre_dir": ckpt_dir,
+        "ckpt/final_exists": int(os.path.exists(ckpt_final)),
+        "ckpt/vanilla_exists": int(os.path.exists(ckpt_vanilla)),
+    })
+
     # ==================================================================
     # [Logic] 2-Stage Pre-training Pipeline
     # ==================================================================
@@ -1068,11 +1337,15 @@ def main():
         ckpt = torch.load(ckpt_final, map_location=device)
         model_full.load_state_dict(ckpt['model_state_dict'])
         loaded_pretrain = True
+
+        # ✅ wandb
+        _wandb_log({"pretrain/loaded_final_ckpt": 1})
         
     else:
         # Case B: 학습 필요
         logger.info(f"🚀 [Pretrain] Starting 2-Stage Training Pipeline...")
-        
+        _wandb_log({"pretrain/loaded_final_ckpt": 0})
+
         # Loaders 준비 (Init용)
         all_loaders = {}
         src_list = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
@@ -1085,9 +1358,16 @@ def main():
             logger.info(f"   -> Found Phase 1 Checkpoint. Loading...")
             ckpt = torch.load(ckpt_vanilla, map_location=device)
             model_full.load_state_dict(ckpt['model_state_dict'])
+
+            # ✅ wandb
+            _wandb_log({"pretrain/phase1_loaded_ckpt": 1})
         else:
             logger.info(f"\n{'='*40}\n>>> [Phase 1] Start Vanilla GAT Training (LCG OFF)\n{'='*40}")
             args.use_lcg = False 
+
+            # ✅ wandb
+            _wandb_log({"pretrain/phase": 1, "pretrain/use_lcg": 0})
+
             # 학습 실행
             _ = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=20)
             
@@ -1095,17 +1375,28 @@ def main():
             shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_vanilla)
             logger.info(f"   -> Phase 1 Saved to {ckpt_vanilla}")
 
+            # ✅ wandb
+            _wandb_log({"pretrain/phase1_saved": 1, "ckpt/vanilla_path": ckpt_vanilla})
+
         # --- [Step 2] Bridge: LCG Init ---
         logger.info(f"\n{'='*40}\n>>> [Bridge] Initializing LCG from Pre-trained CLS\n{'='*40}")
+
+        # ✅ wandb
+        _wandb_log({"pretrain/bridge_init_lcg": 1, "pretrain/lcg_strategy": str(getattr(args, "lcg_strategy", ""))})
+
         init_lcg(
-            args, model_full, all_loaders, device, 
+            args, model_full, all_loaders, device, save_dir = ckpt_dir,
             strategy=args.lcg_strategy, injection_scale=0.1
         )
+        fix_seed(args.random_seed)
 
         # --- [Step 3] Phase 2: Joint Training ---
         logger.info(f"\n{'='*40}\n>>> [Phase 2] Start Joint Training (Global ON)\n{'='*40}")
         args.use_lcg = True 
-        
+
+        # ✅ wandb
+        _wandb_log({"pretrain/phase": 2, "pretrain/use_lcg": 1})
+
         # [수정] patience 50으로 증가 (Global 학습 충분히)
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
         
@@ -1113,6 +1404,9 @@ def main():
         shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_final)
         logger.info(f"   -> Phase 2 Saved to {ckpt_final}")
         loaded_pretrain = True 
+
+        # ✅ wandb
+        _wandb_log({"pretrain/phase2_saved": 1, "ckpt/final_path": ckpt_final})
 
     # 3) (옵션) Pretrain 모델로 소스 리포트 재평가 (eval-only)
     # [수정] few_shot이 4이거나 0일 때 (비교를 위해) 수행하도록 복구
@@ -1122,15 +1416,31 @@ def main():
         _bak = args.train_epochs
         args.train_epochs = 0
         args.use_lcg = True
+
+        # ✅ wandb
+        _wandb_log({"pretrain/eval_only_report": 1, "pretrain/eval_only_few_shot": int(args.few_shot)})
+
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=0)
         args.train_epochs = _bak
+        fix_seed(args.random_seed)
+
+        # ✅ wandb: source report 핵심만 summary로 (있을 때만)
+        try:
+            if full_metrics is not None:
+                _wandb_summary_set({
+                    "source_report/test_auc_full": float(full_metrics.get("test_auc_full", 0.0)),
+                    "source_report/test_acc_full": float(full_metrics.get("test_acc_full", 0.0)),
+                })
+        except Exception:
+            pass
 
     # 4) Target 적응 준비 공통 로직
     args.use_target_head = True
     args.use_lcg = True 
     model_few.args.use_lcg = True
     model_few.load_state_dict(model_full.state_dict(), strict=False)
-    
+    fix_seed(args.random_seed)
+
     # Target Data Load
     logger.info(f"[Target] target = {args.target_data}")
     r_t = prepare_embedding_dataloaders(args, args.target_data)
@@ -1141,6 +1451,15 @@ def main():
     
     is_binary_t = (args.num_classes == 2)
     crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
+
+    # ✅ wandb: target meta
+    _wandb_log({
+        "target/num_classes": int(args.num_classes),
+        "target/is_binary": int(is_binary_t),
+        "target/few_shot": int(args.few_shot),
+        "target/support_resamples": int(getattr(args, "support_resamples", 1)),
+        "target/train_epochs": int(getattr(args, "train_epochs", 0)),
+    })
 
     # =========================================================
     # [분기 1] Zero-shot 평가 (학습 X, 평가 O, 종료)
@@ -1164,9 +1483,7 @@ def main():
             best_threshold_zero = find_optimal_threshold(y_true_val, y_pred_val)
         else:
             best_threshold_zero = None
-        #pdb.set_trace()
-        # Test set 평가
-        # 배운게 없으니 mode = 'Full', ghead를 가지고 바로 Inference해야 함.
+
         (test_loss_zero, test_auc_zero, test_precision_zero, test_recall_zero, 
          test_f1_zero, test_acc_zero, all_y_true_zero, all_y_pred_zero
         ) = final_test_evaluate(
@@ -1177,6 +1494,21 @@ def main():
         logger.info(f"[Zero-shot] Test Results: "
                    f"AUC={test_auc_zero:.4f} ACC={test_acc_zero:.4f} "
                    f"Prec={test_precision_zero:.4f} Rec={test_recall_zero:.4f} F1={test_f1_zero:.4f}")
+
+        # ✅ wandb: zero-shot 결과
+        _wandb_log({
+            "zero_shot/test_loss": float(test_loss_zero),
+            "zero_shot/test_auc": float(test_auc_zero),
+            "zero_shot/test_acc": float(test_acc_zero),
+            "zero_shot/test_precision": float(test_precision_zero),
+            "zero_shot/test_recall": float(test_recall_zero),
+            "zero_shot/test_f1": float(test_f1_zero),
+            "zero_shot/threshold": float(best_threshold_zero) if best_threshold_zero is not None else None,
+        })
+        _wandb_summary_set({
+            "final/zero_shot_test_auc": float(test_auc_zero),
+            "final/zero_shot_test_acc": float(test_acc_zero),
+        })
         
         # 결과 래핑
         if full_metrics is not None:
@@ -1237,6 +1569,15 @@ def main():
 
         save_results_(args_for_save, results)
         logger.info("Results saved")
+
+        # ✅ wandb 종료
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.finish()
+        except Exception:
+            pass
+
         return # 여기서 종료!
 
     # =========================================================
@@ -1275,17 +1616,12 @@ def main():
     import numpy as _np
 
     for r in range(R):
-        # [핵심] 시드 고정 위치 변경 (재현성 확보)
         current_seed = args.random_seed + (r + 1)
-        # args.random_seed 자체는 바꾸지 않고 로컬 변수로 처리하거나
-        # 아래처럼 args를 바꾸고 fix_seed 호출
         fix_seed(current_seed) 
         
-        # 모델 초기화
         model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
         model_few.set_freeze_target() 
 
-        # Optimizer 설정 (LR 분리)
         gat_params_few = []
         global_params_few = []
         
@@ -1293,13 +1629,21 @@ def main():
             if not p.requires_grad: continue
             if 'basis' in name: 
                 gat_params_few.append(p)
-            else: # Head
+            else:
                 global_params_few.append(p)
         
         gat_lr_few = args.source_lr_few * 0.1 
         global_lr_few = args.source_lr_few
         
         logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
+
+        # ✅ wandb: episode/seed/lr 기록
+        _wandb_log({
+            "few/episode": int(r + 1),
+            "few/episode_seed": int(current_seed),
+            "few/gat_lr": float(gat_lr_few),
+            "few/global_lr": float(global_lr_few),
+        })
 
         optimizer_few = optim.Adam(
             [
@@ -1318,13 +1662,11 @@ def main():
         )
         logger.info(f"[Few-shot][Ep {r+1}] LR schedule: warmup_epochs={warmup_epochs_few}, final_mult={args.min_lr_mult}")
 
-        # 데이터 샘플링 (변경된 시드 적용됨)
         if args.few_shot > 0:
             train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
         else:
             train_loader_epi = train_loader_t 
 
-        # 학습 및 검증
         (train_losses_few, val_losses_few,
          train_aucs_few,   val_aucs_few,
          train_precisions_few, val_precisions_few,
@@ -1333,18 +1675,32 @@ def main():
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
         ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, patience=50, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+                               optimizer_few, device, args.train_epochs, is_binary_t, patience=50,
+                               mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
-        # 테스트
         (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,
          test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
-            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few, mode='Few', args = args
+            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few,
+            mode='Few', args = args
         )
 
         logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} ACC={test_acc_few:.4f} "
                     f"Prec={test_precision_few:.4f} Rec={test_recall_few:.4f} F1={test_f1_few:.4f}")
 
-        # 누적
+        # ✅ wandb: episode test 결과
+        _wandb_log({
+            "few_ep/test_loss": float(test_loss_few),
+            "few_ep/test_auc": float(test_auc_few),
+            "few_ep/test_acc": float(test_acc_few),
+            "few_ep/test_precision": float(test_precision_few),
+            "few_ep/test_recall": float(test_recall_few),
+            "few_ep/test_f1": float(test_f1_few),
+            "few_ep/best_epoch": int(best_epoch_few),
+            "few_ep/best_val_auc": float(best_val_auc_few),
+            "few_ep/best_threshold": float(best_threshold_few) if best_threshold_few is not None else None,
+            "few_ep/episode": int(r + 1),
+        })
+
         acc['train_losses']  = accum(acc['train_losses'],  train_losses_few)
         acc['val_losses']    = accum(acc['val_losses'],    val_losses_few)
         acc['train_aucs']    = accum(acc['train_aucs'],    train_aucs_few)
@@ -1363,9 +1719,7 @@ def main():
 
         y_true_last, y_pred_last = all_y_true_few, all_y_pred_few 
 
-    # 평균 계산 및 저장
     train_losses_few_mean = finalize_mean(acc['train_losses'])
-    # ... (나머지 평균 계산 코드 동일) ...
     val_losses_few_mean   = finalize_mean(acc['val_losses'])
     train_aucs_few_mean   = finalize_mean(acc['train_aucs'])
     val_aucs_few_mean     = finalize_mean(acc['val_aucs'])
@@ -1382,6 +1736,22 @@ def main():
     mean_test_loss, mean_test_auc, mean_test_prec, mean_test_rec, mean_test_f1, mean_test_acc = ep_arr.mean(axis=0).tolist()
     Rf = float(max(len(ep_best_epochs), 1))
     best_epoch_few_mean = int(round(sum(ep_best_epochs) / Rf))
+
+    # ✅ wandb: few-shot 최종 평균
+    _wandb_log({
+        "few_mean/test_loss": float(mean_test_loss),
+        "few_mean/test_auc": float(mean_test_auc),
+        "few_mean/test_acc": float(mean_test_acc),
+        "few_mean/test_precision": float(mean_test_prec),
+        "few_mean/test_recall": float(mean_test_rec),
+        "few_mean/test_f1": float(mean_test_f1),
+        "few_mean/best_epoch": int(best_epoch_few_mean),
+    })
+    _wandb_summary_set({
+        "final/few_shot_test_auc_mean": float(mean_test_auc),
+        "final/few_shot_test_acc_mean": float(mean_test_acc),
+        "final/few_shot_best_epoch_mean": int(best_epoch_few_mean),
+    })
 
     # 결과 래핑
     if full_metrics is not None:
@@ -1442,6 +1812,15 @@ def main():
     save_results_(args_for_save, results)
     logger.info("Results saved")
     logger.info(f"Total experiment time: {format_time(time.time() - start_time)}")
+
+    # ✅ wandb: 종료 전 최종 시간/종료
+    _wandb_log({"exp/total_time_sec": float(time.time() - start_time)})
+    try:
+        import wandb
+        if wandb.run is not None:
+            wandb.finish()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

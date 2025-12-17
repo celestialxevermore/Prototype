@@ -53,7 +53,7 @@ class Model(nn.Module):
         self.latent_graph = LatentCompositeGraph(args, input_dim = self.graph_dim, n_graphs = args.n_graphs, n_nodes = args.n_nodes, node_dim = self.input_dim)
         
         # (2) GraphQuantizer : FGW-based quantization module 
-        self.graph_quantizer = GraphQuantizer(args, alpha = self.alpha, eps = self.eps)
+        self.graph_quantizer = GraphQuantizer(args, alpha = args.alpha, tau = args.tau, eps = self.eps)
 
         # (3) LatentCompositeGNN : Head-wise message passing + readout 
         self.gnn_experts = LatentCompositeGNN(
@@ -121,12 +121,12 @@ class Model(nn.Module):
                     nn_init.zeros_(m.bias)
 
     def set_freeze_target(self):
-        for p in self.parameters(): p.requires_grad = True
-        for p in self.latent_graph.parameters(): p.requires_grad = True
-        for p in self.graph_quantizer.parameters(): p.requires_grad = True
+        for p in self.parameters(): p.requires_grad = False
+        #for p in self.latent_graph.parameters(): p.requires_grad = True
+        #for p in self.graph_quantizer.parameters(): p.requires_grad = True
         for p in self.gnn_experts.parameters(): p.requires_grad = True
         for p in self.ghead2.parameters(): p.requires_grad = True
-        for p in self.thead.parameters(): p.requires_grad = True
+        #for p in self.thead.parameters(): p.requires_grad = True
     # ---- training ----
     def forward(self, batch, y):
         total_loss = 0.0 
@@ -149,7 +149,7 @@ class Model(nn.Module):
             fgw_loss = self.fgw_loss 
             current_mode = getattr(self, 'mode', 'Full')
             if current_mode == 'Few':
-                total_loss = global_loss + (self.args.fgw_alpha * fgw_loss)
+                total_loss = global_loss #+ (self.args.fgw_alpha * fgw_loss)
             else: 
                 total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss)
             return total_loss
@@ -211,14 +211,15 @@ class Model(nn.Module):
             source_feat = self.x_basis[:, 1:, :], 
             lcg_struct = lcg_struct, 
             lcg_feat = lcg_feat, 
-            batch = batch
-        )
+            batch = batch,
+            )
         self.fgw_loss = fgw_loss
 
         expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
+
         expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
         current_mode = getattr(self, 'mode', 'Full')
-        print(f"current mode : {current_mode}")
+        
         if current_mode == 'Few':
             global_pred = self.ghead2(expert_outputs)
         else:

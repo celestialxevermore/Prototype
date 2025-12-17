@@ -415,23 +415,45 @@ def prepare_embedding_dataloaders(args, dataset_name):
     val_dataset = [train_val_embeddings[i] for i in val_idx]
     test_dataset = [embeddings[i] for i in test_idx]
     
+
+    '''
+        2025.12.08 수정
+        전역 시드 상태 여부 상관없이 args.random-seed
+    '''
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.random_seed)
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32 
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+    print(f">>> [DataLoader] Created isolated generator with seed {args.random_seed}")
     # DataLoader 생성
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True
+        shuffle=True,
+        generator=loader_generator,
+        worker_init_fn=seed_worker,
+        num_workers=0
+
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
-        shuffle=False
+        shuffle=False,
+        generator=loader_generator,
+        worker_init_fn=seed_worker,
+        num_workers=0
     )
     
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
-        shuffle=False
+        shuffle=False,
+        generator=loader_generator,
+        worker_init_fn=seed_worker,
+        num_workers=0
     )
     
     print(f"Training data size: {len(train_dataset)}")
@@ -506,6 +528,61 @@ def get_few_shot_embedding_samples(train_loader, args):
    #print(f"Class distribution in few-shot data: {dict(class_dist)}")
    
    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
+
+'''
+    2025.12.08 ge_few_shot_embedding_samples 수정
+    def get_few_shot_embedding_samples(train_loader, args):
+    """train_loader에서 embedding data의 few-shot 샘플링을 수행 (표준 K-shot)"""
+    
+    # -------------------------------------------------------------------------
+    # [1] Sampling을 위한 시드 고정 (Global State 격리)
+    # -------------------------------------------------------------------------
+    # np.random뿐만 아니라 python random도 고정해야 support_data가 항상 똑같이 뽑힙니다.
+    np.random.seed(args.random_seed)
+    random.seed(args.random_seed)
+    
+    dataset = train_loader.dataset
+    labels = [data['y'].item() for data in dataset]
+    num_classes = len(set(labels))
+    
+    shot_per_class = args.few_shot
+    
+    support_data = []
+    for cls in range(num_classes):
+        cls_data = [data for data in dataset if data['y'].item() == cls]
+        
+        if len(cls_data) < shot_per_class:
+            # warnings.warn(...) # 필요하면 주석 해제
+            selected = random.choices(cls_data, k=shot_per_class)
+        else:
+            selected = random.sample(cls_data, k=shot_per_class)
+        
+        support_data.extend(selected)
+    
+    # -------------------------------------------------------------------------
+    # [2] DataLoader를 위한 독립 Generator 생성 (핵심)
+    # -------------------------------------------------------------------------
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.random_seed)
+
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    # -------------------------------------------------------------------------
+    # [3] DataLoader 생성 (Generator 주입)
+    # -------------------------------------------------------------------------
+    return DataLoader(
+        support_data, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        generator=loader_generator, # <--- 여기가 없으면 Few-shot 학습 곡선도 널뜁니다!
+        worker_init_fn=seed_worker,
+        num_workers=0
+    )
+'''
+
 
 
 def load_tabular_and_split(args, DATASETS, dataset_name, few_shot=False):

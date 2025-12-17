@@ -127,34 +127,31 @@ class LatentCompositeGNN(nn.Module):
     def forward(self, Fy_res: torch.Tensor, Ay_sel: torch.Tensor):
         """
         Args:
-            Fy_res: [M, K, D] (Static LCG Features) - 배치 차원 없음!
-            Ay_sel: [M, K, K] (Static LCG Structure)
+            Fy_res: [B, M, K, D] (Batched LCG Features)
+            Ay_sel: [B, M, K, K] (Batched LCG Structure)
         Returns:
-            expert_outputs : [1, M, D] (Broadcasting을 위해 1 추가)
+            expert_outputs : [B, M, D]
         """
-        # [수정] 3D 텐서가 들어오므로 B를 풀지 않고 M, K, D만 가져옴
-        M, K, D = Fy_res.shape
+        B, M, K, D = Fy_res.shape
+        
         expert_outputs = []
 
+        # M개의 LCG에 대해 각각 처리
         for m in range(self.n_graphs):
-            # [Pairing] m-th LCG -> m-th GNN
+            # [B, K, D] & [B, K, K] 추출
+            node_in = Fy_res[:, m, :, :]  # [B, K, D]
+            adj_in = Ay_sel[:, m, :, :]   # [B, K, K]
             
-            # Input slicing: [K, D] & [K, K]
-            node_in = Fy_res[m]
-            adj_in = Ay_sel[m]
-            
-            node_in = node_in.unsqueeze(0)
-            adj_in = adj_in.unsqueeze(0)
-            
-            # 1. GNN Update -> [1, K, D]
+            # 1. GNN Update -> [B, K, D]
             node_out = self.graph_gnns[m](node_in, adj_in)
             
-            # 2. Readout (Pooling) -> [1, D]
+            # 2. Readout (Pooling) -> [B, D]
             graph_vec = self.readouts[m](node_out)
             
-            # 리스트에 추가
-            expert_outputs.append(graph_vec.unsqueeze(1)) # [1, 1, D]
+            # [B, D] -> [B, 1, D] (M 차원 추가)
+            expert_outputs.append(graph_vec.unsqueeze(1))
 
+        # List of [B, 1, D] -> [B, M, D]
         expert_outputs = torch.cat(expert_outputs, dim=1)
-        
+
         return expert_outputs

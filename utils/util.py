@@ -38,6 +38,8 @@ def fix_seed(seed):
 
     torch.use_deterministic_algorithms(True)
     print(f">>> [System] Seed {seed} FIXED. Deterministic algorithms ENABLED.")
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
     # torch.backends.cudnn.benchmark = True      # False → True
     # torch.backends.cudnn.deterministic = False # True → False
     # torch.use_deterministic_algorithms(False)  # True → False
@@ -399,7 +401,7 @@ def save_results_(args, results):
         f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
         args.source_data,
         f"args_seed:{args.random_seed}",
-        f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nbasis-{args.num_basis_layers}_{args.basis_type}_{args.attn_type}_fgw_alpha_{args.fgw_alpha}_vqbeta_{args.vq_beta}_des_{args.des}"
+        f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nbasis-{args.num_basis_layers}_{args.basis_type}_{args.attn_type}_struct_hidden_dim_{args.struct_hidden_dim}_source_lr_{args.source_lr}_source_lr_few_{args.source_lr_few}_fgw_alpha_{args.fgw_alpha}_vqbeta_{args.vq_beta}_alpha_{args.alpha}_tau_{args.tau}_entropic_reg_{args.entropy_reg}_soft_tau{args.soft_tau}_des_{args.des}"
     )
     os.makedirs(exp_dir, exist_ok=True)
     dataset_file_path = os.path.join(
@@ -411,9 +413,10 @@ def save_results_(args, results):
     #filename = f"f{args.few_shot}_b{args.batch_size}_l{args.num_shared_layers}_l{args.num_basis_layers}_h{args.num_basis_heads}_{timestamp}.json"
     filename = (
         f"f{args.few_shot}_b{args.batch_size}"
-        f"_ngraphs{args.n_graphs}_nnodes{args.n_nodes}_gdim{args.graph_dim}"
+        f"_ngraphs{args.n_graphs}_nnodes{args.n_nodes}_gdim{args.graph_dim}_struct_hidden_dim{args.struct_hidden_dim}"
         f"_nbasis{args.num_basis_layers}"
-        f"_{args.basis_type}_{args.attn_type}_fgwalpha{args.fgw_alpha}_vqbeta{args.vq_beta}_{timestamp}.json"
+        f"_slr_{args.source_lr}_slrf_{args.source_lr_few}"
+        f"_{args.basis_type}_{args.attn_type}_fgwalpha{args.fgw_alpha}_vqbeta{args.vq_beta}_alpha_{args.alpha}_tau{args.tau}_soft_tau{args.soft_tau}_entropic_reg_{args.entropy_reg}{timestamp}.json"
     )
     filepath = os.path.join(exp_dir, filename)
 
@@ -430,6 +433,7 @@ def save_results_(args, results):
             "few dataset learning_rate": args.source_lr_few,
             "llm_models": args.llm_model,
             "dropout_rate": args.dropout_rate,
+            "struct_hidden_dim" : args.struct_hidden_dim,
             "hidden_dim": args.hidden_dim,
             "num_shared_layers": args.num_shared_layers,
             "num_basis_layers": args.num_basis_layers,
@@ -439,7 +443,11 @@ def save_results_(args, results):
             "basis_type":args.basis_type,
             "attn_type":args.attn_type,
             "fgw_alpha":args.fgw_alpha,
-            "vq_beta":args.vq_beta
+            "alpha":args.alpha,
+            "vq_beta":args.vq_beta,
+            "tau":args.tau,
+            "soft_tau":args.soft_tau,
+            "entropic_reg":args.entropy_reg,
         },
         "embed_type": args.embed_type,
         "edge_type": args.edge_type,
