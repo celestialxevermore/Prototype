@@ -610,7 +610,8 @@ def prepare_ml_results(args, full_baseline_results, few_baseline_results):
             f"{baseline}_best_full_acc": full_baseline_results[baseline][f'test_{model_prefix}_acc'],
             f"{baseline}_best_full_precision": full_baseline_results[baseline][f'test_{model_prefix}_precision'],
             f"{baseline}_best_full_recall": full_baseline_results[baseline][f'test_{model_prefix}_recall'],
-            f"{baseline}_best_full_f1": full_baseline_results[baseline][f'test_{model_prefix}_f1']
+            f"{baseline}_best_full_f1": full_baseline_results[baseline][f'test_{model_prefix}_f1'],
+            f"{baseline}_best_full_auprc": full_baseline_results[baseline][f'test_{model_prefix}_auprc'],
         }
         
         # Best results for few-shot
@@ -619,7 +620,8 @@ def prepare_ml_results(args, full_baseline_results, few_baseline_results):
             f"{baseline}_best_few_acc": few_baseline_results[baseline][f'test_{model_prefix}_acc'],
             f"{baseline}_best_few_precision": few_baseline_results[baseline][f'test_{model_prefix}_precision'],
             f"{baseline}_best_few_recall": few_baseline_results[baseline][f'test_{model_prefix}_recall'],
-            f"{baseline}_best_few_f1": few_baseline_results[baseline][f'test_{model_prefix}_f1']
+            f"{baseline}_best_few_f1": few_baseline_results[baseline][f'test_{model_prefix}_f1'],
+            f"{baseline}_best_full_auprc": full_baseline_results[baseline][f'test_{model_prefix}_auprc'],
         }
     
     return results

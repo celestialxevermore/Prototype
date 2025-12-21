@@ -29,12 +29,21 @@ def xgboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, 
     X_valid_copy = X_valid.copy()
     X_test_copy = X_test.copy()
     
-    # XGBoost는 내부 enable_categorical=True 사용
+    from pandas.api.types import CategoricalDtype
+
+    # XGBoost categorical: train 기준으로 category를 고정 + unseen은 __UNK__ 처리
     for col in categorical_columns:
-        X_train_copy[col] = X_train_copy[col].astype('category')
-        X_valid_copy[col] = X_valid_copy[col].astype('category')
-        X_test_copy[col] = X_test_copy[col].astype('category')
-    
+        # 1) train에서 등장한 카테고리 목록 확정
+        train_cats = pd.Series(X_train_copy[col]).astype("category").cat.categories
+
+        # 2) UNK까지 포함한 dtype 만들기
+        cat_type = CategoricalDtype(categories=list(train_cats) + ["__UNK__"])
+
+        # 3) train에 없던 값은 __UNK__로 치환 후, 같은 dtype으로 캐스팅
+        X_train_copy[col] = X_train_copy[col].where(X_train_copy[col].isin(train_cats), "__UNK__").astype(cat_type)
+        X_valid_copy[col] = X_valid_copy[col].where(X_valid_copy[col].isin(train_cats), "__UNK__").astype(cat_type)
+        X_test_copy[col]  = X_test_copy[col].where(X_test_copy[col].isin(train_cats), "__UNK__").astype(cat_type)
+        
     # Determine number of classes
     num_classes = len(np.unique(y_train))
     is_binary = num_classes == 2
@@ -98,15 +107,16 @@ def xgboost_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, 
     logging.info(f"[XGBoost] Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation Loss: {best_loss:.4f}")
     # print(f"Best max_depth: {best_max_depth}, Best n_estimators: {best_n_estimators} with Validation AUC: {best_auc:.4f}")
     params['max_depth'] = best_max_depth
-    evallist = [(dtrain, 'train'), (dtest, 'valid')]
+    evallist = [(dtrain, 'train'), (dvalid, 'valid')]
     evals_result = {}
     bst = xgb.train(params, dtrain, best_n_estimators, evals=evallist, evals_result=evals_result, verbose_eval=False)
-    
-    # Make predictions on test set
+
+    # Make predictions on test set (테스트 평가는 여기서만)
     y_test_pred_proba = bst.predict(dtest)
     test_loss = log_loss(y_test, y_test_pred_proba) if is_binary else log_loss(y_test, y_test_pred_proba)
-    test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = compute_overall_accuracy(y_test_pred_proba, y_test, num_classes, threshold=0.5, activation=False)
-    
+    test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = compute_overall_accuracy(
+        y_test_pred_proba, y_test, num_classes, threshold=0.5, activation=False
+    )
     total_results = {
         'test_xgb_loss': test_loss,
         'test_xgb_acc': test_acc,

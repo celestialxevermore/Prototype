@@ -55,7 +55,7 @@ def get_args():
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
                                  'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
-                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog'])
+                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog', 'Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -568,10 +568,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=10):
         logger.info(f"[Pre][Epoch {epoch+1}/{total_epochs}] mean AUC: {mean_auc:.4f} per-source: {['%.4f'%x for x in aucs]}")
 
         if improved:
-            best_state = model.state_dict()
+            #best_state = model.state_dict()
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             last_best_epoch = epoch
             no_improve = 0
-            # 저장: 최신 고정 파일 + 히스토리 파일
+            
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -998,7 +999,7 @@ def main():
              train_accs_few,       val_accs_few,
              best_epoch_few, best_val_auc_few, best_threshold_few
             ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
-                                   optimizer_few, device, args.train_epochs, is_binary_t, patience=20, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+                                   optimizer_few, device, args.train_epochs, is_binary_t, patience=10, mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
             # ---- 테스트 ----
             (test_loss_few, test_auc_few, test_precision_few, test_recall_few, test_f1_few,

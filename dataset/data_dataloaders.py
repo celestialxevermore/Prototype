@@ -95,10 +95,15 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
             "hungarian": ['target_binary', ['no','yes']],
             "switzerland": ['target_binary', ['no','yes']],
             "heart_statlog": ['target_binary', ['no','yes']],
-            "heart": ['target_binary', ['no','yes']]
+            "heart": ['target_binary', ['no','yes']], 
+            "Heart_disease_statlog": ['target_binary', ['no','yes']],
+            "heart_failure_clinical_records": ['target_binary', ['no','yes']],
+            "Cardiovascular_Disease_Dataset": ['target_binary', ['no','yes']],
+            "Medicaldataset": ['target_binary', ['no','yes']],
+            "cardio_SAheart": ['target_binary', ['no','yes']],
+            "Erbil_Cardiovascular_Health_Dataset": ['target_binary', ['No Heart Problem','Has Heart Problem']],
         }
     
-    # heart 데이터셋들은 새로운 전처리 함수로 처리
     heart_datasets = ['cleveland', 'hungarian', 'switzerland', 'heart_statlog']
     if data_name in heart_datasets:
         return preprocessing_heart_datasets(DATASETS, data_name)

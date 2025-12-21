@@ -31,14 +31,14 @@ def get_args():
     parser.add_argument('--source_data', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g',
                                 'diabetes','heart','myocardial','cleveland', 
-                                'heart_statlog','hungarian','switzerland'])
+                                'heart_statlog','hungarian','switzerland', 'Heart_disease_statlog','Cardiovascular_Disease_Dataset','Heart_disease_statlog', 'Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset'])
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--hidden_dim', type = int, default = 128)
     parser.add_argument('--dropout_rate', type=float, default=0.3)
     parser.add_argument('--learning_rate', type=float, default=0.0001)
-    parser.add_argument('--train_epochs', type=int, default=200)
+    parser.add_argument('--train_epochs', type=int, default=50)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--base_dir', type=str, required=True)
@@ -65,6 +65,12 @@ def main():
      y_train_full, y_val_full, y_test_full), _ = ml_prepare_tabular_dataloaders(
         args, args.source_data, args.random_seed
     )
+    print("[Main][LeakCheck] suspicious:",
+          [c for c in X_train_full.columns if c.lower() in ["index","unnamed: 0","level_0","id"]])
+
+    suspicious_cols = [c for c in X_train_full.columns if c.lower() in ["index","unnamed: 0","level_0","id"]]
+    if len(suspicious_cols) > 0:
+        print("[Main][LeakCheck] head:\n", X_train_full[suspicious_cols].head())
 
     X_train_few, y_train_few = get_few_shot_tabular_samples(X_train_full, y_train_full, args)
     X_val_few, y_val_few = X_val_full, y_val_full
@@ -85,38 +91,58 @@ def main():
             # 1) Random Forest만을 위한 데이터 사본 생성
             # --------------------------------------------------------
             X_train_rf = X_train_full.copy()
-            X_val_rf = X_val_full.copy()
-            X_test_rf = X_test_full.copy()
+            X_val_rf   = X_val_full.copy()
+            X_test_rf  = X_test_full.copy()
 
-            # 범주형 열을 선택
+            X_train_few_rf = X_train_few.copy()
+            X_val_few_rf   = X_val_few.copy()
+            X_test_few_rf  = X_test_few.copy()
+
+            # 범주형 열 선택 (train 기준)
             categorical_columns = X_train_rf.select_dtypes(include=['object', 'category']).columns
 
-            # Label Encoding (RF 전용)
+            # --------------------------------------------------------
+            # 2) Label Encoding (RF 전용) - **누수 방지**
+            #    - fit은 train에서만
+            #    - val/test(및 few-shot)에서 unseen은 -1로 처리
+            # --------------------------------------------------------
             for col in categorical_columns:
                 le = LabelEncoder()
-                # 모든 데이터셋의 unique 값을 합쳐서 fit
-                all_values = pd.concat([
-                    X_train_rf[col],
-                    X_val_rf[col],
-                    X_test_rf[col]
-                ]).unique()
-                le.fit(all_values)
-                
-                # transform 적용
-                X_train_rf[col] = le.transform(X_train_rf[col])
-                X_val_rf[col] = le.transform(X_val_rf[col])
-                X_test_rf[col] = le.transform(X_test_rf[col])
-            
-            # Random Forest 학습 및 평가
+
+                # fit: train only
+                X_train_rf[col] = X_train_rf[col].astype(str)
+                le.fit(X_train_rf[col].values)
+
+                # mapping 생성
+                mapping = {cls: idx for idx, cls in enumerate(le.classes_)}
+
+                def transform_with_unk(series):
+                    series = series.astype(str)
+                    return series.map(mapping).fillna(-1).astype(int)
+
+                # transform: full split
+                X_train_rf[col] = transform_with_unk(X_train_rf[col])
+                X_val_rf[col]   = transform_with_unk(X_val_rf[col])
+                X_test_rf[col]  = transform_with_unk(X_test_rf[col])
+
+                # transform: few split (같은 mapping 사용)
+                X_train_few_rf[col] = transform_with_unk(X_train_few_rf[col])
+                X_val_few_rf[col]   = transform_with_unk(X_val_few_rf[col])
+                X_test_few_rf[col]  = transform_with_unk(X_test_few_rf[col])
+
+            # --------------------------------------------------------
+            # 3) Random Forest 학습 및 평가
+            # --------------------------------------------------------
             full_baseline_results[baseline] = random_forest_benchmark(
                 args,
-                X_train_rf, X_val_rf, X_test_rf, 
+                X_train_rf, X_val_rf, X_test_rf,
                 y_train_full, y_val_full, y_test_full,
                 is_binary=is_binary
             )
+
             few_baseline_results[baseline] = random_forest_benchmark(
                 args,
-                X_train_few.copy(), X_val_few.copy(), X_test_few.copy(), 
+                X_train_few_rf, X_val_few_rf, X_test_few_rf,
                 y_train_few, y_val_few, y_test_few,
                 is_binary=is_binary
             )

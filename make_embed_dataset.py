@@ -40,7 +40,11 @@ class TabularToEmbeddingDataset:
             "heart1" : ['target_binary', ['no', 'yes']],
             "Heart_disease_statlog" : ['target_binary', ['no','yes']],
             "heart_disease" : ['target_binary', ['no','yes']],
-            "heart_disease_clean" : ['target_binary', ['no','yes']]
+            "heart_disease_clean" : ['target_binary', ['no','yes']],
+            "Cardio_framingham" : ['target_binary', ['no','yes']],
+            "cardio_SAheart" : ['target_binary', ['no','yes']],
+            "Erbil_Cardiovascular_Health_Dataset" : ['target_binary', ['No Heart Problem', 'Has Heart Problem']],
+            "heart_failure_clinical_records" : ['target_binary', ['no','yes']],
 
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)
@@ -101,7 +105,7 @@ class TabularToEmbeddingDataset:
                 DATASETS = DATASETS.drop('Result', axis = 1)
             elif data_name == 'heart1' and 'output' in DATASETS.columns:
                 DATASETS['target_binary'] = DATASETS['output']
-                DATASETS = DATASETS.drop('output', axis = 1)
+                DATASETS = DATASETS.drop('output', axis = 1) 
 
             class_mapping = {label: idx for idx, label in enumerate(class_values)}
             

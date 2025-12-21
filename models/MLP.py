@@ -219,7 +219,7 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
             if valid_loss < best_valid_metrics['loss'] and valid_f1 >= best_valid_metrics['f1']:
                 best_valid_metrics['loss'] = valid_loss
                 best_valid_metrics['f1'] = valid_f1
-                best_model = model.state_dict().copy()
+                best_model = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 counter = 0
             else:
                 counter += 1

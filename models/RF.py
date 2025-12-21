@@ -106,16 +106,15 @@ def random_forest_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_
                 
                 # 이진분류면 y_valid_pred_proba[:, 1], 다중분류면 전체 배열
                 if is_binary:
-                    y_valid_pred = (y_valid_pred_proba[:, 1] > args.threshold).astype(int)
                     valid_loss = log_loss(y_valid, y_valid_pred_proba[:, 1])
+                    valid_score = y_valid_pred_proba[:, 1]        # <-- 이걸 넘김
                 else:
-                    y_valid_pred = y_valid_pred_proba.argmax(axis=1)
                     valid_loss = log_loss(y_valid, y_valid_pred_proba)
-                
-                # compute_overall_accuracy 함수를 이용해 AUC, ACC, F1 등 계산
+                    valid_score = y_valid_pred_proba             # <-- multiclass는 전체
+
                 valid_acc, valid_auc, valid_auprc, valid_f1, valid_recall, valid_precision = \
-                    compute_overall_accuracy(y_valid_pred, y_valid, num_class,
-                                             threshold=args.threshold, activation=False)
+                    compute_overall_accuracy(valid_score, y_valid, num_class,
+                                            threshold=args.threshold, activation=False)
                 
                 logging.info(
                     f"[RandomForest] n_estimators={n_est}, max_depth={depth}, "
@@ -154,15 +153,15 @@ def random_forest_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_
     y_test_pred_proba = model.predict_proba(X_test_final)
     
     if is_binary:
-        y_test_pred = (y_test_pred_proba[:, 1] > args.threshold).astype(int)
         test_loss = log_loss(y_test, y_test_pred_proba[:, 1])
+        test_score = y_test_pred_proba[:, 1]
     else:
-        y_test_pred = y_test_pred_proba.argmax(axis=1)
         test_loss = log_loss(y_test, y_test_pred_proba)
+        test_score = y_test_pred_proba
 
     test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = \
-        compute_overall_accuracy(y_test_pred, y_test, num_class,
-                                 threshold=args.threshold, activation=False)
+        compute_overall_accuracy(test_score, y_test, num_class,
+                                threshold=args.threshold, activation=False)
 
     total_results = {
         'test_rf_loss': test_loss,
