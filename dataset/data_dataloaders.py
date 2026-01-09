@@ -116,7 +116,7 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
     class_mapping = {label: idx for idx, label in enumerate(class_values)}
     
     X = DATASETS[data_name][0].drop(class_name, axis=1)
-    X = X.reset_index()
+    X = X.reset_index(drop=True)
 
     y = DATASETS[data_name][0][class_name]
     y = y.map(class_mapping).astype(int)

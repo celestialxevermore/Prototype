@@ -160,12 +160,15 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
     
     # 11. 모델 초기화
     input_dim = X_train_processed.shape[1]
-    num_classes = 1 if is_binary else len(np.unique(y_train))
-    
-    print(f"[MLP] Model parameters - Input dim: {input_dim}, Hidden dim: {args.hidden_dim}, Output classes: {num_classes}, Is binary: {is_binary}")
-    
-    model = MLPClassifier(input_dim, args.hidden_dim, num_classes, args.dropout_rate, is_binary).to(device)
-    
+    n_classes = len(np.unique(y_train))
+    is_binary = (n_classes == 2)
+    out_dim = 1 if is_binary else n_classes
+
+    print(f"[MLP] Model parameters - Input dim: {input_dim}, Hidden dim: {args.hidden_dim}, "
+        f"Output dim: {out_dim}, n_classes: {n_classes}, Is binary: {is_binary}")
+
+    model = MLPClassifier(input_dim, args.hidden_dim, out_dim, args.dropout_rate, is_binary).to(device)
+
     criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     
@@ -238,6 +241,8 @@ def mlp_benchmark(args, X_train, X_valid, X_test, y_train, y_valid, y_test, is_b
         if is_binary:
             test_probs = torch.sigmoid(test_outputs).cpu().numpy()
             test_preds = (test_probs >= args.threshold).astype(int)
+            print(test_probs.shape)
+            
         else:
             test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
             test_preds = np.argmax(test_probs, axis=1)

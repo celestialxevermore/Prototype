@@ -1,253 +1,277 @@
-import json
-import csv
-import glob
 import os
+import json
+import glob
+import csv
+import argparse
 import numpy as np
 from collections import defaultdict
-import argparse
 
-def create_directory(path):
+
+def create_directory(path: str):
     if not os.path.exists(path):
         os.makedirs(path)
 
-def calculate_mean_std(values):
-    values = np.array(values)
-    mean = np.mean(values)
-    std = np.std(values, ddof=0)
-    return mean, std
 
-def create_combined_summary_by_model(results_by_config, full_results, dataset, base_dir):
-    """각 model_config별로 모든 설정의 모든 메트릭을 하나의 TSV 표로 생성"""
-    
-    # model_config별로 그룹화
-    results_by_model = defaultdict(dict)
-    full_results_by_model = defaultdict(dict)
-    
-    for key, data in results_by_config.items():
-        model_config, few_shot, batch_size = key
-        results_by_model[model_config][(few_shot, batch_size)] = data
-    
-    for key, data in full_results.items():
-        model_config, batch_size = key
-        full_results_by_model[model_config][batch_size] = data
-    
-    # 각 model_config별로 TSV 파일 생성
-    for model_config in results_by_model.keys():
-        config_data = results_by_model[model_config]
-        full_data = full_results_by_model.get(model_config, {})
-        
-        # few_shot과 batch_size별로 정렬
-        sorted_configs = sorted(config_data.items(), key=lambda x: (x[0][0], x[0][1]))  # few_shot, batch_size 순으로 정렬
-        
-        summary_dir = os.path.join(base_dir, f"{dataset}_summary", model_config)
-        create_directory(summary_dir)
-        
-        # 전체 결과를 담을 TSV 파일
-        combined_file = os.path.join(summary_dir, 'all_configs_combined.tsv')
-        
-        with open(combined_file, 'w', newline='') as f:
-            writer = csv.writer(f, delimiter='\t')
-            
-            # 헤더 작성 (설정별 컬럼명)
-            header = []
-            for (few_shot, batch_size), _ in sorted_configs:
-                header.append(f"f{few_shot}_b{batch_size}")
-            
-            # Full dataset 컬럼 추가 (batch_size별로)
-            unique_batch_sizes = sorted(set([bs for (fs, bs), _ in sorted_configs]))
-            for batch_size in unique_batch_sizes:
-                header.append(f"full_b{batch_size}")
-            
-            writer.writerow(header)
-            
-            # 각 메트릭별로 행 생성 (5개 메트릭)
-            for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
-                row = []
-                
-                # Few-shot 결과들
-                for (few_shot, batch_size), data in sorted_configs:
-                    values = data['few_shot'][metric]
-                    if values:
-                        mean, std = calculate_mean_std(values)
-                        row.append(f"{mean:.4f}({std:.4f})")
-                    else:
-                        row.append("")
-                
-                # Full dataset 결과들
-                for batch_size in unique_batch_sizes:
-                    if batch_size in full_data and metric in full_data[batch_size]:
-                        values = full_data[batch_size][metric]
-                        if values:
-                            mean, std = calculate_mean_std(values)
-                            row.append(f"{mean:.4f}({std:.4f})")
-                        else:
-                            row.append("")
-                    else:
-                        row.append("")
-                
-                writer.writerow(row)
+def mean_std(vals):
+    vals = np.array(vals, dtype=float)
+    return float(np.mean(vals)), float(np.std(vals, ddof=0))
 
-def process_json_files(directory_path, selected_datasets=None, selected_seeds=None):
-    if selected_datasets:
-        print(f"처리할 데이터셋: {selected_datasets}")
-    
-    if selected_seeds:
-        selected_seeds = [str(seed) for seed in selected_seeds]  # 문자열로 변환
-    
-    datasets_to_process = selected_datasets if selected_datasets else ['heart']
-    
-    for dataset in datasets_to_process:
-        results_by_config = {}
-        
-        # ✅ base_dir이 이미 dataset 수준이거나 더 깊은 경우 그대로 사용
-        if os.path.isdir(directory_path) and any(name.startswith("args_seed:") for name in os.listdir(directory_path)):
-            # 이미 args_seed: 폴더가 포함된 경로일 경우
-            dataset_path = directory_path
-        elif os.path.isdir(directory_path) and "ngraphs-" in directory_path:
-            # ngraphs- 폴더 내부 경로인 경우
-            dataset_path = os.path.dirname(directory_path)
-        else:
-            # 기존 구조 (base_dir + dataset)
-            dataset_path = os.path.join(directory_path, dataset)
-            
-        if not os.path.exists(dataset_path):
-            print(f"경로를 찾을 수 없음: {dataset_path}")
+
+METRICS_ORDER = ["auc", "acc", "precision", "recall", "f1", "auprc"]  # auprc 마지막 고정
+
+
+def _first_level_dir(seed_dir: str, file_path: str) -> str:
+    """
+    seed_dir/CONFIG/.../file.json  -> CONFIG
+    """
+    rel = os.path.relpath(os.path.dirname(file_path), seed_dir)
+    first = rel.split(os.sep)[0] if rel else ""
+    return first
+
+
+def _extract_metrics_from_block(d: dict):
+    """
+    키가 뭐든 간에 마지막이 _auc, _acc, ... 로 끝나면 metric으로 인식.
+    예: Ours_best_full_auc, cat_best_few_auc 등 전부 처리됨.
+    """
+    out = {}
+    if not isinstance(d, dict):
+        return out
+    for k, v in d.items():
+        if not isinstance(k, str):
             continue
-        
-        json_files = []
-        processed_seeds = []
-        
-        # 선택된 시드가 있으면 해당 시드 경로만 처리
-        if selected_seeds:
-            for seed in selected_seeds:
-                seed_path = os.path.join(dataset_path, f"args_seed:{seed}")
-                if os.path.exists(seed_path):
-                    # 패턴을 실제 폴더 구조에 맞게 수정
-                    seed_json_pattern = os.path.join(seed_path, "TabularFLM/*/f*.json")
-                    seed_json_files = glob.glob(seed_json_pattern, recursive=True)
-                    if seed_json_files:
-                        json_files.extend(seed_json_files)
-                        processed_seeds.append(seed)
+        for m in METRICS_ORDER:
+            if k.endswith(f"_{m}"):
+                out[m] = v
+    return out
+
+
+def _extract_one_json(data: dict):
+    """
+    다양한 저장 포맷을 최대한 수용해서
+    - few_shot
+    - batch_size
+    - few_metrics (dict metric->value)
+    - full_metrics (dict metric->value)
+    를 뽑아냄.
+    """
+    hp = data.get("hyperparameters", data.get("args", {}))
+    few_shot = hp.get("few_shot", data.get("few_shot", None))
+    batch_size = hp.get("batch_size", data.get("batch_size", None))
+
+    res = data.get("results", {})
+
+    few_metrics = {}
+    full_metrics = {}
+
+    # (A) 너가 쓰던 DL 스타일: results = {"Ours":{...}, "Ours_few":{...}}
+    if isinstance(res, dict):
+        if "Ours_few" in res:
+            few_metrics = _extract_metrics_from_block(res.get("Ours_few", {}))
+        if "Ours" in res:
+            full_metrics = _extract_metrics_from_block(res.get("Ours", {}))
+
+    # (B) 혹시 Best_results 구조인 경우도 지원
+    # results = {"Best_results": {"few": {...}, "full": {...}}}
+    if (not few_metrics or not full_metrics) and isinstance(res, dict) and "Best_results" in res:
+        br = res.get("Best_results", {})
+        few_block = br.get("few", {})
+        full_block = br.get("full", {})
+
+        # few/full 내부가 dict이고, 그 안에 Ours 같은 키가 있든 없든 metric suffix로 뽑음
+        if not few_metrics:
+            if isinstance(few_block, dict):
+                # Ours 키가 있으면 그걸 우선
+                if "Ours_few" in few_block:
+                    few_metrics = _extract_metrics_from_block(few_block.get("Ours_few", {}))
+                elif "Ours" in few_block:
+                    few_metrics = _extract_metrics_from_block(few_block.get("Ours", {}))
                 else:
-                    print(f"시드 {seed}의 경로가 존재하지 않음: {seed_path}")
-        else:
-            # 모든 시드 처리 (기존 방식) - 패턴 수정
-            #json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/*/f*.json")
-            json_pattern = os.path.join(dataset_path, "args_seed:*/ngraphs-*/f*.json")
-            json_files = glob.glob(json_pattern, recursive=True)
-        
+                    few_metrics = _extract_metrics_from_block(few_block)
+
+        if not full_metrics:
+            if isinstance(full_block, dict):
+                if "Ours" in full_block:
+                    full_metrics = _extract_metrics_from_block(full_block.get("Ours", {}))
+                else:
+                    full_metrics = _extract_metrics_from_block(full_block)
+
+    # 최소 조건
+    if few_shot is None:
+        return None
+    if batch_size is None:
+        # batch_size가 json에 없을 수도 있으니 None 허용 -> 열 정렬에만 영향
+        batch_size = "NA"
+
+    # few/full 둘 중 하나라도 있으면 유효
+    if not few_metrics and not full_metrics:
+        return None
+
+    return str(few_shot), str(batch_size), few_metrics, full_metrics
+
+
+def summarize_seed_ignore_configs(base_dir: str):
+    # 1) seed 폴더 찾기
+    seed_dirs = sorted(glob.glob(os.path.join(base_dir, "args_seed:*")))
+    seed_dirs = [d for d in seed_dirs if os.path.isdir(d)]
+    if not seed_dirs:
+        raise RuntimeError(f"No args_seed:* directories found under: {base_dir}")
+
+    # 2) seed별로: config 평균(=seed 하나당 값) 만들기 위한 중간 저장소
+    # seed -> config -> few_shot -> metric -> value
+    seed_config_few = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    # seed -> config -> metric -> value  (full은 config당 1번만 쓰게)
+    seed_config_full = defaultdict(lambda: defaultdict(dict))
+
+    # few-shot 키 모으기 (전체 seed 통합)
+    all_few_shots = set()
+
+    for seed_dir in seed_dirs:
+        seed_name = os.path.basename(seed_dir)
+
+        # json 찾기: seed/config/.../*.json
+        json_files = glob.glob(os.path.join(seed_dir, "**/*.json"), recursive=True)
         if not json_files:
-            print(f"데이터셋 {dataset}에서 JSON 파일을 찾을 수 없음")
             continue
-        
-        # Full dataset 결과를 저장할 별도의 딕셔너리
-        full_results = defaultdict(lambda: {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': []})
-        
-        for json_file in json_files:
+
+        # 같은 (config, few_shot)에 json이 여러 개면 최신(mtime)만 쓰도록
+        best_json_by_run = {}  # (config, few_shot) -> (mtime, path)
+        best_json_by_config_for_full = {}  # config -> (mtime, path)
+
+        for jf in json_files:
             try:
-                with open(json_file, 'r') as f:
+                with open(jf, "r") as f:
                     data = json.load(f)
-                    
-                path_parts = json_file.split('/')
-                model_config = path_parts[-2]
-                
-                config_key = (
-                    model_config,
-                    data['hyperparameters']['few_shot'],
-                    data['hyperparameters']['batch_size']
-                )
-                
-                if config_key not in results_by_config:
-                    results_by_config[config_key] = {
-                        'few_shot': {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': []}
-                    }
-                
-                if 'Ours_few' in data['results']:
-                    results = data['results']['Ours_few']
-                    metrics = {
-                        'auc': results['Ours_best_few_auc'],
-                        'acc': results['Ours_best_few_acc'],
-                        'precision': results['Ours_best_few_precision'],
-                        'recall': results['Ours_best_few_recall'],
-                        'f1': results['Ours_best_few_f1']
-                    }
-                    for metric_name, value in metrics.items():
-                        results_by_config[config_key]['few_shot'][metric_name].append(value)
-                
-                if data['hyperparameters']['few_shot'] == 4 and isinstance(data['results']['Ours'], dict):
-                    results = data['results']['Ours']
-                    full_key = (model_config, data['hyperparameters']['batch_size'])
-                    metrics = {
-                        'auc': results['Ours_best_full_auc'],
-                        'acc': results['Ours_best_full_acc'],
-                        'precision': results['Ours_best_full_precision'],
-                        'recall': results['Ours_best_full_recall'],
-                        'f1': results['Ours_best_full_f1']
-                    }
-                    for metric_name, value in metrics.items():
-                        full_results[full_key][metric_name].append(value)
-                            
-            except Exception as e:
-                print(f"파일 처리 오류 {json_file}: {str(e)}")
-        
-        # 기존 개별 CSV 파일 저장
-        for config_key in results_by_config.keys():
-            model_config, few_shot, batch_size = config_key
-            
-            # 변경: 데이터셋 이름_summary 폴더 생성
-            summary_dir = os.path.join(directory_path, f"{dataset}_summary")
-            model_dir = os.path.join(summary_dir, model_config)
-            create_directory(model_dir)
-            
-            # 시드 정보 없이 간단한 파일명 사용
-            output_file = os.path.join(model_dir, f'f{few_shot}_b{batch_size}.csv')
-            
-            with open(output_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                
-                # Few-shot 결과
-                writer.writerow(['Few-shot Results:'])
-                for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
-                    values = results_by_config[config_key]['few_shot'][metric]
-                    if values:
-                        mean, std = calculate_mean_std(values)
-                        writer.writerow([f"{mean:.4f}({std:.4f})"])
-                
-                # Full dataset 결과
-                writer.writerow([''])
-                writer.writerow(['Full Dataset Results:'])
-                full_key = (model_config, batch_size)
-                if full_key in full_results:
-                    for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
-                        values = full_results[full_key][metric]
-                        if values:
-                            mean, std = calculate_mean_std(values)
-                            writer.writerow([f"{mean:.4f}({std:.4f})"])
-        
-        # 🔥 새로 추가: 각 model_config별로 모든 설정을 하나로 합친 TSV 파일 생성
-        create_combined_summary_by_model(results_by_config, full_results, dataset, directory_path)
-        
-        print(f"데이터셋 {dataset} 처리 완료!")
-        print(f"총 {len(results_by_config)}개 설정 조합 처리됨")
+            except Exception:
+                continue
+
+            extracted = _extract_one_json(data)
+            if extracted is None:
+                continue
+
+            few_shot, batch_size, few_metrics, full_metrics = extracted
+            all_few_shots.add(few_shot)
+
+            cfg = _first_level_dir(seed_dir, jf)
+            mtime = os.path.getmtime(jf)
+
+            run_key = (cfg, few_shot)
+            # 최신 json 유지
+            if run_key not in best_json_by_run or mtime > best_json_by_run[run_key][0]:
+                best_json_by_run[run_key] = (mtime, jf)
+
+            # full은 config 기준으로 1개만(중복 방지) -> 최신 json 유지
+            if full_metrics:
+                if cfg not in best_json_by_config_for_full or mtime > best_json_by_config_for_full[cfg][0]:
+                    best_json_by_config_for_full[cfg] = (mtime, jf)
+
+        # 이제 선택된 json들만 다시 읽어서 seed_config_* 채우기
+        for (cfg, few_shot), (_, jf) in best_json_by_run.items():
+            with open(jf, "r") as f:
+                data = json.load(f)
+            extracted = _extract_one_json(data)
+            if extracted is None:
+                continue
+            few_shot, batch_size, few_metrics, full_metrics = extracted
+
+            # few: config별 단일 값 저장
+            for m, v in few_metrics.items():
+                seed_config_few[seed_name][cfg][few_shot][m] = v
+
+        for cfg, (_, jf) in best_json_by_config_for_full.items():
+            with open(jf, "r") as f:
+                data = json.load(f)
+            extracted = _extract_one_json(data)
+            if extracted is None:
+                continue
+            few_shot, batch_size, few_metrics, full_metrics = extracted
+
+            for m, v in full_metrics.items():
+                seed_config_full[seed_name][cfg][m] = v
+
+    # 3) seed 하나당 값 만들기: (seed 내부 config 평균)
+    # seed -> few_shot -> metric -> seed_mean_value
+    seed_level_few = defaultdict(lambda: defaultdict(dict))
+    # seed -> metric -> seed_mean_value
+    seed_level_full = defaultdict(dict)
+
+    for seed_name, cfg_dict in seed_config_few.items():
+        # few-shot
+        for few_shot in all_few_shots:
+            for m in METRICS_ORDER:
+                vals = []
+                for cfg, fs_dict in cfg_dict.items():
+                    if few_shot in fs_dict and m in fs_dict[few_shot]:
+                        vals.append(fs_dict[few_shot][m])
+                if vals:
+                    seed_level_few[seed_name][few_shot][m] = float(np.mean(vals))
+
+        # full
+        full_vals_by_metric = defaultdict(list)
+        for cfg, met in seed_config_full[seed_name].items():
+            for m in METRICS_ORDER:
+                if m in met:
+                    full_vals_by_metric[m].append(met[m])
+
+        for m in METRICS_ORDER:
+            if full_vals_by_metric[m]:
+                seed_level_full[seed_name][m] = float(np.mean(full_vals_by_metric[m]))
+
+    # 4) 최종: seed들 사이 mean±std
+    # few_shot -> metric -> list(seed_mean)
+    agg_few = defaultdict(lambda: defaultdict(list))
+    agg_full = defaultdict(list)
+
+    for seed_name in seed_level_few.keys():
+        for few_shot, met in seed_level_few[seed_name].items():
+            for m in METRICS_ORDER:
+                if m in met:
+                    agg_few[few_shot][m].append(met[m])
+
+        for m in METRICS_ORDER:
+            if m in seed_level_full[seed_name]:
+                agg_full[m].append(seed_level_full[seed_name][m])
+
+    few_shots_sorted = sorted(list(all_few_shots), key=lambda x: int(x) if str(x).isdigit() else str(x))
+
+    # 5) 파일 저장: 딱 하나
+    out_dir = os.path.join(base_dir, "summary")
+    create_directory(out_dir)
+    out_path = os.path.join(out_dir, "all_configs_combined.tsv")
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+
+        # 행=metric, 열=few-shot + full
+        for m in METRICS_ORDER:
+            row = []
+            for fs in few_shots_sorted:
+                vals = agg_few[fs][m]
+                if vals:
+                    mu, sd = mean_std(vals)
+                    row.append(f"{mu:.4f}({sd:.4f})")
+                else:
+                    row.append("")
+            # full(맨 마지막)
+            if agg_full[m]:
+                mu, sd = mean_std(agg_full[m])
+                row.append(f"{mu:.4f}({sd:.4f})")
+            else:
+                row.append("")
+            writer.writerow(row)
+
+    print(f"[OK] Saved: {out_path}")
+    print(f"      columns: few_shot={few_shots_sorted} + [full]")
+    print(f"      rows: {METRICS_ORDER}")
+
 
 def main():
-    parser = argparse.ArgumentParser(description='Summarize DL results')
-    parser.add_argument('--base_dir', type=str, #/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_tabular_embedding_new_bio-clinical-bert
-                       default="/home/eungyeop/LLM/tabular/ProtoLLM/experiments/source_to_source_tabular_embedding_new_bio-clinical-bert",
-                       help='Base directory containing the results')
-    parser.add_argument('--datasets', nargs='+', type=str,
-                       help='Specific datasets to process (e.g., --datasets adult diabetes)')
-    parser.add_argument('--seeds', nargs='+', type=str,
-                       help='Specific seeds to include in analysis (e.g., --seeds 42 123 456)')
-    parser.add_argument('--best_seed', nargs='+', type=str,
-                       help='Specific best seeds to include in analysis (alias for --seeds)')
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_dir", type=str, required=True)
     args = parser.parse_args()
-    
-    # --best_seed를 --seeds 매개변수로 처리
-    selected_seeds = args.seeds if args.seeds else args.best_seed
-    
-    process_json_files(args.base_dir, args.datasets, selected_seeds)
+
+    summarize_seed_ignore_configs(args.base_dir)
+
 
 if __name__ == "__main__":
     main()

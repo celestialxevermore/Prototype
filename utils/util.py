@@ -621,7 +621,7 @@ def prepare_ml_results(args, full_baseline_results, few_baseline_results):
             f"{baseline}_best_few_precision": few_baseline_results[baseline][f'test_{model_prefix}_precision'],
             f"{baseline}_best_few_recall": few_baseline_results[baseline][f'test_{model_prefix}_recall'],
             f"{baseline}_best_few_f1": few_baseline_results[baseline][f'test_{model_prefix}_f1'],
-            f"{baseline}_best_full_auprc": full_baseline_results[baseline][f'test_{model_prefix}_auprc'],
+            f"{baseline}_best_few_auprc": few_baseline_results[baseline][f'test_{model_prefix}_auprc'],
         }
     
     return results

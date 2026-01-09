@@ -13,6 +13,7 @@ from models.RF import random_forest_benchmark
 import psutil 
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
+import math, copy
 p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
@@ -73,7 +74,14 @@ def main():
         print("[Main][LeakCheck] head:\n", X_train_full[suspicious_cols].head())
 
     X_train_few, y_train_few = get_few_shot_tabular_samples(X_train_full, y_train_full, args)
-    X_val_few, y_val_few = X_val_full, y_val_full
+
+    val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+
+    args_val = copy.deepcopy(args)
+    args_val.few_shot = val_shot
+
+    X_val_few, y_val_few = get_few_shot_tabular_samples(X_val_full, y_val_full, args_val)
+
     X_test_few, y_test_few = X_test_full, y_test_full
     
     logger.info(f"Datasets prepared, source dataset names : {args.source_data}")
@@ -87,9 +95,6 @@ def main():
     # baseline 반복
     for baseline in args.baseline:
         if baseline == "rf":
-            # --------------------------------------------------------
-            # 1) Random Forest만을 위한 데이터 사본 생성
-            # --------------------------------------------------------
             X_train_rf = X_train_full.copy()
             X_val_rf   = X_val_full.copy()
             X_test_rf  = X_test_full.copy()
