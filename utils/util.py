@@ -213,6 +213,9 @@ def prepare_results_(full_ours_results, few_ours_results):
                     "Ours_val_few_recalls": few_ours_results.get('val_recalls'),
                     "Ours_train_few_f1s": few_ours_results.get('train_f1s'),
                     "Ours_val_few_f1s": few_ours_results.get('val_f1s'),
+                    "Ours_train_few_auprc": few_ours_results.get('train_auprcs'),
+                    "Ours_val_few_auprc": few_ours_results.get('val_auprcs'), 
+                    "Ours_test_few_auprc": few_ours_results.get("test_auprcs"),
                 }
             }
         }
@@ -225,6 +228,7 @@ def prepare_results_(full_ours_results, few_ours_results):
                     "Ours_best_full_precision": full_ours_results.get('best_ours_precision'),
                     "Ours_best_full_recall": full_ours_results.get('best_ours_recall'),
                     "Ours_best_full_f1": full_ours_results.get('best_ours_f1'),
+                    "Ours_best_full_auprc" : full_ours_results.get('best_ours_auprc'),
                 },
                 "Ours_few": {
                     "Ours_best_few_auc": few_ours_results['best_ours_auc'],
@@ -247,6 +251,9 @@ def prepare_results_(full_ours_results, few_ours_results):
                     "Ours_val_full_recalls": full_ours_results.get('val_recalls'),
                     "Ours_train_full_f1s": full_ours_results.get('train_f1s'),
                     "Ours_val_full_f1s": full_ours_results.get('val_f1s'),
+                    "Ours_train_full_auprc":full_ours_results.get('train_auprcs'),
+                    "Ours_val_full_auprc":full_ours_results.get('val_auprcs'),
+                    "Ours_test_full_auprc":full_ours_results.get('test_auprcs'),
                 },
                 "Ours_few": {
                     "Ours_train_few_auc": few_ours_results['train_aucs'],
@@ -259,6 +266,9 @@ def prepare_results_(full_ours_results, few_ours_results):
                     "Ours_val_few_recalls": few_ours_results.get('val_recalls'),
                     "Ours_train_few_f1s": few_ours_results.get('train_f1s'),
                     "Ours_val_few_f1s": few_ours_results.get('val_f1s'),
+                    "Ours_train_few_auprc": few_ours_results.get('train_auprcs'),
+                    "Ours_val_few_auprc": few_ours_results.get('val_auprcs'),
+                    "Ours_test_few_auprc": few_ours_results.get("test_auprcs"),
                 }
             }
         }
@@ -427,6 +437,7 @@ def save_results_(args, results):
         "timestamp": timestamp,
         "hyperparameters": {
             "seed": args.random_seed,
+            "run_tag": args.run_tag,
             "batch_size": args.batch_size,
             "train_epochs": args.train_epochs,
             "full dataset learning_rate": args.source_lr,

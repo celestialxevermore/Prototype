@@ -1,7 +1,7 @@
 #!/bin/bash
 gpu_id=4
 #export CUDA_VISIBLE_DEVICES=$gpu_id
-random_seeds="44"
+random_seeds="42"
 few_shots="0 4 8 16 32 64"
 num_basis_layers="2"
 struct_dims="192"
@@ -18,17 +18,17 @@ for random_seed in $random_seeds; do
                 --target_data heart \
                 --base_dir $base_dir \
                 --few_shot $few_shot \
-                --alpha 0.7 \
+                --alpha 0.8 \
                 --tau 0.2 \
                 --soft_tau 0.005 \
-                --vq_beta 0.1 \
+                --vq_beta 0.2 \
                 --entropy_reg 0.01 \
                 --dropout_rate 0.3 \
                 --source_lr 0.001 \
                 --source_lr_few 0.0001 \
                 --struct_hidden_dim $struct_dim \
                 --num_basis_layers $num_basis_layers \
-                --run_tag 20251231_173338
+                --run_tag 20251218_212420
         done
     done
 done
@@ -45,17 +45,17 @@ for random_seed in $random_seeds; do
                 --target_data heart \
                 --base_dir $base_dir \
                 --few_shot $few_shot \
-                --alpha 0.9 \
-                --tau 1 \
+                --alpha 0.8 \
+                --tau 0.5 \
                 --soft_tau 0.02 \
-                --vq_beta 0.1 \
+                --vq_beta 0.2 \
                 --entropy_reg 0.01 \
                 --dropout_rate 0.3 \
                 --source_lr 0.001 \
                 --source_lr_few 0.0001 \
                 --struct_hidden_dim $struct_dim \
                 --num_basis_layers $num_basis_layers \
-                --run_tag 20251228_194219
+                --run_tag 20251226_070813
         done
     done
 done
@@ -72,8 +72,8 @@ for random_seed in $random_seeds; do
                 --target_data heart \
                 --base_dir $base_dir \
                 --few_shot $few_shot \
-                --alpha 0.7 \
-                --tau 0.3 \
+                --alpha 0.8 \
+                --tau 0.2 \
                 --soft_tau 0.01 \
                 --vq_beta 0.4 \
                 --entropy_reg 0.01 \
@@ -82,7 +82,7 @@ for random_seed in $random_seeds; do
                 --source_lr_few 0.0001 \
                 --struct_hidden_dim $struct_dim \
                 --num_basis_layers $num_basis_layers \
-                --run_tag 20251226_045906
+                --run_tag 20251226_134506
         done
     done
 done

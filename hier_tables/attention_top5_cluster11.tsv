@@ -1,0 +1,31 @@
+﻿Source	LCG 1	LCG 2	LCG 3	LCG 4	LCG 5	LCG 6	LCG 7	LCG 8
+heart	ChestPainType (0.256)	ChestPainType (0.201)	ChestPainType (0.273)	ChestPainType (0.279)	Age (0.278)	ChestPainType (0.273)	ChestPainType (0.199)	ChestPainType (0.195)
+	FastingBS (0.114)	Cholesterol (0.195)	Age (0.199)	RestingBP (0.127)	ChestPainType (0.207)	Age (0.199)	Age (0.173)	Age (0.162)
+	RestingBP (0.107)	Age (0.177)	Cholesterol (0.189)	Cholesterol (0.114)	Cholesterol (0.083)	Cholesterol (0.189)	MaxHR (0.170)	MaxHR (0.159)
+	Cholesterol (0.095)	RestingBP (0.095)	MaxHR (0.105)	FastingBS (0.110)	RestingBP (0.082)	MaxHR (0.105)	RestingBP (0.112)	RestingBP (0.109)
+	ST_Slope (0.090)	FastingBS (0.079)	FastingBS (0.061)	Sex (0.090)	FastingBS (0.082)	FastingBS (0.061)	FastingBS (0.087)	Cholesterol (0.095)
+Cardiovascular_Disease_Dataset	chestpain (0.181)	chestpain (0.157)	oldpeak (0.254)	oldpeak (0.282)	fastingbloodsugar (0.289)	oldpeak (0.249)	chestpain (0.148)	chestpain (0.148)
+	exerciseangia (0.113)	restingBP (0.152)	noofmajorvessels (0.237)	fastingbloodsugar (0.187)	chestpain (0.159)	noofmajorvessels (0.214)	restingBP (0.144)	restingBP (0.144)
+	noofmajorvessels (0.088)	maxheartrate (0.145)	fastingbloodsugar (0.185)	age (0.142)	noofmajorvessels (0.079)	age (0.154)	maxheartrate (0.139)	maxheartrate (0.139)
+	oldpeak (0.082)	noofmajorvessels (0.135)	chestpain (0.121)	chestpain (0.100)	gender (0.067)	fastingbloodsugar (0.140)	exerciseangia (0.096)	exerciseangia (0.096)
+	gender (0.079)	exerciseangia (0.084)	exerciseangia (0.040)	noofmajorvessels (0.049)	exerciseangia (0.061)	chestpain (0.104)	oldpeak (0.076)	oldpeak (0.076)
+Heart_disease_statlog	ca (0.263)	ca (0.260)	ca (0.267)	ca (0.265)	ca (0.265)	ca (0.267)	ca (0.266)	ca (0.260)
+	cp (0.221)	cp (0.220)	cp (0.224)	cp (0.224)	cp (0.224)	cp (0.224)	cp (0.222)	cp (0.220)
+	fbs (0.143)	fbs (0.142)	fbs (0.145)	fbs (0.145)	fbs (0.145)	fbs (0.145)	fbs (0.146)	fbs (0.142)
+	oldpeak (0.117)	oldpeak (0.116)	oldpeak (0.118)	oldpeak (0.115)	oldpeak (0.115)	oldpeak (0.118)	oldpeak (0.118)	oldpeak (0.116)
+	trestbps (0.100)	trestbps (0.108)	trestbps (0.108)	trestbps (0.099)	trestbps (0.099)	trestbps (0.108)	trestbps (0.107)	trestbps (0.108)
+Erbil_Cardiovascular_Health_Dataset								
+								
+								
+								
+								
+heart_failure_clinical_records	ejection_fraction (0.242)	serum_sodium (0.132)	serum_sodium (0.242)	platelets (0.322)	platelets (0.322)	serum_sodium (0.242)	serum_sodium (0.132)	serum_sodium (0.132)
+	time (0.141)	ejection_fraction (0.127)	platelets (0.231)	time (0.117)	time (0.117)	platelets (0.231)	ejection_fraction (0.127)	ejection_fraction (0.127)
+	age (0.115)	age (0.125)	time (0.215)	high_blood_pressure (0.117)	high_blood_pressure (0.117)	time (0.215)	age (0.125)	age (0.125)
+	platelets (0.099)	platelets (0.124)	ejection_fraction (0.138)	serum_sodium (0.104)	serum_sodium (0.104)	ejection_fraction (0.138)	platelets (0.124)	platelets (0.124)
+	serum_sodium (0.090)	serum_creatinine (0.116)	high_blood_pressure (0.066)	ejection_fraction (0.087)	ejection_fraction (0.087)	high_blood_pressure (0.066)	serum_creatinine (0.116)	serum_creatinine (0.116)
+cardio_SAheart	FAMILY_HISTORY (0.266)	LDL_CHOLESTEROL (0.238)	ID (0.294)	FAMILY_HISTORY (0.285)	FAMILY_HISTORY (0.285)	ID (0.294)	LDL_CHOLESTEROL (0.238)	FAMILY_HISTORY (0.226)
+	TYPE_A_BEHAVIOR (0.143)	ID (0.232)	LDL_CHOLESTEROL (0.245)	AGE (0.188)	AGE (0.188)	LDL_CHOLESTEROL (0.245)	ID (0.232)	TYPE_A_BEHAVIOR (0.198)
+	AGE (0.138)	AGE (0.209)	AGE (0.229)	LDL_CHOLESTEROL (0.141)	LDL_CHOLESTEROL (0.141)	AGE (0.229)	AGE (0.209)	AGE (0.140)
+	ID (0.121)	FAMILY_HISTORY (0.133)	FAMILY_HISTORY (0.117)	ID (0.103)	ID (0.103)	FAMILY_HISTORY (0.117)	FAMILY_HISTORY (0.133)	ID (0.110)
+	LDL_CHOLESTEROL (0.102)	TYPE_A_BEHAVIOR (0.131)	SYSTOLIC_BLOOD_PRESSURE (0.056)	ALCOHOL_CONSUMPTION (0.083)	ALCOHOL_CONSUMPTION (0.083)	SYSTOLIC_BLOOD_PRESSURE (0.056)	TYPE_A_BEHAVIOR (0.131)	SYSTOLIC_BLOOD_PRESSURE (0.094)

@@ -1,0 +1,45 @@
+program: main_S.py
+method: bayes
+
+metric:
+  name: few_mean/test_auc
+  goal: maximize
+
+parameters:
+  random_seed:
+    values: [46]   # <- 여기만 yaml별로 46/46/48/50으로 바꾸면 됨
+
+  entropy_reg:
+    values: [0.05, 0.1]
+  alpha:
+    values: [0.7, 0.8, 0.9]
+  tau:
+    values: [0.2, 0.3, 0.4, 0.5, 1.0]
+  soft_tau:
+    values: [0.005, 0.01, 0.02, 0.05]
+  vq_beta:
+    values: [0.1, 0.2, 0.3, 0.4, 0.5]
+  source_lr:
+    values: [1e-4, 1e-3]
+  source_lr_few:
+    values: [1e-5, 1e-4]
+  dropout_rate:
+    values: [0.0, 0.1, 0.2, 0.3]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --base_dir
+  - test20251218_wandb_
+  - --random_seed
+  - 46
+  - --target_data
+  - heart_failure_clinical_records
+  - --source_data
+  - Medicaldataset
+  - Cardiovascular_Disease_Dataset
+  - Heart_disease_statlog
+  - Erbil_Cardiovascular_Health_Dataset
+  - cardio_SAheart
+  - heart

@@ -60,8 +60,8 @@ def create_combined_summary_by_model(results_by_config, full_results, dataset, b
             
             writer.writerow(header)
             
-            # 각 메트릭별로 행 생성 (5개 메트릭)
-            for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
+            # 각 메트릭별로 행 생성 (6개 메트릭)
+            for metric in ['auc', 'acc', 'precision', 'recall', 'f1', 'auprc']:
                 row = []
                 
                 # Few-shot 결과들
@@ -123,7 +123,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                 seed_path = os.path.join(dataset_path, f"args_seed:{seed}")
                 if os.path.exists(seed_path):
                     # 패턴을 실제 폴더 구조에 맞게 수정
-                    seed_json_pattern = os.path.join(seed_path, "TabularFLM/*/f*.json")
+                    seed_json_pattern = os.path.join(seed_path, "ngraphs-*/f*.json")
                     seed_json_files = glob.glob(seed_json_pattern, recursive=True)
                     if seed_json_files:
                         json_files.extend(seed_json_files)
@@ -132,7 +132,6 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                     print(f"시드 {seed}의 경로가 존재하지 않음: {seed_path}")
         else:
             # 모든 시드 처리 (기존 방식) - 패턴 수정
-            #json_pattern = os.path.join(dataset_path, "args_seed:*/TabularFLM/*/f*.json")
             json_pattern = os.path.join(dataset_path, "args_seed:*/ngraphs-*/f*.json")
             json_files = glob.glob(json_pattern, recursive=True)
         
@@ -141,7 +140,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
             continue
         
         # Full dataset 결과를 저장할 별도의 딕셔너리
-        full_results = defaultdict(lambda: {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': []})
+        full_results = defaultdict(lambda: {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': [], 'auprc': []})
         
         for json_file in json_files:
             try:
@@ -149,7 +148,8 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                     data = json.load(f)
                     
                 path_parts = json_file.split('/')
-                model_config = path_parts[-2]
+                # 하이퍼파라미터 폴더명 무시하고 "all" 로 통일
+                model_config = "all"
                 
                 config_key = (
                     model_config,
@@ -159,33 +159,37 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                 
                 if config_key not in results_by_config:
                     results_by_config[config_key] = {
-                        'few_shot': {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': []}
+                        'few_shot': {'auc': [], 'acc': [], 'precision': [], 'recall': [], 'f1': [], 'auprc': []}
                     }
                 
                 if 'Ours_few' in data['results']:
                     results = data['results']['Ours_few']
                     metrics = {
-                        'auc': results['Ours_best_few_auc'],
-                        'acc': results['Ours_best_few_acc'],
-                        'precision': results['Ours_best_few_precision'],
-                        'recall': results['Ours_best_few_recall'],
-                        'f1': results['Ours_best_few_f1']
+                        'auc': results.get('Ours_best_few_auc'),
+                        'acc': results.get('Ours_best_few_acc'),
+                        'precision': results.get('Ours_best_few_precision'),
+                        'recall': results.get('Ours_best_few_recall'),
+                        'f1': results.get('Ours_best_few_f1'),
+                        'auprc': results.get('Ours_best_few_auprc')
                     }
                     for metric_name, value in metrics.items():
-                        results_by_config[config_key]['few_shot'][metric_name].append(value)
+                        if value is not None:
+                            results_by_config[config_key]['few_shot'][metric_name].append(value)
                 
                 if data['hyperparameters']['few_shot'] == 4 and isinstance(data['results']['Ours'], dict):
                     results = data['results']['Ours']
                     full_key = (model_config, data['hyperparameters']['batch_size'])
                     metrics = {
-                        'auc': results['Ours_best_full_auc'],
-                        'acc': results['Ours_best_full_acc'],
-                        'precision': results['Ours_best_full_precision'],
-                        'recall': results['Ours_best_full_recall'],
-                        'f1': results['Ours_best_full_f1']
+                        'auc': results.get('Ours_best_full_auc'),
+                        'acc': results.get('Ours_best_full_acc'),
+                        'precision': results.get('Ours_best_full_precision'),
+                        'recall': results.get('Ours_best_full_recall'),
+                        'f1': results.get('Ours_best_full_f1'),
+                        'auprc': results.get('Ours_best_full_auprc')
                     }
                     for metric_name, value in metrics.items():
-                        full_results[full_key][metric_name].append(value)
+                        if value is not None:
+                            full_results[full_key][metric_name].append(value)
                             
             except Exception as e:
                 print(f"파일 처리 오류 {json_file}: {str(e)}")
@@ -207,7 +211,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                 
                 # Few-shot 결과
                 writer.writerow(['Few-shot Results:'])
-                for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
+                for metric in ['auc', 'acc', 'precision', 'recall', 'f1', 'auprc']:
                     values = results_by_config[config_key]['few_shot'][metric]
                     if values:
                         mean, std = calculate_mean_std(values)
@@ -218,7 +222,7 @@ def process_json_files(directory_path, selected_datasets=None, selected_seeds=No
                 writer.writerow(['Full Dataset Results:'])
                 full_key = (model_config, batch_size)
                 if full_key in full_results:
-                    for metric in ['auc', 'acc', 'precision', 'recall', 'f1']:
+                    for metric in ['auc', 'acc', 'precision', 'recall', 'f1', 'auprc']:
                         values = full_results[full_key][metric]
                         if values:
                             mean, std = calculate_mean_std(values)

@@ -1,0 +1,31 @@
+﻿Source	LCG 1	LCG 2	LCG 3	LCG 4	LCG 5	LCG 6	LCG 7	LCG 8
+heart	ChestPainType (0.484)	ChestPainType (0.488)	ChestPainType (0.496)	ChestPainType (0.500)	ChestPainType (0.519)	ChestPainType (0.497)	ChestPainType (0.484)	ChestPainType (0.475)
+	FastingBS (0.111)	FastingBS (0.109)	FastingBS (0.113)	Age (0.077)	ST_Slope (0.089)	FastingBS (0.111)	FastingBS (0.111)	RestingBP (0.094)
+	Sex (0.077)	ST_Slope (0.086)	Sex (0.079)	Sex (0.076)	Sex (0.080)	ST_Slope (0.087)	Sex (0.077)	ST_Slope (0.080)
+	ExerciseAngina (0.065)	Cholesterol (0.084)	Age (0.069)	Cholesterol (0.068)	Age (0.075)	Sex (0.079)	ExerciseAngina (0.065)	Sex (0.075)
+	ST_Slope (0.063)	Sex (0.077)	ExerciseAngina (0.066)	ST_Slope (0.068)	ExerciseAngina (0.064)	ExerciseAngina (0.066)	ST_Slope (0.063)	Oldpeak (0.071)
+Cardiovascular_Disease_Dataset	oldpeak (0.679)	oldpeak (0.679)	oldpeak (0.679)	oldpeak (0.679)	oldpeak (0.679)	oldpeak (0.679)	oldpeak (0.679)	oldpeak (0.679)
+	chestpain (0.072)	chestpain (0.072)	chestpain (0.072)	chestpain (0.072)	chestpain (0.072)	chestpain (0.072)	chestpain (0.072)	chestpain (0.072)
+	noofmajorvessels (0.035)	noofmajorvessels (0.035)	noofmajorvessels (0.035)	noofmajorvessels (0.035)	noofmajorvessels (0.035)	noofmajorvessels (0.035)	noofmajorvessels (0.035)	noofmajorvessels (0.035)
+	exerciseangia (0.035)	exerciseangia (0.035)	exerciseangia (0.035)	exerciseangia (0.035)	exerciseangia (0.035)	exerciseangia (0.035)	exerciseangia (0.035)	exerciseangia (0.035)
+	gender (0.033)	gender (0.033)	gender (0.033)	gender (0.033)	gender (0.033)	gender (0.033)	gender (0.033)	gender (0.033)
+Heart_disease_statlog								
+								
+								
+								
+								
+Erbil_Cardiovascular_Health_Dataset	Q_WAVE (0.489)	Q_WAVE (0.518)	Q_WAVE (0.489)	Q_WAVE (0.489)	Q_WAVE (0.489)	Q_WAVE (0.489)	Q_WAVE (0.518)	Q_WAVE (0.518)
+	HEART_RATE (0.335)	HEART_RATE (0.266)	HEART_RATE (0.335)	HEART_RATE (0.335)	HEART_RATE (0.335)	HEART_RATE (0.335)	HEART_RATE (0.266)	HEART_RATE (0.266)
+	ECG_PATTERN (0.028)	AGE (0.060)	ECG_PATTERN (0.028)	ECG_PATTERN (0.028)	ECG_PATTERN (0.028)	ECG_PATTERN (0.028)	AGE (0.060)	AGE (0.060)
+	WEIGHT (0.021)	LDL_CHOLESTEROL (0.046)	WEIGHT (0.021)	WEIGHT (0.021)	WEIGHT (0.021)	WEIGHT (0.021)	LDL_CHOLESTEROL (0.046)	LDL_CHOLESTEROL (0.046)
+	HEIGHT (0.021)	ECG_PATTERN (0.030)	HEIGHT (0.021)	HEIGHT (0.021)	HEIGHT (0.021)	HEIGHT (0.021)	ECG_PATTERN (0.030)	ECG_PATTERN (0.030)
+heart_failure_clinical_records	time (0.614)	time (0.513)	time (0.547)	time (0.865)	time (0.776)	time (0.547)	time (0.513)	time (0.555)
+	ejection_fraction (0.118)	ejection_fraction (0.352)	ejection_fraction (0.330)	serum_sodium (0.032)	serum_sodium (0.136)	ejection_fraction (0.330)	ejection_fraction (0.352)	age (0.091)
+	high_blood_pressure (0.050)	serum_sodium (0.085)	platelets (0.091)	platelets (0.027)	high_blood_pressure (0.030)	platelets (0.091)	serum_sodium (0.085)	platelets (0.061)
+	serum_creatinine (0.044)	high_blood_pressure (0.018)	high_blood_pressure (0.009)	high_blood_pressure (0.022)	sex (0.013)	high_blood_pressure (0.009)	high_blood_pressure (0.018)	high_blood_pressure (0.056)
+	serum_sodium (0.041)	smoking (0.010)	sex (0.008)	diabetes (0.014)	diabetes (0.012)	sex (0.008)	smoking (0.010)	serum_creatinine (0.055)
+cardio_SAheart	ID (0.506)	ID (0.503)	ID (0.542)	ID (0.579)	ID (0.534)	ID (0.542)	ID (0.503)	ID (0.511)
+	FAMILY_HISTORY (0.173)	FAMILY_HISTORY (0.183)	FAMILY_HISTORY (0.195)	FAMILY_HISTORY (0.214)	FAMILY_HISTORY (0.137)	FAMILY_HISTORY (0.195)	FAMILY_HISTORY (0.183)	FAMILY_HISTORY (0.146)
+	LDL_CHOLESTEROL (0.074)	AGE (0.125)	AGE (0.128)	LDL_CHOLESTEROL (0.073)	OBESITY (0.112)	AGE (0.128)	AGE (0.125)	TYPE_A_BEHAVIOR (0.141)
+	ALCOHOL_CONSUMPTION (0.051)	LDL_CHOLESTEROL (0.075)	ALCOHOL_CONSUMPTION (0.045)	ALCOHOL_CONSUMPTION (0.049)	AGE (0.089)	ALCOHOL_CONSUMPTION (0.045)	LDL_CHOLESTEROL (0.075)	AGE (0.096)
+	SYSTOLIC_BLOOD_PRESSURE (0.051)	TYPE_A_BEHAVIOR (0.056)	CUMULATIVE_TOBACCO (0.026)	TYPE_A_BEHAVIOR (0.047)	LDL_CHOLESTEROL (0.052)	CUMULATIVE_TOBACCO (0.026)	TYPE_A_BEHAVIOR (0.056)	LDL_CHOLESTEROL (0.054)
