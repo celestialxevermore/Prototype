@@ -190,7 +190,7 @@ class BasisGATLayer_IND(nn.Module):
         self.q_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(num_basis_heads)])
         self.k_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(num_basis_heads)])
         self.v_proj_list = nn.ModuleList([nn.Linear(input_dim, self.head_dim) for _ in range(num_basis_heads)])
-
+        self.ovr_M, self.ovr_G = None, None 
         if args.attn_type in ['gat_v1', 'gat_v2']:
             self.attn_proj_list = nn.ModuleList([
                 nn.Linear(self.head_dim * 3 if args.edge_type in ['normal', 'mlp'] else self.head_dim * 2, 1)
@@ -299,8 +299,15 @@ class BasisGATLayer_IND(nn.Module):
                 logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
             mask = (new_adj == 0).float() * -1e9
-            pdb.set_trace()
+
             logits = logits + mask
+            
+            G = self.ovr_G 
+            if G is None and self.ovr_M is not None:
+                G = torch.sigmoid(self.ovr_M)
+            if G is not None:
+                G = G * new_adj 
+                logits = logits + (1.0 - G) * (-1e9)
 
             attn_weights = F.softmax(logits, dim=-1)
             attn_weights = self.attn_dropout(attn_weights)
