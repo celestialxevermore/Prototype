@@ -299,6 +299,7 @@ class BasisGATLayer_IND(nn.Module):
                 logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
             mask = (new_adj == 0).float() * -1e9
+            pdb.set_trace()
             logits = logits + mask
 
             attn_weights = F.softmax(logits, dim=-1)
