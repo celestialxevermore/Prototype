@@ -1,5 +1,5 @@
 #!/bin/bash
-gpu_id=4
+gpu_id=5
 #export CUDA_VISIBLE_DEVICES=$gpu_id
 random_seeds="42"
 few_shots="0 4 8 16 32 64"

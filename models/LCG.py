@@ -157,7 +157,7 @@ class GraphQuantizer(nn.Module):
                              self.logger.warning("       ⚠️ Feature Cost is too Large! Increase tau.")
                 
         return result.value, result.plan
-
+    
     def forward(self, source_struct, source_feat, lcg_struct, lcg_feat, batch):
             """
             샘플별로 독립적인 FGW 계산 및 pi 생성 + barycentric residual로

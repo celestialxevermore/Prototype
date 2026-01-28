@@ -1,5 +1,5 @@
 #!/bin/bash
-gpu_id=4
+gpu_id=3
 #export CUDA_VISIBLE_DEVICES=$gpu_id
 random_seeds="48"
 few_shots="0 4 8 16 32 64"
@@ -7,7 +7,7 @@ num_basis_layers="2"
 struct_dims="192"
 
 # target_data = heart_failure_clinical_records 이므로 base_dir도 그에 맞게 표기
-echo "=== 시나리오 1 VQVAE: 'Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart+heart' -> heart_failure_clinical_records ==="
+echo "=== 시나리오 1 VQVAE: 'Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart' -> heart_failure_clinical_records ==="
 for random_seed in $random_seeds; do
     for few_shot in $few_shots; do
         for struct_dim in $struct_dims; do
@@ -15,7 +15,7 @@ for random_seed in $random_seeds; do
             echo "Running experiment - seed:${random_seed}, few_shot:${few_shot}"
             CUDA_VISIBLE_DEVICES=$gpu_id OMP_NUM_THREADS=10 python main_S.py \
                 --random_seed $random_seed \
-                --source_data Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart+heart \
+                --source_data Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart \
                 --target_data heart_failure_clinical_records \
                 --base_dir $base_dir \
                 --few_shot $few_shot \
@@ -34,7 +34,7 @@ for random_seed in $random_seeds; do
     done
 done
 
-echo "=== 시나리오 1 VQVAE: 'Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart+heart' -> heart_failure_clinical_records ==="
+echo "=== 시나리오 1 VQVAE: 'Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart' -> heart_failure_clinical_records ==="
 for random_seed in $random_seeds; do
     for few_shot in $few_shots; do
         for struct_dim in $struct_dims; do
@@ -42,7 +42,7 @@ for random_seed in $random_seeds; do
             echo "Running experiment - seed:${random_seed}, few_shot:${few_shot}"
             CUDA_VISIBLE_DEVICES=$gpu_id OMP_NUM_THREADS=10 python main_S.py \
                 --random_seed $random_seed \
-                --source_data Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart+heart \
+                --source_data Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart \
                 --target_data heart_failure_clinical_records \
                 --base_dir $base_dir \
                 --few_shot $few_shot \
@@ -61,7 +61,7 @@ for random_seed in $random_seeds; do
     done
 done
 
-echo "=== 시나리오 1 VQVAE: 'Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart+heart' -> heart_failure_clinical_records ==="
+echo "=== 시나리오 1 VQVAE: 'Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart' -> heart_failure_clinical_records ==="
 for random_seed in $random_seeds; do
     for few_shot in $few_shots; do
         for struct_dim in $struct_dims; do
@@ -69,7 +69,7 @@ for random_seed in $random_seeds; do
             echo "Running experiment - seed:${random_seed}, few_shot:${few_shot}"
             CUDA_VISIBLE_DEVICES=$gpu_id OMP_NUM_THREADS=10 python main_S.py \
                 --random_seed $random_seed \
-                --source_data Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart+heart \
+                --source_data Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart \
                 --target_data heart_failure_clinical_records \
                 --base_dir $base_dir \
                 --few_shot $few_shot \
