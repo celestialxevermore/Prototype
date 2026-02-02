@@ -108,7 +108,7 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'round_robin', choices = ['hierarchical', 'round_robin', 'sequential'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential'])
     parser.add_argument('--lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
     '''
         Basis GAT Configuration
