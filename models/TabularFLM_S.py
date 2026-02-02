@@ -63,7 +63,7 @@ class Model(nn.Module):
         ])
 
         # Coordinator (weights over heads/bases)
-        self.coordinator = CoordinatorMLP(args, self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
+        #self.coordinator = CoordinatorMLP(args, self.input_dim, hidden_dim, args.num_basis_heads, self.dropout_rate)
 
         # Source/Target residual heads (on CLS)
         self.n_src = len(args.source_data) if isinstance(args.source_data, (list, tuple)) else 1
