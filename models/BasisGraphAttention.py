@@ -310,8 +310,8 @@ class BasisGATLayer_IND(nn.Module):
                 logits = logits + (1.0 - G) * (-1e9)
 
             attn_weights = F.softmax(logits, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-            context = torch.matmul(attn_weights, v)
+            attn_dropped = self.attn_dropout(attn_weights)
+            context = torch.matmul(attn_dropped, v)
 
             head_outputs.append(context.unsqueeze(2))
             head_attns.append(attn_weights.unsqueeze(1))

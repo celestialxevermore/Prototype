@@ -965,10 +965,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         _ = train_fn(model, tr_step, crit, opt, device)
         if scheduler_ep is not None: 
             scheduler_ep.step()
-        
+        if hasattr(model, 'graph_quantizer') and args.use_lcg is True:
+            model.graph_quantizer.current_epoch = epoch + 1 
         if hasattr(model, 'current_epoch'):
             model.current_epoch = epoch + 1 
-            print(model.current_epoch)
+            #print(model.current_epoch)
             if model.current_epoch == model.switch_epoch:
                 logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Global Inference ON")
         

@@ -107,7 +107,7 @@ class GraphQuantizer(nn.Module):
         self.last_pi = None 
         self.last_plan = None
         self.ent_reg = self.args.entropy_reg
-
+        self.current_epoch = 0
     def compute_fgw(self, src_feat, src_str, tgt_feat, tgt_str):
         B, N, D = src_feat.shape 
         dist_sq = torch.cdist(src_feat, tgt_feat, p=2) ** 2 
@@ -215,48 +215,62 @@ class GraphQuantizer(nn.Module):
             # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
             # =========================================================================
             pi_safe = pi.clamp_min(1e-12)
-            H_per = -(pi_safe * pi_safe.log()).sum(dim=1)
-            H_b = H_per.mean()
-            HMax = math.log(M)
+            H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
+            H_sample_mean = H_sample.mean() 
 
-            # 원하는 entropy 구간 : [H_low, H_high]
-            # - H_low : Too hard 방지 
-            H_low = 0.2 * HMax 
-            H_high = 0.8 * HMax 
-            pen_low = F.relu(H_low - H_b) ** 2 
-            pen_high = F.relu(H_b - H_high) ** 2
-            entropy_reg = pen_low + pen_high
+            pi_bar = pi.mean(dim = 0)
+            H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum() 
+
+            H_max_val = math.log(M)
+            H_s_norm = H_sample_mean / H_max_val 
+            H_b_norm = H_batch / H_max_val 
+
+            
+            warmup_epochs = 40 
+
+            if self.current_epoch < warmup_epochs:
+                entropy_reg = -H_b_norm 
+                reg_mode = "Warmup (Diversity Only)"
+            else:
+                entropy_reg = H_s_norm - H_b_norm 
+                reg_mode = "Full MI (Sharpness + Diversity)"
+
             # Logging
             if self.log_step % self.log_interval == 0:
                 with torch.no_grad():
                     step = int(self.log_step)
 
-                    # ---- distance 통계 ----
+                    # ---- distance 통계 (유지) ----
                     d_mean = d_commit.mean().item()
                     d_std  = d_commit.std().item()
 
-                    # ---- entropy 통계 (배치 평균 + min/max) ----
-                    H_mean = H_per.mean().item()
-                    H_min  = H_per.min().item()
-                    H_max  = H_per.max().item()
+                    # ---- entropy 통계 (유지) ----
+                    H_mean = H_sample.mean().item()
+                    H_min  = H_sample.min().item()
+                    H_max  = H_sample.max().item()
 
-                    # ---- max probability 통계 (얼마나 one-hot에 가까운지) ----
-                    max_p_per_sample = pi.max(dim=1)[0]          # [B]
+                    # ---- max probability 통계 (유지) ----
+                    max_p_per_sample = pi.max(dim=1)[0]
                     max_p_mean = max_p_per_sample.mean().item()
                     max_p_min  = max_p_per_sample.min().item()
                     max_p_max  = max_p_per_sample.max().item()
 
-                    # ---- entropy reg 상태 ----
+                    # ---- [UPDATED] MI Regularizer 상태 ----
                     ent_weight = float(getattr(self, "ent_reg", 0.0))
-                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step}")
+                    
+                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
                     self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
                     self.logger.info(f"   >>> Entropy (mean/min/max): "
-                                    f"{H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={HMax:.3f})")
+                                     f"{H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})")
                     self.logger.info(f"   >>> Max p(pi) per sample (mean/min/max): "
-                                    f"{max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}")
-                    self.logger.info(f"   >>> EntropyReg | weight: {ent_weight:.3e} | "
-                                    f"pen_low: {pen_low.item():.3e} | pen_high: {pen_high.item():.3e} | "
-                                    f"total_pen: {entropy_reg.item():.3e}")
+                                     f"{max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}")
+                    
+                    # Normalized MI Stats
+                    self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
+                    self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
+                    self.logger.info(f"       (2) Batch Diversity  (H_b): {H_b_norm.item():.4f} (Goal: High)")
+                    self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
+
                     # 기존 샘플 0,1의 분포도 그대로 유지
                     self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
                     if B > 1:
