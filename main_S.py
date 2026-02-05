@@ -96,7 +96,7 @@ def get_args():
     parser.add_argument('--fgw_alpha', type = float, default = 1)
     parser.add_argument('--alpha' , type = float, default = 0.9)
     parser.add_argument('--eps', type = float , default = 0.01)
-    parser.add_argument('--reg', type = float, default = 0.01)
+    parser.add_argument('--reg', type = float, default = 0.001)
     parser.add_argument('--tau', type = float, default=0.5)
     parser.add_argument('--soft_tau', type = float, default=0.01)
     parser.add_argument('--entropy_reg', type = float, default = 0.01)

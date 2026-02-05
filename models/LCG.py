@@ -118,8 +118,17 @@ class GraphQuantizer(nn.Module):
             raw_dist_mean = dist_sq.mean().item()
             scale_factor = dist_sq.max() + 1e-8 
 
-        dist_norm = dist_sq / scale_factor
+        dist_norm = dist_sq / float(D)
+        x = dist_norm.detach().flatten().float()
+        qs = torch.quantile(x, torch.tensor([0.25, 0.50, 0.75], device=x.device))
+        q25, q50, q75 = qs[0], qs[1], qs[2]
+        eps = 1e-8
+        iqr = (q75 - q25).clamp_min(eps)
 
+        M_cost = (dist_norm - q50) / iqr   # robust z (centered)
+
+        # --- shift (no clamp) ---
+        M_cost = M_cost - M_cost.amin() 
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
              with torch.no_grad():
                 self.logger.info(f"\n[RAW DIST CHECK] Step {self.log_step}")
@@ -127,9 +136,16 @@ class GraphQuantizer(nn.Module):
                 self.logger.info(f"   >>> Adaptive Scale Factor: {scale_factor.item():.1f}")
                 self.logger.info(f"   >>> Normalized Dist Mean: {dist_norm.mean().item():.4f} (Target ~0.3-0.5)")
                 self.logger.info(f"   >>> Current tau: {self.tau}")
+                x = dist_sq.detach().float().flatten()
+                qs = torch.quantile(x, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device = x.device))
+                self.logger.info(f"\n[RAW DIST^2 STATS] Step {int(self.log_step)}")
+                self.logger.info(f"   >>> q00={qs[0].item():.1f} | q50={qs[1].item():.1f} | q90={qs[2].item():.1f} | "
+                                f"q95={qs[3].item():.1f} | q99={qs[4].item():.1f} | q100={qs[5].item():.1f}")
+                self.logger.info(f"   >>> mean={x.mean().item():.1f} | std={x.std().item():.1f}")
 
-        M_cost = 1.0 - torch.exp(-dist_norm / self.tau)
-
+        
+        #M_cost = dist_norm
+        
         a = torch.ones(src_feat.shape[0], src_feat.shape[1], device=src_feat.device) / src_feat.shape[1]
         b = torch.ones(tgt_feat.shape[0], tgt_feat.shape[1], device=tgt_feat.device) / tgt_feat.shape[1]
 
@@ -137,7 +153,7 @@ class GraphQuantizer(nn.Module):
             src_str, tgt_str, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b, 
             max_iter=10, tol=1e-3, grad='envelope'
         )
-        
+        #pdb.set_trace()
         if self.log_step % self.log_interval == 0:
             with torch.no_grad():
                 if hasattr(result, 'plan') and result.plan is not None:
@@ -206,77 +222,146 @@ class GraphQuantizer(nn.Module):
 
             d_commit = dist_commit.reshape(B, M)  # [B, M]
 
-            # =========================================================================
-            # Step 4: 샘플별 soft assignment pi[b,m]
-            # =========================================================================
-            pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
-
-            # =========================================================================
-            # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
-            # =========================================================================
-            pi_safe = pi.clamp_min(1e-12)
-            H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
-            H_sample_mean = H_sample.mean() 
-
-            pi_bar = pi.mean(dim = 0)
-            H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum() 
-
-            H_max_val = math.log(M)
-            H_s_norm = H_sample_mean / H_max_val 
-            H_b_norm = H_batch / H_max_val 
-
-            
-            warmup_epochs = 40 
-
-            if self.current_epoch < warmup_epochs:
-                entropy_reg = -H_b_norm 
-                reg_mode = "Warmup (Diversity Only)"
-            else:
-                entropy_reg = H_s_norm - H_b_norm 
-                reg_mode = "Full MI (Sharpness + Diversity)"
-
-            # Logging
             if self.log_step % self.log_interval == 0:
                 with torch.no_grad():
                     step = int(self.log_step)
 
-                    # ---- distance 통계 (유지) ----
+                    # -------------------------
+                    # (A) d_commit scale stats
+                    # -------------------------
+                    d_min = d_commit.min().item()
+                    d_max = d_commit.max().item()
+                    d_mean = d_commit.mean().item()
+                    d_std = d_commit.std().item()
+
+                    # per-sample range (how separable per sample)
+                    per_range = (d_commit.max(dim=1).values - d_commit.min(dim=1).values)
+                    pr_mean = per_range.mean().item()
+                    pr_min  = per_range.min().item()
+                    pr_max  = per_range.max().item()
+
+                    self.logger.info(
+                        f"\n[DCOMMIT] Step {step} | Epoch {self.current_epoch}"
+                    )
+                    self.logger.info(
+                        f"   >>> d_commit: mean={d_mean:.6f}, std={d_std:.6f}, min={d_min:.6f}, max={d_max:.6f}"
+                    )
+                    self.logger.info(
+                        f"   >>> per-sample (max-min): mean={pr_mean:.6f}, min={pr_min:.6f}, max={pr_max:.6f}"
+                    )
+
+                    # -------------------------
+                    # (B) what tau does to logits
+                    # -------------------------
+                    tau_now = float(getattr(self, "soft_tau", 1.0))  # 지금 쓰는 tau
+                    logits = -d_commit / max(1e-8, tau_now)
+
+                    # top1-top2 gap in logits (bigger gap => sharper pi)
+                    top2 = logits.topk(k=min(2, logits.shape[1]), dim=1).values  # [B,2] (if M>=2)
+                    if top2.shape[1] == 2:
+                        gap = (top2[:, 0] - top2[:, 1])  # [B]
+                        self.logger.info(
+                            f"   >>> logits=-d/tau (tau={tau_now:.6f}): gap(top1-top2) mean={gap.mean().item():.6f}, "
+                            f"min={gap.min().item():.6f}, max={gap.max().item():.6f}"
+                        )
+                        # exp(-gap) is roughly "how close" 2nd is to 1st in softmax ratio
+                        ratio = torch.exp(-gap).clamp_max(1e6)
+                        self.logger.info(
+                            f"   >>> approx exp(-gap): mean={ratio.mean().item():.6f}, min={ratio.min().item():.6f}, max={ratio.max().item():.6f}"
+                        )
+
+                    # show a few rows
+                    bshow = min(d_commit.shape[0], 3)
+                    self.logger.info(f"   >>> d_commit[0:{bshow}]: {d_commit[:bshow].detach().cpu().numpy().round(6)}")
+            # # =========================================================================
+            # # Step 4: 샘플별 soft assignment pi[b,m]
+            # # =========================================================================
+            # warmup_epochs = int(getattr(self.args, "warmup_epochs", 20))
+            # rampup_epochs = int(getattr(self.args, "rampup_epochs", 40))
+            # soft_tau_start = float(getattr(self.args, "soft_tau_start", float(self.soft_tau)))
+            # soft_tau_end = float(getattr(self.args, "soft_tau_end", float(self.soft_tau)))
+            # if self.current_epoch < warmup_epochs:
+            #     prog = 0.0 
+            # else:
+            #     t = (self.current_epoch - warmup_epochs) / max(1, rampup_epochs)
+            #     prog = float(max(0.0, min(1.0, t)))
+            # soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
+            # soft_tau_now = max(1e-8, soft_tau_now) 
+
+            pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
+
+            # # =========================================================================
+            # # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
+            # # =========================================================================
+            #pi_safe = pi.clamp_min(1e-12)
+            # H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
+            # H_sample_mean = H_sample.mean() 
+
+            # pi_bar = pi.mean(dim = 0)
+            # H_max_val = math.log(M)
+            # H_s_norm = (H_sample_mean / H_max_val)
+            # #H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum() 
+            # u = 1.0 / M 
+            # KL_pop = (pi_bar * (pi_bar.log() - math.log(u))).sum() 
+            # KL_norm = KL_pop / H_max_val 
+
+            
+            # lambda_s_max = float(getattr(self.args, "lambda_s_max", 1.0))
+            # lambda_b_max = float(getattr(self.args, "lambda_b_max", 1.0))
+            # lambda_b_min = float(getattr(self.args, "lambda_b_min", lambda_b_max))
+            # lambda_s = lambda_s_max * prog 
+            # lambda_b = lambda_b_max - (lambda_b_max - lambda_b_min) * prog 
+        
+            # entropy_reg = (lambda_s * H_s_norm) - (lambda_b * KL_norm)
+            # reg_mode = (
+            #     f"tau={soft_tau_now:.4g} (start={soft_tau_start:.4g}->end={soft_tau_end:.4g}, prog={prog:.2f}) | "
+            #     f"lamS={lambda_s:.3f}, lamB={lambda_b:.3f}"
+            # )
+
+            # # Logging
+            if self.log_step % self.log_interval == 0:
+                with torch.no_grad():
+                    step = int(self.log_step)
+
                     d_mean = d_commit.mean().item()
                     d_std  = d_commit.std().item()
 
-                    # ---- entropy 통계 (유지) ----
-                    H_mean = H_sample.mean().item()
-                    H_min  = H_sample.min().item()
-                    H_max  = H_sample.max().item()
+                    # H_mean = H_sample.mean().item()
+                    # H_min  = H_sample.min().item()
+                    # H_max  = H_sample.max().item()
 
-                    # ---- max probability 통계 (유지) ----
                     max_p_per_sample = pi.max(dim=1)[0]
                     max_p_mean = max_p_per_sample.mean().item()
                     max_p_min  = max_p_per_sample.min().item()
                     max_p_max  = max_p_per_sample.max().item()
 
-                    # ---- [UPDATED] MI Regularizer 상태 ----
-                    ent_weight = float(getattr(self, "ent_reg", 0.0))
-                    
-                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
-                    self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
-                    self.logger.info(f"   >>> Entropy (mean/min/max): "
-                                     f"{H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})")
-                    self.logger.info(f"   >>> Max p(pi) per sample (mean/min/max): "
-                                     f"{max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}")
-                    
-                    # Normalized MI Stats
+                    # ent_weight = float(getattr(self, "ent_reg", 0.0))
+
+                    # self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
+                    # self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
+                    # self.logger.info(
+                    #     f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
+                    # )
+                    self.logger.info(
+                        f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
+                    )
+
+                    # 기존 "MI-Reg Stats" 라벨 유지하되, population은 KL로 바뀜
                     self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
-                    self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
-                    self.logger.info(f"       (2) Batch Diversity  (H_b): {H_b_norm.item():.4f} (Goal: High)")
-                    self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
+                    #self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
+                    #self.logger.info(f"       (2) Pop Uniform KL  (KL): {KL_norm.item():.4f} (Goal: Low)")
+                    #self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
 
-                    # 기존 샘플 0,1의 분포도 그대로 유지
                     self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
-                    if B > 1:
-                        self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
-
-
+                    self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
+                    
+                    # self.logger.info(f"   prog : {prog:.3f}")
+                    # self.logger.info(
+                    #     f"       soft_tau_now={soft_tau_now:.6f} | "
+                    #     f"lambdas: lamS={lambda_s:.3f}, lamB={lambda_b:.3f} | "
+                    #     f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
+                    #     f"KL(raw)={KL_pop.item():.4f}, KL(norm)={KL_norm.item():.4f}"
+                    # )
             # =========================================================================
             # Step 5: Codebook FGW (encoder detach → codebook 전용 loss)
             # =========================================================================
@@ -299,7 +384,8 @@ class GraphQuantizer(nn.Module):
 
             loss_codebook   = (pi_detached * d_codebook).sum(dim=1).mean()
             loss_commitment = (pi_detached * d_commit).sum(dim=1).mean()
-            vq_loss         = loss_codebook + self.vq_beta * loss_commitment + self.ent_reg * entropy_reg
+            vq_loss         = loss_codebook + self.vq_beta * loss_commitment #+ self.ent_reg * entropy_reg
+            
 
             # =========================================================================
             # Step 7 (추가): barycentric pushforward로 sample-conditioned LCG view 만들기
