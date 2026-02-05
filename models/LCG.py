@@ -119,16 +119,10 @@ class GraphQuantizer(nn.Module):
             scale_factor = dist_sq.max() + 1e-8 
 
         dist_norm = dist_sq / float(D)
-        x = dist_norm.detach().flatten().float()
-        qs = torch.quantile(x, torch.tensor([0.25, 0.50, 0.75], device=x.device))
-        q25, q50, q75 = qs[0], qs[1], qs[2]
-        eps = 1e-8
-        iqr = (q75 - q25).clamp_min(eps)
 
-        M_cost = (dist_norm - q50) / iqr   # robust z (centered)
 
-        # --- shift (no clamp) ---
-        M_cost = M_cost - M_cost.amin() 
+        M_cost = dist_norm
+
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
              with torch.no_grad():
                 self.logger.info(f"\n[RAW DIST CHECK] Step {self.log_step}")
@@ -144,7 +138,7 @@ class GraphQuantizer(nn.Module):
                 self.logger.info(f"   >>> mean={x.mean().item():.1f} | std={x.std().item():.1f}")
 
         
-        #M_cost = dist_norm
+
         
         a = torch.ones(src_feat.shape[0], src_feat.shape[1], device=src_feat.device) / src_feat.shape[1]
         b = torch.ones(tgt_feat.shape[0], tgt_feat.shape[1], device=tgt_feat.device) / tgt_feat.shape[1]
@@ -171,7 +165,7 @@ class GraphQuantizer(nn.Module):
                             self.logger.warning("       ⚠️ Feature Cost is STILL too small! Check scale_factor or Decrease tau.")
                         elif ratio > 20.0:
                              self.logger.warning("       ⚠️ Feature Cost is too Large! Increase tau.")
-                
+
         return result.value, result.plan
     
     def forward(self, source_struct, source_feat, lcg_struct, lcg_feat, batch):
@@ -293,75 +287,78 @@ class GraphQuantizer(nn.Module):
             # # =========================================================================
             # # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
             # # =========================================================================
-            #pi_safe = pi.clamp_min(1e-12)
+            # pi_safe = pi.clamp_min(1e-12)
             # H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
             # H_sample_mean = H_sample.mean() 
 
             # pi_bar = pi.mean(dim = 0)
             # H_max_val = math.log(M)
-            # H_s_norm = (H_sample_mean / H_max_val)
-            # #H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum() 
-            # u = 1.0 / M 
-            # KL_pop = (pi_bar * (pi_bar.log() - math.log(u))).sum() 
-            # KL_norm = KL_pop / H_max_val 
-
             
-            # lambda_s_max = float(getattr(self.args, "lambda_s_max", 1.0))
-            # lambda_b_max = float(getattr(self.args, "lambda_b_max", 1.0))
-            # lambda_b_min = float(getattr(self.args, "lambda_b_min", lambda_b_max))
-            # lambda_s = lambda_s_max * prog 
-            # lambda_b = lambda_b_max - (lambda_b_max - lambda_b_min) * prog 
+            
+            # H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum()
+            # H_s_norm = (H_sample_mean / H_max_val)
+            # H_p_norm = (H_batch / H_max_val)
+            # #u = 1.0 / M 
+
+            # lambda_s_max = float(getattr(self.args, "lambda_s_max", 2.0))
+            # lambda_p_max = float(getattr(self.args, "lambda_p_max", 1.0))  # <-- 새로 추가
+            # lambda_p_min = float(getattr(self.args, "lambda_p_min", lambda_p_max))
+
+            # lambda_s = lambda_s_max * prog
+            # lambda_p = lambda_p_max - (lambda_p_max - lambda_p_min) * prog
+
+            # # KL_pop / KL_norm 제거, 대신 H_p_norm 사용
+            # entropy_reg = (lambda_p * H_p_norm) - (lambda_s * H_s_norm)
         
-            # entropy_reg = (lambda_s * H_s_norm) - (lambda_b * KL_norm)
+            
             # reg_mode = (
             #     f"tau={soft_tau_now:.4g} (start={soft_tau_start:.4g}->end={soft_tau_end:.4g}, prog={prog:.2f}) | "
-            #     f"lamS={lambda_s:.3f}, lamB={lambda_b:.3f}"
+            #     f"lamS={lambda_s:.3f}, lamB={lambda_p:.3f}"
             # )
 
             # # Logging
-            if self.log_step % self.log_interval == 0:
-                with torch.no_grad():
-                    step = int(self.log_step)
+            # if self.log_step % self.log_interval == 0:
+            #     with torch.no_grad():
+            #         step = int(self.log_step)
 
-                    d_mean = d_commit.mean().item()
-                    d_std  = d_commit.std().item()
+            #         d_mean = d_commit.mean().item()
+            #         d_std  = d_commit.std().item()
 
-                    # H_mean = H_sample.mean().item()
-                    # H_min  = H_sample.min().item()
-                    # H_max  = H_sample.max().item()
+            #         H_mean = H_sample.mean().item()
+            #         H_min  = H_sample.min().item()
+            #         H_max  = H_sample.max().item()
 
-                    max_p_per_sample = pi.max(dim=1)[0]
-                    max_p_mean = max_p_per_sample.mean().item()
-                    max_p_min  = max_p_per_sample.min().item()
-                    max_p_max  = max_p_per_sample.max().item()
+            #         max_p_per_sample = pi.max(dim=1)[0]
+            #         max_p_mean = max_p_per_sample.mean().item()
+            #         max_p_min  = max_p_per_sample.min().item()
+            #         max_p_max  = max_p_per_sample.max().item()
 
-                    # ent_weight = float(getattr(self, "ent_reg", 0.0))
+            #         ent_weight = float(getattr(self, "ent_reg", 0.0))
 
-                    # self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
-                    # self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
-                    # self.logger.info(
-                    #     f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
-                    # )
-                    self.logger.info(
-                        f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
-                    )
+            #         self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
+            #         self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
+            #         self.logger.info(
+            #             f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
+            #         )
+            #         self.logger.info(
+            #             f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
+            #         )
 
-                    # 기존 "MI-Reg Stats" 라벨 유지하되, population은 KL로 바뀜
-                    self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
-                    #self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
-                    #self.logger.info(f"       (2) Pop Uniform KL  (KL): {KL_norm.item():.4f} (Goal: Low)")
-                    #self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
+            #         self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
+            #         self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
+            #         self.logger.info(f"       (2) Pop Diversity  (H_p): {H_p_norm.item():.4f} (Goal: High)")
+            #         self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
 
-                    self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
-                    self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
-                    
-                    # self.logger.info(f"   prog : {prog:.3f}")
-                    # self.logger.info(
-                    #     f"       soft_tau_now={soft_tau_now:.6f} | "
-                    #     f"lambdas: lamS={lambda_s:.3f}, lamB={lambda_b:.3f} | "
-                    #     f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
-                    #     f"KL(raw)={KL_pop.item():.4f}, KL(norm)={KL_norm.item():.4f}"
-                    # )
+            # self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
+            # self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
+
+            #         self.logger.info(f"   prog : {prog:.3f}")
+            #         self.logger.info(
+            #             f"       soft_tau_now={soft_tau_now:.6f} | "
+            #             f"lambdas: lamS={lambda_s:.3f}, lamP={lambda_p:.3f} | "
+            #             f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
+            #             f"Hp(raw)={H_batch.item():.4f}, Hp(norm)={H_p_norm.item():.4f}"
+            #         )
             # =========================================================================
             # Step 5: Codebook FGW (encoder detach → codebook 전용 loss)
             # =========================================================================
