@@ -109,7 +109,7 @@ def get_args():
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
     parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential'])
-    parser.add_argument('--lcg_struct_type', type = str, default = 'projection', choices = ['projection', 'static', ' residual'])
+    parser.add_argument('--lcg_struct_type', type = str, default = 'static', choices = ['projection', 'static', ' residual'])
     '''
         Basis GAT Configuration
     '''
@@ -274,18 +274,41 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
     kmeans = KMeans(n_clusters = M * K, n_init = 10, random_state = args.random_seed).fit(data_pool)
     centers = torch.tensor(kmeans.cluster_centers_, dtype = torch.float32)
 
-    # 3. Stregegy Assignemtn 
+    # 3. Strategy Assignment 
     final_centroids = torch.zeros(M, K, D)
     if strategy == 'round_robin':
         final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous() 
     else: 
         final_centroids = centers.view(M, K, D)
     
-    # 5. Update Parameter
+    # 4. Update node_embeddings
     with torch.no_grad():
         model.latent_graph.node_embeddings.data.copy_(final_centroids.to(device))
         
     logger.info(f">> ✅ LCG Parameters Updated. (Strategy: {strategy})")
+
+    # 5. Initialize adj_param from node embedding distances
+    if model.latent_graph.struct_mode == 'static':
+        with torch.no_grad():
+            node_emb = model.latent_graph.node_embeddings.data  # [M, K, D]
+            dist = torch.cdist(node_emb, node_emb, p=2) ** 2   # [M, K, K]
+            for m in range(M):
+                q90 = torch.quantile(dist[m].flatten(), 0.9).clamp_min(1e-8)
+                dist[m] = (dist[m] / q90).clamp_max(1.0)
+            
+            # dist ≈ 원하는 (1 - sigmoid(adj_param))
+            # → sigmoid(adj_param) = 1 - dist
+            # → adj_param = logit(1 - dist)
+            target = (1.0 - dist).clamp(0.01, 0.99)
+            adj_init = torch.log(target / (1.0 - target))
+            
+            model.latent_graph.adj_param.data.copy_(adj_init.to(device))
+        
+        logger.info(f">> ✅ adj_param initialized from node embedding distances.")
+        with torch.no_grad():
+            ct = 1.0 - torch.sigmoid(model.latent_graph.adj_param.data)
+            for m in range(M):
+                logger.info(f"   LCG {m}: CT mean={ct[m].mean():.4f}, std={ct[m].std():.4f}")
 
 
 class _DummySet:

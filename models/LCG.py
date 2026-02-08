@@ -118,26 +118,50 @@ class GraphQuantizer(nn.Module):
             raw_dist_mean = dist_sq.mean().item()
             scale_factor = dist_sq.max() + 1e-8 
 
-        dist_norm = dist_sq / float(D)
+        M_raw = dist_sq / float(D)
+
+        with torch.no_grad():
+            q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
 
 
-        M_cost = dist_norm
+        M_cost = M_raw / q90
 
+        # ====== put this block inside compute_fgw() after you define M_cost ======
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
-             with torch.no_grad():
-                self.logger.info(f"\n[RAW DIST CHECK] Step {self.log_step}")
-                self.logger.info(f"   >>> Raw Dist^2 Mean: {raw_dist_mean:.1f} | Max: {raw_dist_max:.1f}")
-                self.logger.info(f"   >>> Adaptive Scale Factor: {scale_factor.item():.1f}")
-                self.logger.info(f"   >>> Normalized Dist Mean: {dist_norm.mean().item():.4f} (Target ~0.3-0.5)")
-                self.logger.info(f"   >>> Current tau: {self.tau}")
-                x = dist_sq.detach().float().flatten()
-                qs = torch.quantile(x, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device = x.device))
-                self.logger.info(f"\n[RAW DIST^2 STATS] Step {int(self.log_step)}")
-                self.logger.info(f"   >>> q00={qs[0].item():.1f} | q50={qs[1].item():.1f} | q90={qs[2].item():.1f} | "
-                                f"q95={qs[3].item():.1f} | q99={qs[4].item():.1f} | q100={qs[5].item():.1f}")
-                self.logger.info(f"   >>> mean={x.mean().item():.1f} | std={x.std().item():.1f}")
+            with torch.no_grad():
+                self.logger.info(f"\n[COST/RANGE CHECK] Step {int(self.log_step)}")
 
-        
+                # ---- dist_sq ----
+                x = dist_sq.detach().float().flatten()
+                qs = torch.quantile(x, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=x.device))
+                self.logger.info(f"  [dist_sq] mean={x.mean().item():.1f} std={x.std().item():.1f} max={x.max().item():.1f}")
+                self.logger.info(f"    q00={qs[0].item():.1f} q50={qs[1].item():.1f} q90={qs[2].item():.1f} "
+                                f"q95={qs[3].item():.1f} q99={qs[4].item():.1f} q100={qs[5].item():.1f}")
+
+                # ---- dist_norm (=M_cost if you use it) ----
+                y = M_cost.detach().float().flatten()
+                qy = torch.quantile(y, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=y.device))
+                self.logger.info(f"  [dist_sq/D] mean={y.mean().item():.4f} std={y.std().item():.4f} max={y.max().item():.4f}")
+                self.logger.info(f"    q00={qy[0].item():.4f} q50={qy[1].item():.4f} q90={qy[2].item():.4f} "
+                                f"q95={qy[3].item():.4f} q99={qy[4].item():.4f} q100={qy[5].item():.4f}")
+
+                # ---- src_str / tgt_str ----
+                cs = src_str.detach().float().flatten()
+                qcs = torch.quantile(cs, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=cs.device))
+                self.logger.info(f"  [CS=src_str] mean={cs.mean().item():.4f} std={cs.std().item():.4f} "
+                                f"min={cs.min().item():.4f} max={cs.max().item():.4f}")
+                self.logger.info(f"    q00={qcs[0].item():.4f} q50={qcs[1].item():.4f} q90={qcs[2].item():.4f} "
+                                f"q95={qcs[3].item():.4f} q99={qcs[4].item():.4f} q100={qcs[5].item():.4f}")
+
+                ct = tgt_str.detach().float().flatten()
+                qct = torch.quantile(ct, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=ct.device))
+                self.logger.info(f"  [CT=tgt_str] mean={ct.mean().item():.4f} std={ct.std().item():.4f} "
+                                f"min={ct.min().item():.4f} max={ct.max().item():.4f}")
+                self.logger.info(f"    q00={qct[0].item():.4f} q50={qct[1].item():.4f} q90={qct[2].item():.4f} "
+                                f"q95={qct[3].item():.4f} q99={qct[4].item():.4f} q100={qct[5].item():.4f}")
+
+
+
 
         
         a = torch.ones(src_feat.shape[0], src_feat.shape[1], device=src_feat.device) / src_feat.shape[1]
@@ -147,25 +171,51 @@ class GraphQuantizer(nn.Module):
             src_str, tgt_str, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b, 
             max_iter=10, tol=1e-3, grad='envelope'
         )
-        #pdb.set_trace()
+
         if self.log_step % self.log_interval == 0:
             with torch.no_grad():
                 if hasattr(result, 'plan') and result.plan is not None:
                     T = result.plan.detach()
-                    feature_term = (M_cost * T).sum(dim=(1,2)).mean().item()
-                    total_val = result.value.mean().item()
-                    struct_term = (total_val - (1 - self.alpha) * feature_term) / (self.alpha + 1e-9)
+                    feat_per_pair = (M_cost * T).sum(dim=(1,2))
+                    total_per_pair = result.value.detach()
+                    grov_per_pair = (total_per_pair - (1 - self.alpha) * feat_per_pair) / (self.alpha + 1e-9)
+                    
+                    feature_term = feat_per_pair.mean().item()
+                    struct_term = grov_per_pair.mean().item()
                     ratio = feature_term / (struct_term + 1e-9)
                     
-                    if src_feat.requires_grad: 
+                    if src_feat.requires_grad:
                         self.logger.info(f"\n[DIAGNOSTIC] Step {self.log_step.item()}")
                         self.logger.info(f"   >>> (1) Cost Scale | Feat: {feature_term:.6f} vs Struct: {struct_term:.6f} | Ratio: {ratio:.4f}")
                         
-                        if ratio < 0.05: 
-                            self.logger.warning("       ⚠️ Feature Cost is STILL too small! Check scale_factor or Decrease tau.")
-                        elif ratio > 20.0:
-                             self.logger.warning("       ⚠️ Feature Cost is too Large! Increase tau.")
+                        M_lcg = 8
+                        if feat_per_pair.shape[0] >= M_lcg:
+                            f_sample0 = feat_per_pair[:M_lcg].cpu().numpy()
+                            g_sample0 = grov_per_pair[:M_lcg].cpu().numpy()
+                            t_sample0 = total_per_pair[:M_lcg].cpu().numpy()
+                            self.logger.info(f"   >>> Per-LCG (sample 0):")
+                            self.logger.info(f"       feat:  {np.array2string(f_sample0, precision=4)}")
+                            self.logger.info(f"       grov:  {np.array2string(g_sample0, precision=4)}")
+                            self.logger.info(f"       total: {np.array2string(t_sample0, precision=4)}")
+                            self.logger.info(f"       feat range: {f_sample0.max()-f_sample0.min():.6f}")
+                            self.logger.info(f"       grov range: {g_sample0.max()-g_sample0.min():.6f}")
+                            
+                            raw_mcost = M_cost[:M_lcg]
+                            mcost_means = raw_mcost.mean(dim=(1,2))
+                            self.logger.info(f"       M_cost mean per LCG: {mcost_means.cpu().numpy().round(4)}")
+                            self.logger.info(f"       M_cost range: {(mcost_means.max()-mcost_means.min()).item():.6f}")
 
+                            raw_T = T[:M_lcg]
+                            T_ent = -(raw_T * (raw_T+1e-12).log()).sum(dim=(1,2))
+                            self.logger.info(f"       Plan entropy per LCG: {T_ent.cpu().numpy().round(4)}")
+                        
+                        if ratio < 0.05:
+                            self.logger.warning("       ⚠️ Feature Cost is STILL too small!")
+                        elif ratio > 20.0:
+                            self.logger.warning("       ⚠️ Feature Cost is too Large!")
+                        # pdb 추가
+                        # if self.log_step >= 100:
+                        #     import pdb; pdb.set_trace()
         return result.value, result.plan
     
     def forward(self, source_struct, source_feat, lcg_struct, lcg_feat, batch):
@@ -270,95 +320,105 @@ class GraphQuantizer(nn.Module):
             # # =========================================================================
             # # Step 4: 샘플별 soft assignment pi[b,m]
             # # =========================================================================
-            # warmup_epochs = int(getattr(self.args, "warmup_epochs", 20))
-            # rampup_epochs = int(getattr(self.args, "rampup_epochs", 40))
-            # soft_tau_start = float(getattr(self.args, "soft_tau_start", float(self.soft_tau)))
-            # soft_tau_end = float(getattr(self.args, "soft_tau_end", float(self.soft_tau)))
-            # if self.current_epoch < warmup_epochs:
-            #     prog = 0.0 
-            # else:
-            #     t = (self.current_epoch - warmup_epochs) / max(1, rampup_epochs)
-            #     prog = float(max(0.0, min(1.0, t)))
-            # soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
-            # soft_tau_now = max(1e-8, soft_tau_now) 
+            warmup_epochs = int(getattr(self.args, "warmup_epochs", 20))
+            rampup_epochs = int(getattr(self.args, "rampup_epochs", 40))
+            soft_tau_start = float(getattr(self.args, "soft_tau_start", float(self.soft_tau)))
+            soft_tau_end = float(getattr(self.args, "soft_tau_end", float(self.soft_tau)))
+            if self.current_epoch < warmup_epochs:
+                prog = 0.0 
+            else:
+                t = (self.current_epoch - warmup_epochs) / max(1, rampup_epochs)
+                prog = float(max(0.0, min(1.0, t)))
+            soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
+            soft_tau_now = max(1e-8, soft_tau_now) 
 
             pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
 
-            # # =========================================================================
-            # # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
-            # # =========================================================================
-            # pi_safe = pi.clamp_min(1e-12)
-            # H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
-            # H_sample_mean = H_sample.mean() 
+            # =========================================================================
+            # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
+            # =========================================================================
+            pi_safe = pi.clamp_min(1e-12)
+            H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
+            H_sample_mean = H_sample.mean() 
 
-            # pi_bar = pi.mean(dim = 0)
-            # H_max_val = math.log(M)
+            pi_bar = pi.mean(dim = 0)
+            H_max_val = math.log(M)
             
             
-            # H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum()
-            # H_s_norm = (H_sample_mean / H_max_val)
-            # H_p_norm = (H_batch / H_max_val)
-            # #u = 1.0 / M 
+            H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum()
+            H_s_norm = (H_sample_mean / H_max_val)
+            H_p_norm = (H_batch / H_max_val)
+            #u = 1.0 / M 
 
-            # lambda_s_max = float(getattr(self.args, "lambda_s_max", 2.0))
-            # lambda_p_max = float(getattr(self.args, "lambda_p_max", 1.0))  # <-- 새로 추가
-            # lambda_p_min = float(getattr(self.args, "lambda_p_min", lambda_p_max))
+            lambda_s_max = float(getattr(self.args, "lambda_s_max", 2.0))
+            lambda_p_max = float(getattr(self.args, "lambda_p_max", 1.0))  # <-- 새로 추가
+            lambda_p_min = float(getattr(self.args, "lambda_p_min", lambda_p_max))
 
-            # lambda_s = lambda_s_max * prog
-            # lambda_p = lambda_p_max - (lambda_p_max - lambda_p_min) * prog
+            lambda_s = lambda_s_max * prog
+            lambda_p = lambda_p_max - (lambda_p_max - lambda_p_min) * prog
 
-            # # KL_pop / KL_norm 제거, 대신 H_p_norm 사용
-            # entropy_reg = (lambda_p * H_p_norm) - (lambda_s * H_s_norm)
+            # KL_pop / KL_norm 제거, 대신 H_p_norm 사용
+            entropy_reg = (lambda_p * H_p_norm) - (lambda_s * H_s_norm)
         
             
-            # reg_mode = (
-            #     f"tau={soft_tau_now:.4g} (start={soft_tau_start:.4g}->end={soft_tau_end:.4g}, prog={prog:.2f}) | "
-            #     f"lamS={lambda_s:.3f}, lamB={lambda_p:.3f}"
-            # )
+            reg_mode = (
+                f"tau={soft_tau_now:.4g} (start={soft_tau_start:.4g}->end={soft_tau_end:.4g}, prog={prog:.2f}) | "
+                f"lamS={lambda_s:.3f}, lamB={lambda_p:.3f}"
+            )
 
-            # # Logging
-            # if self.log_step % self.log_interval == 0:
-            #     with torch.no_grad():
-            #         step = int(self.log_step)
+            # Logging
+            if self.log_step % self.log_interval == 0:
+                with torch.no_grad():
+                    step = int(self.log_step)
 
-            #         d_mean = d_commit.mean().item()
-            #         d_std  = d_commit.std().item()
+                    d_mean = d_commit.mean().item()
+                    d_std  = d_commit.std().item()
 
-            #         H_mean = H_sample.mean().item()
-            #         H_min  = H_sample.min().item()
-            #         H_max  = H_sample.max().item()
+                    H_mean = H_sample.mean().item()
+                    H_min  = H_sample.min().item()
+                    H_max  = H_sample.max().item()
 
-            #         max_p_per_sample = pi.max(dim=1)[0]
-            #         max_p_mean = max_p_per_sample.mean().item()
-            #         max_p_min  = max_p_per_sample.min().item()
-            #         max_p_max  = max_p_per_sample.max().item()
+                    max_p_per_sample = pi.max(dim=1)[0]
+                    max_p_mean = max_p_per_sample.mean().item()
+                    max_p_min  = max_p_per_sample.min().item()
+                    max_p_max  = max_p_per_sample.max().item()
 
-            #         ent_weight = float(getattr(self, "ent_reg", 0.0))
+                    ent_weight = float(getattr(self, "ent_reg", 0.0))
 
-            #         self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
-            #         self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
-            #         self.logger.info(
-            #             f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
-            #         )
-            #         self.logger.info(
-            #             f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
-            #         )
+                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
+                    self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
+                    self.logger.info(
+                        f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
+                    )
+                    self.logger.info(
+                        f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
+                    )
 
-            #         self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
-            #         self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
-            #         self.logger.info(f"       (2) Pop Diversity  (H_p): {H_p_norm.item():.4f} (Goal: High)")
-            #         self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
+                    self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
+                    self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
+                    self.logger.info(f"       (2) Pop Diversity  (H_p): {H_p_norm.item():.4f} (Goal: High)")
+                    self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
 
-            # self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
-            # self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
-
-            #         self.logger.info(f"   prog : {prog:.3f}")
-            #         self.logger.info(
-            #             f"       soft_tau_now={soft_tau_now:.6f} | "
-            #             f"lambdas: lamS={lambda_s:.3f}, lamP={lambda_p:.3f} | "
-            #             f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
-            #             f"Hp(raw)={H_batch.item():.4f}, Hp(norm)={H_p_norm.item():.4f}"
-            #         )
+                    self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
+                    self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
+                    
+                    with torch.no_grad():
+                        nodes = lcg_feat_exp[:M]  # [M, K, D] — 첫 샘플의 M개 LCG
+                        centroids = nodes.mean(dim=1)  # [M, D]
+                        cdist_mat = torch.cdist(centroids.unsqueeze(0), centroids.unsqueeze(0)).squeeze(0)  # [M, M]
+                        mask = ~torch.eye(M, dtype=torch.bool, device=cdist_mat.device)
+                        off_diag = cdist_mat[mask]
+                        self.logger.info(
+                            f"   >>> LCG centroid dist: mean={off_diag.mean():.4f}, "
+                            f"min={off_diag.min():.4f}, max={off_diag.max():.4f}"
+                        )
+                    self.logger.info(f"   prog : {prog:.3f}")
+                    self.logger.info(
+                        f"       soft_tau_now={soft_tau_now:.6f} | "
+                        f"lambdas: lamS={lambda_s:.3f}, lamP={lambda_p:.3f} | "
+                        f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
+                        f"Hp(raw)={H_batch.item():.4f}, Hp(norm)={H_p_norm.item():.4f}"
+                    )
             # =========================================================================
             # Step 5: Codebook FGW (encoder detach → codebook 전용 loss)
             # =========================================================================
@@ -381,7 +441,7 @@ class GraphQuantizer(nn.Module):
 
             loss_codebook   = (pi_detached * d_codebook).sum(dim=1).mean()
             loss_commitment = (pi_detached * d_commit).sum(dim=1).mean()
-            vq_loss         = loss_codebook + self.vq_beta * loss_commitment #+ self.ent_reg * entropy_reg
+            vq_loss         = loss_codebook + self.vq_beta * loss_commitment - self.ent_reg * entropy_reg
             
 
             # =========================================================================

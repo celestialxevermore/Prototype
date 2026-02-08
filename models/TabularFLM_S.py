@@ -201,6 +201,23 @@ class Model(nn.Module):
         else:
             if last_att is not None:
                 self._last_P_basis = 1.0 - last_att[:, 0, 1:, 1:]
+                attn = last_att[:, 0, 1:, 1:]
+                log_attn = -torch.log(attn.clamp_min(1e-8))
+                with torch.no_grad():
+                    q90 = torch.quantile(log_attn.flatten(), 0.9).clamp_min(1e-8)
+                self._last_P_basis = (log_attn / q90).clamp_max(1.0)
+                # print("=== 1-attn ===")
+                # cs = self._last_P_basis.detach().float()
+                # print(f"  mean={cs.mean():.4f}, q50={torch.quantile(cs.flatten(), 0.5):.4f}, "
+                #     f"q90={torch.quantile(cs.flatten(), 0.9):.4f}")
+                
+                # print("=== -log(attn) ===")
+                # la = log_attn.detach().float()
+                # print(f"  mean={la.mean():.4f}, q50={torch.quantile(la.flatten(), 0.5):.4f}, "
+                #     f"q90={torch.quantile(la.flatten(), 0.9):.4f}, "
+                #     f"q99={torch.quantile(la.flatten(), 0.99):.4f}, "
+                #     f"max={la.max():.4f}")
+                # pdb.set_trace()
             else:
                 B, N = value.shape[:2]
                 self._last_P_basis = torch.zeros(B, N, N, device = self.device)
