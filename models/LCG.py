@@ -108,35 +108,62 @@ class GraphQuantizer(nn.Module):
         self.last_plan = None
         self.ent_reg = self.args.entropy_reg
         self.current_epoch = 0
-    def compute_fgw(self, src_feat, src_str, tgt_feat, tgt_str):
-        B, N, D = src_feat.shape 
-        dist_sq = torch.cdist(src_feat, tgt_feat, p=2) ** 2 
+
+        M = args.n_graphs 
+        self.register_buffer("usage_count", torch.zeros(M))
+        self.register_buffer("reset_counter", torch.tensor(0))
+        self.dead_threshold = 0.05
+        self.reset_noise = 0.01
+
+    def reset_dead(self, latent_graph):
+        M = self.usage_count.shape[0]
+        avg_usage = self.usage_count.sum() / M
+        dead_mask = self.usage_count < (avg_usage * self.dead_threshold)
+        if not dead_mask.any():
+            self.logger.info(f"   [Dead Reset] No dead codes. Usage: {self.usage_count.cpu().numpy().round(1)}")
+            self.usage_count.zero_()
+            return 0
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0].tolist()
+        self.logger.info(f"   [Dead Reset] Dead: {dead_indices}")
+        self.logger.info(f"   [Dead Reset] Usage: {self.usage_count.cpu().numpy().round(1)}")
         
         with torch.no_grad():
-            raw_min = dist_sq.min(dim=1, keepdim=True)[0]
-            raw_dist_max = dist_sq.max().item()
-            raw_dist_mean = dist_sq.mean().item()
-            scale_factor = dist_sq.max() + 1e-8 
+            for d_idx in dead_indices:
+                latent_graph.node_embeddings.data[d_idx] = latent_graph.init_node_embeddings[d_idx].clone()
+                if hasattr(latent_graph, 'adj_param') and hasattr(latent_graph, 'init_adj_param'):
+                    latent_graph.adj_param.data[d_idx] = latent_graph.init_adj_param[d_idx].clone()
+                self.logger.info(f"   [Dead Reset] LCG {d_idx} -> restored to init position")
+        
+        self.usage_count.zero_()
+        return len(dead_indices)
 
-        M_raw = dist_sq / float(D)
-
-        with torch.no_grad():
-            q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
 
 
-        M_cost = M_raw / q90
+    def compute_fgw(self, src_feat, src_str, tgt_feat, tgt_str):
+        B, N, D = src_feat.shape
+
+        if self.args.feat_distance == "cosine":
+            src_norm = F.normalize(src_feat, dim = -1)
+            tgt_norm = F.normalize(tgt_feat, dim = -1)
+            cos_sim = torch.bmm(src_norm, tgt_norm.transpose(1,2))
+            M_cost = 1.0 - torch.exp(-(1.0 - cos_sim))
+        elif self.args.feat_distance == "l2":
+            dist_sq = torch.cdist(src_feat, tgt_feat, p = 2) * 2
+            M_raw = dist_sq / float(D)
+            with torch.no_grad():
+                q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
+            M_cost = M_raw / q90 
+
+            with torch.no_grad():
+                raw_min = dist_sq.min(dim=1, keepdim=True)[0]
+                raw_dist_max = dist_sq.max().item()
+                raw_dist_mean = dist_sq.mean().item()
+                scale_factor = dist_sq.max() + 1e-8     
 
         # ====== put this block inside compute_fgw() after you define M_cost ======
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
             with torch.no_grad():
                 self.logger.info(f"\n[COST/RANGE CHECK] Step {int(self.log_step)}")
-
-                # ---- dist_sq ----
-                x = dist_sq.detach().float().flatten()
-                qs = torch.quantile(x, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=x.device))
-                self.logger.info(f"  [dist_sq] mean={x.mean().item():.1f} std={x.std().item():.1f} max={x.max().item():.1f}")
-                self.logger.info(f"    q00={qs[0].item():.1f} q50={qs[1].item():.1f} q90={qs[2].item():.1f} "
-                                f"q95={qs[3].item():.1f} q99={qs[4].item():.1f} q100={qs[5].item():.1f}")
 
                 # ---- dist_norm (=M_cost if you use it) ----
                 y = M_cost.detach().float().flatten()
@@ -237,6 +264,9 @@ class GraphQuantizer(nn.Module):
             """
             B, N, D = source_feat.shape
             M, K, _ = lcg_feat.shape
+            src_idx = batch.get('src_idx',-1)
+            if isinstance(src_idx, torch.Tensor):
+                src_idx = src_idx.item()    
 
             # =========================================================================
             # Step 1: LCG를 배치 차원으로 복제 → [B, M, K, D], [B, M, K, K]
@@ -322,8 +352,8 @@ class GraphQuantizer(nn.Module):
             # # =========================================================================
             warmup_epochs = int(getattr(self.args, "warmup_epochs", 20))
             rampup_epochs = int(getattr(self.args, "rampup_epochs", 40))
-            soft_tau_start = float(getattr(self.args, "soft_tau_start", float(self.soft_tau)))
-            soft_tau_end = float(getattr(self.args, "soft_tau_end", float(self.soft_tau)))
+            soft_tau_start = float(getattr(self.args, "soft_tau_start", 0.1))
+            soft_tau_end = float(getattr(self.args, "soft_tau_end", 0.01))
             if self.current_epoch < warmup_epochs:
                 prog = 0.0 
             else:
@@ -332,8 +362,11 @@ class GraphQuantizer(nn.Module):
             soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
             soft_tau_now = max(1e-8, soft_tau_now) 
 
-            pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
-
+            #pi = torch.softmax(-d_commit / soft_tau_now, dim=1)  # [B, M]
+            d_norm = (d_commit - d_commit.mean(dim=1, keepdim=True)) / d_commit.std(dim=1, keepdim=True).clamp_min(1e-8)
+            pi = torch.softmax(-d_norm / self.soft_tau, dim = 1) 
+            with torch.no_grad():
+                self.usage_count += pi.sum(dim=0)
             # =========================================================================
             # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
             # =========================================================================
@@ -348,9 +381,9 @@ class GraphQuantizer(nn.Module):
             H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum()
             H_s_norm = (H_sample_mean / H_max_val)
             H_p_norm = (H_batch / H_max_val)
-            #u = 1.0 / M 
+             
 
-            lambda_s_max = float(getattr(self.args, "lambda_s_max", 2.0))
+            lambda_s_max = float(getattr(self.args, "lambda_s_max", 0.0))
             lambda_p_max = float(getattr(self.args, "lambda_p_max", 1.0))  # <-- 새로 추가
             lambda_p_min = float(getattr(self.args, "lambda_p_min", lambda_p_max))
 
@@ -368,6 +401,7 @@ class GraphQuantizer(nn.Module):
 
             # Logging
             if self.log_step % self.log_interval == 0:
+                src_name = f"src={src_idx}" if src_idx is not None else "src=?" 
                 with torch.no_grad():
                     step = int(self.log_step)
 
@@ -385,7 +419,7 @@ class GraphQuantizer(nn.Module):
 
                     ent_weight = float(getattr(self, "ent_reg", 0.0))
 
-                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | Mode: {reg_mode}")
+                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | {src_name} | Mode: {reg_mode}")
                     self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
                     self.logger.info(
                         f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"

@@ -108,8 +108,9 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential', 'balanced_hierarchical'])
     parser.add_argument('--lcg_struct_type', type = str, default = 'static', choices = ['projection', 'static', ' residual'])
+    parser.add_argument('--feat_distance', type = str, default = 'cosine', choices=['cosine','l2'])
     '''
         Basis GAT Configuration
     '''
@@ -221,7 +222,6 @@ def wandb_update_config_minimal(args):
 
 
 
-
 def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', injection_scale=1.0):
     import logging
     from sklearn.cluster import KMeans
@@ -267,41 +267,103 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
     data_pool = np.concatenate(all_cls_tokens, axis = 0)
     logger.info(f">> Collected  {data_pool.shape[0]} CLS samples.")
     
-    # 2. KMeans
     M = model.latent_graph.M 
     K = model.latent_graph.K
     D = model.latent_graph.D 
-    kmeans = KMeans(n_clusters = M * K, n_init = 10, random_state = args.random_seed).fit(data_pool)
-    centers = torch.tensor(kmeans.cluster_centers_, dtype = torch.float32)
 
-    # 3. Strategy Assignment 
-    final_centroids = torch.zeros(M, K, D)
-    if strategy == 'round_robin':
-        final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous() 
-    else: 
-        final_centroids = centers.view(M, K, D)
+    # =========================================================================
+    # Strategy Assignment
+    # =========================================================================
+    if strategy == 'hierarchical':
+        logger.info(f">> [Hierarchical] Step 1: Global KMeans with M={M} clusters")
+        km_global = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed).fit(data_pool)
+        
+        final_centroids = np.zeros((M, K, D))
+        for m in range(M):
+            group = data_pool[km_global.labels_ == m]
+            logger.info(f"   LCG {m}: {len(group)} samples in global cluster")
+            if len(group) < K:
+                supp = data_pool[np.random.choice(len(data_pool), K - len(group))]
+                group = np.concatenate([group, supp], axis=0)
+            km_local = KMeans(n_clusters=K, n_init=10, random_state=args.random_seed).fit(group)
+            final_centroids[m] = km_local.cluster_centers_
+        
+        final_centroids = torch.tensor(final_centroids, dtype=torch.float32)
+
+    elif strategy == 'balanced_hierarchical':
+        logger.info(f">> [Balanced Hierarchical] Step 1: Global KMeans with M={M} clusters")
+        km_global = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed).fit(data_pool)
+        
+        # Balanced assignment: 각 클러스터 최대 크기 제한
+        max_per_cluster = int(np.ceil(len(data_pool) / M * 1.3))  # 평균의 1.3배까지 허용
+        min_per_cluster = max(K, int(len(data_pool) / M * 0.5))   # 최소 K개 또는 평균의 0.5배
+        
+        # 모든 샘플에서 각 centroid까지 거리
+        centroids_global = km_global.cluster_centers_  # [M, D]
+        dists = np.linalg.norm(data_pool[:, None, :] - centroids_global[None, :, :], axis=2)  # [N, M]
+        
+        # 선호도 순서로 greedy assignment
+        assignments = -np.ones(len(data_pool), dtype=int)
+        cluster_counts = np.zeros(M, dtype=int)
+        
+        # 각 샘플의 "확신도" (1등과 2등 거리 차이)가 큰 순서대로 배정
+        sorted_dists = np.sort(dists, axis=1)
+        confidence = sorted_dists[:, 1] - sorted_dists[:, 0]  # 2등-1등 gap
+        order = np.argsort(-confidence)  # 확신이 큰 것부터
+        
+        for idx in order:
+            prefs = np.argsort(dists[idx])  # 가까운 순서
+            for pref in prefs:
+                if cluster_counts[pref] < max_per_cluster:
+                    assignments[idx] = pref
+                    cluster_counts[pref] += 1
+                    break
+        
+        logger.info(f">> [Balanced] Cluster sizes: {cluster_counts.tolist()} "
+                     f"(target: {len(data_pool)//M}, max: {max_per_cluster})")
+        
+        # Step 2: 각 balanced cluster 안에서 local KMeans
+        final_centroids = np.zeros((M, K, D))
+        for m in range(M):
+            group = data_pool[assignments == m]
+            logger.info(f"   LCG {m}: {len(group)} samples (balanced)")
+            if len(group) < K:
+                supp = data_pool[np.random.choice(len(data_pool), K - len(group))]
+                group = np.concatenate([group, supp], axis=0)
+            km_local = KMeans(n_clusters=K, n_init=10, random_state=args.random_seed).fit(group)
+            final_centroids[m] = km_local.cluster_centers_
+        
+        final_centroids = torch.tensor(final_centroids, dtype=torch.float32)
+        
+    elif strategy == 'round_robin':
+        kmeans = KMeans(n_clusters=M * K, n_init=10, random_state=args.random_seed).fit(data_pool)
+        centers = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
+        final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous()
     
-    # 4. Update node_embeddings
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}. Use 'hierarchical', 'balanced_hierarchical', or 'round_robin'.")
+
+    # =========================================================================
+    # Update node_embeddings
+    # =========================================================================
     with torch.no_grad():
         model.latent_graph.node_embeddings.data.copy_(final_centroids.to(device))
         
     logger.info(f">> ✅ LCG Parameters Updated. (Strategy: {strategy})")
 
-    # 5. Initialize adj_param from node embedding distances
+    # =========================================================================
+    # Initialize adj_param from node embedding distances
+    # =========================================================================
     if model.latent_graph.struct_mode == 'static':
         with torch.no_grad():
-            node_emb = model.latent_graph.node_embeddings.data  # [M, K, D]
-            dist = torch.cdist(node_emb, node_emb, p=2) ** 2   # [M, K, K]
+            node_emb = model.latent_graph.node_embeddings.data
+            dist = torch.cdist(node_emb, node_emb, p=2) ** 2
             for m in range(M):
                 q90 = torch.quantile(dist[m].flatten(), 0.9).clamp_min(1e-8)
                 dist[m] = (dist[m] / q90).clamp_max(1.0)
             
-            # dist ≈ 원하는 (1 - sigmoid(adj_param))
-            # → sigmoid(adj_param) = 1 - dist
-            # → adj_param = logit(1 - dist)
             target = (1.0 - dist).clamp(0.01, 0.99)
             adj_init = torch.log(target / (1.0 - target))
-            
             model.latent_graph.adj_param.data.copy_(adj_init.to(device))
         
         logger.info(f">> ✅ adj_param initialized from node embedding distances.")
@@ -310,6 +372,19 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
             for m in range(M):
                 logger.info(f"   LCG {m}: CT mean={ct[m].mean():.4f}, std={ct[m].std():.4f}")
 
+    # =========================================================================
+    # Save initial state for dead code reset
+    # =========================================================================
+    model.latent_graph.register_buffer(
+        'init_node_embeddings', 
+        model.latent_graph.node_embeddings.data.clone()
+    )
+    if model.latent_graph.struct_mode == 'static':
+        model.latent_graph.register_buffer(
+            'init_adj_param',
+            model.latent_graph.adj_param.data.clone()
+        )
+    logger.info(f">> ✅ Initial LCG state saved for dead code reset")
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -990,6 +1065,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             scheduler_ep.step()
         if hasattr(model, 'graph_quantizer') and args.use_lcg is True:
             model.graph_quantizer.current_epoch = epoch + 1 
+            
+            if (epoch + 1) % 5 ==0 and (epoch + 1) >= warmup_epochs:
+                n_reset = model.graph_quantizer.reset_dead(model.latent_graph)
         if hasattr(model, 'current_epoch'):
             model.current_epoch = epoch + 1 
             #print(model.current_epoch)
@@ -1511,8 +1589,20 @@ def main():
             args, model_full, all_loaders, device, save_dir = ckpt_dir,
             strategy=args.lcg_strategy, injection_scale=0.1
         )
+        args.use_lcg = True
+        model_full.eval()
+        with torch.no_grad():
+            for src_name, loader in all_loaders.items():
+                batch = next(iter(loader))
+                batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+                _ = model_full.predict(batch, return_all=True)
+                pi = model_full.graph_quantizer.last_pi  # [B, M]
+                
+                logger.info(f"[INIT CHECK] {src_name}: mean pi={pi.mean(0).cpu().numpy().round(4)}")
+                logger.info(f"[INIT CHECK] {src_name}: argmax counts={torch.bincount(pi.argmax(1), minlength=pi.shape[1]).cpu().numpy()}")
+                
         fix_seed(args.random_seed)
-
+        pdb.set_trace()
         # --- [Step 3] Phase 2: Joint Training ---
         logger.info(f"\n{'='*40}\n>>> [Phase 2] Start Joint Training (Global ON)\n{'='*40}")
         args.use_lcg = True 
