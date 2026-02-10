@@ -628,7 +628,8 @@ def train_and_validate(args, model, train_loader, val_loader,
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}/{args.run_tag}"
+    checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
+    #checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}/{args.run_tag}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     log_file_path = os.path.join(checkpoint_dir, f"train_log.log")
@@ -1022,7 +1023,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
+    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
+    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
+    
     os.makedirs(ckpt_dir, exist_ok=True)
     ckpt_latest = os.path.join(ckpt_dir, "best.pt")
     ckpt_hist   = os.path.join(ckpt_dir, f"best_{experiment_id}.pt")
@@ -1511,7 +1514,8 @@ def main():
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
+    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
+    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
     os.makedirs(ckpt_dir, exist_ok = True)
     ckpt_final = os.path.join(ckpt_dir, "best_joint.pt")
     ckpt_vanilla = os.path.join(ckpt_dir, "best_vanilla.pt")
