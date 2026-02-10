@@ -361,9 +361,9 @@ class GraphQuantizer(nn.Module):
             #     prog = float(max(0.0, min(1.0, t)))
             # soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
             # soft_tau_now = max(1e-8, soft_tau_now) 
-            d_norm = (d_commit - d_commit.mean(dim=1, keepdim=True)) / d_commit.std(dim=1, keepdim=True).clamp_min(1e-8)
-            pi = torch.softmax(-d_norm / self.soft_tau, dim=1)
-            #pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
+            #d_norm = (d_commit - d_commit.mean(dim=1, keepdim=True)) / d_commit.std(dim=1, keepdim=True).clamp_min(1e-8)
+            #pi = torch.softmax(-d_norm / self.soft_tau, dim=1)
+            pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
             with torch.no_grad():
                 self.usage_count += pi.sum(dim=0)
 
@@ -514,7 +514,8 @@ class GraphQuantizer(nn.Module):
 
             loss_codebook   = (pi_detached * d_codebook).sum(dim=1).mean()
             loss_commitment = (pi_detached * d_commit).sum(dim=1).mean()
-            vq_loss         = loss_codebook + self.vq_beta * loss_commitment + self.ent_reg * load_balance_loss
+            #vq_loss         = loss_codebook + self.vq_beta * loss_commitment + self.ent_reg * load_balance_loss
+            vq_loss         = loss_codebook + self.ent_reg * load_balance_loss
             if self.log_step % self.log_interval == 0:
                 with torch.no_grad():
                     self.logger.info(
@@ -547,16 +548,18 @@ class GraphQuantizer(nn.Module):
 
                 bary  = num / denom  # [B, M, K, D]
 
-                # (4) 전역 코드북 + residual → 샘플별 LCG view
-                Fy_res_batch = lcg_feat_batch + bary   # [B, M, K, D]
-                # ← 여기! if 블록 안에
+                # (4) bary scaling: LCG와 동등한 기여
+                with torch.no_grad():
+                    scale = lcg_feat_batch.norm(dim=-1).mean() / bary.norm(dim=-1).mean().clamp_min(1e-8)
+                Fy_res_batch = lcg_feat_batch + scale * bary   # [B, M, K, D]
+
                 if self.log_step % self.log_interval == 0:
                     with torch.no_grad():
                         lcg_norm = lcg_feat_batch.norm(dim=-1).mean().item()
-                        bary_norm = bary.norm(dim=-1).mean().item()
+                        bary_norm = (scale * bary).norm(dim=-1).mean().item()
                         self.logger.info(
-                            f"[SCALE] lcg_feat={lcg_norm:.4f} | bary={bary_norm:.4f} | "
-                            f"ratio={bary_norm/(lcg_norm+1e-8):.2f}"
+                            f"[SCALE] lcg_feat={lcg_norm:.4f} | scaled_bary={bary_norm:.4f} | "
+                            f"ratio={bary_norm/(lcg_norm+1e-8):.2f} | scale={scale:.4f}"
                         )
             # =========================================================================
             # 최종 출력: sample-conditioned LCG view + 구조 + pi + vq_loss

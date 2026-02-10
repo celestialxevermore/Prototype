@@ -122,11 +122,8 @@ class Model(nn.Module):
 
     def set_freeze_target(self):
         for p in self.parameters(): p.requires_grad = False
-        #for p in self.latent_graph.parameters(): p.requires_grad = True
-        #for p in self.graph_quantizer.parameters(): p.requires_grad = True
         for p in self.gnn_experts.parameters(): p.requires_grad = True
         for p in self.ghead2.parameters(): p.requires_grad = True
-        #for p in self.thead.parameters(): p.requires_grad = True
     # ---- training ----
     def forward(self, batch, y):
         total_loss = 0.0 
@@ -206,18 +203,7 @@ class Model(nn.Module):
                 with torch.no_grad():
                     q90 = torch.quantile(log_attn.flatten(), 0.9).clamp_min(1e-8)
                 self._last_P_basis = (log_attn / q90).clamp_max(1.0)
-                # print("=== 1-attn ===")
-                # cs = self._last_P_basis.detach().float()
-                # print(f"  mean={cs.mean():.4f}, q50={torch.quantile(cs.flatten(), 0.5):.4f}, "
-                #     f"q90={torch.quantile(cs.flatten(), 0.9):.4f}")
-                
-                # print("=== -log(attn) ===")
-                # la = log_attn.detach().float()
-                # print(f"  mean={la.mean():.4f}, q50={torch.quantile(la.flatten(), 0.5):.4f}, "
-                #     f"q90={torch.quantile(la.flatten(), 0.9):.4f}, "
-                #     f"q99={torch.quantile(la.flatten(), 0.99):.4f}, "
-                #     f"max={la.max():.4f}")
-                # pdb.set_trace()
+
             else:
                 B, N = value.shape[:2]
                 self._last_P_basis = torch.zeros(B, N, N, device = self.device)
