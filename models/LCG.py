@@ -350,109 +350,148 @@ class GraphQuantizer(nn.Module):
             # # =========================================================================
             # # Step 4: 샘플별 soft assignment pi[b,m]
             # # =========================================================================
-            warmup_epochs = int(getattr(self.args, "warmup_epochs", 20))
-            rampup_epochs = int(getattr(self.args, "rampup_epochs", 40))
-            soft_tau_start = float(getattr(self.args, "soft_tau_start", 0.1))
-            soft_tau_end = float(getattr(self.args, "soft_tau_end", 0.01))
-            if self.current_epoch < warmup_epochs:
-                prog = 0.0 
-            else:
-                t = (self.current_epoch - warmup_epochs) / max(1, rampup_epochs)
-                prog = float(max(0.0, min(1.0, t)))
-            soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
-            soft_tau_now = max(1e-8, soft_tau_now) 
-
-            #pi = torch.softmax(-d_commit / soft_tau_now, dim=1)  # [B, M]
+            # warmup_epochs = int(getattr(self.args, "warmup_epochs", 20))
+            # rampup_epochs = int(getattr(self.args, "rampup_epochs", 40))
+            # soft_tau_start = float(getattr(self.args, "soft_tau_start", 0.1))
+            # soft_tau_end = float(getattr(self.args, "soft_tau_end", 0.01))
+            # if self.current_epoch < warmup_epochs:
+            #     prog = 0.0 
+            # else:
+            #     t = (self.current_epoch - warmup_epochs) / max(1, rampup_epochs)
+            #     prog = float(max(0.0, min(1.0, t)))
+            # soft_tau_now = soft_tau_start + (soft_tau_end - soft_tau_start) * prog 
+            # soft_tau_now = max(1e-8, soft_tau_now) 
             d_norm = (d_commit - d_commit.mean(dim=1, keepdim=True)) / d_commit.std(dim=1, keepdim=True).clamp_min(1e-8)
-            pi = torch.softmax(-d_norm / self.soft_tau, dim = 1) 
+            pi = torch.softmax(-d_norm / self.soft_tau, dim=1)
+            #pi = torch.softmax(-d_commit / self.soft_tau, dim=1)  # [B, M]
             with torch.no_grad():
                 self.usage_count += pi.sum(dim=0)
+
+            # Load balancing loss
+            p = pi.mean(dim=0)  # [M]
+            load_balance_loss = M * (p * p).sum()
+
+            # =========================================================================
+            # Logging
+            # =========================================================================
+            if self.log_step % self.log_interval == 0:
+                src_name = f"src={src_idx}" if src_idx is not None else "src=?"
+                with torch.no_grad():
+                    pi_np = pi.detach().cpu().numpy()
+                    top1 = pi_np.max(axis=1)
+                    argmax_counts = np.bincount(pi_np.argmax(axis=1), minlength=M)
+                    
+                    H_max = math.log(M)
+                    pi_safe = pi.detach().clamp_min(1e-12)
+                    H_s = -(pi_safe * pi_safe.log()).sum(dim=1).mean() / H_max
+                    H_p = -(p * (p + 1e-9).log()).sum() / H_max
+                    
+                    self.logger.info(
+                        f"[ROUTING] Step {int(self.log_step)} | Epoch {self.current_epoch} | {src_name} | "
+                        f"H_s={H_s:.3f} H_p={H_p:.3f} gap={H_p-H_s:.3f} | "
+                        f"top1={top1.mean():.3f}({top1.min():.3f}~{top1.max():.3f}) | "
+                        f"LB_loss={load_balance_loss:.4f} | "
+                        f"p={np.array2string(p.cpu().numpy(), precision=3)} | "
+                        f"argmax={argmax_counts}"
+                    )
+                    # 샘플 2개 pi 찍기
+                    for s in range(min(2, B)):
+                        best_lcg = pi_np[s].argmax()
+                        self.logger.info(
+                            f"   >>> Sample {s} Pi: {np.array2string(pi_np[s], precision=4)} | "
+                            f"best=LCG{best_lcg}({pi_np[s, best_lcg]:.3f})"
+                        )
+
+            #d_norm = (d_commit - d_commit.mean(dim=1, keepdim=True)) / d_commit.std(dim=1, keepdim=True).clamp_min(1e-8)
+            #pi = torch.softmax(-d_norm / self.soft_tau, dim = 1) 
+            # with torch.no_grad():
+            #     self.usage_count += pi.sum(dim=0)
             # =========================================================================
             # Step 4.5: Entropy regularization on pi (avoid too hard / too uniform)
             # =========================================================================
-            pi_safe = pi.clamp_min(1e-12)
-            H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
-            H_sample_mean = H_sample.mean() 
+            # pi_safe = pi.clamp_min(1e-12)
+            # H_sample = -(pi_safe * pi_safe.log()).sum(dim=1)
+            # H_sample_mean = H_sample.mean() 
 
-            pi_bar = pi.mean(dim = 0)
-            H_max_val = math.log(M)
+            # pi_bar = pi.mean(dim = 0)
+            # H_max_val = math.log(M)
             
             
-            H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum()
-            H_s_norm = (H_sample_mean / H_max_val)
-            H_p_norm = (H_batch / H_max_val)
+            # H_batch = -(pi_bar * (pi_bar + 1e-9).log()).sum()
+            # H_s_norm = (H_sample_mean / H_max_val)
+            # H_p_norm = (H_batch / H_max_val)
              
 
-            lambda_s_max = float(getattr(self.args, "lambda_s_max", 0.0))
-            lambda_p_max = float(getattr(self.args, "lambda_p_max", 1.0))  # <-- 새로 추가
-            lambda_p_min = float(getattr(self.args, "lambda_p_min", lambda_p_max))
+            # lambda_s_max = float(getattr(self.args, "lambda_s_max", 0.0))
+            # lambda_p_max = float(getattr(self.args, "lambda_p_max", 1.0))  # <-- 새로 추가
+            # lambda_p_min = float(getattr(self.args, "lambda_p_min", lambda_p_max))
 
-            lambda_s = lambda_s_max * prog
-            lambda_p = lambda_p_max - (lambda_p_max - lambda_p_min) * prog
+            # lambda_s = lambda_s_max * prog
+            # lambda_p = lambda_p_max - (lambda_p_max - lambda_p_min) * prog
 
-            # KL_pop / KL_norm 제거, 대신 H_p_norm 사용
-            entropy_reg = (lambda_p * H_p_norm) - (lambda_s * H_s_norm)
+            # # KL_pop / KL_norm 제거, 대신 H_p_norm 사용
+            # entropy_reg = (lambda_p * H_p_norm) - (lambda_s * H_s_norm)
         
             
-            reg_mode = (
-                f"tau={soft_tau_now:.4g} (start={soft_tau_start:.4g}->end={soft_tau_end:.4g}, prog={prog:.2f}) | "
-                f"lamS={lambda_s:.3f}, lamB={lambda_p:.3f}"
-            )
+            # reg_mode = (
+            #     f"tau={soft_tau_now:.4g} (start={soft_tau_start:.4g}->end={soft_tau_end:.4g}, prog={prog:.2f}) | "
+            #     f"lamS={lambda_s:.3f}, lamB={lambda_p:.3f}"
+            # )
 
-            # Logging
-            if self.log_step % self.log_interval == 0:
-                src_name = f"src={src_idx}" if src_idx is not None else "src=?" 
-                with torch.no_grad():
-                    step = int(self.log_step)
+            # # Logging
+            # if self.log_step % self.log_interval == 0:
+            #     src_name = f"src={src_idx}" if src_idx is not None else "src=?" 
+            #     with torch.no_grad():
+            #         step = int(self.log_step)
 
-                    d_mean = d_commit.mean().item()
-                    d_std  = d_commit.std().item()
+            #         d_mean = d_commit.mean().item()
+            #         d_std  = d_commit.std().item()
 
-                    H_mean = H_sample.mean().item()
-                    H_min  = H_sample.min().item()
-                    H_max  = H_sample.max().item()
+            #         H_mean = H_sample.mean().item()
+            #         H_min  = H_sample.min().item()
+            #         H_max  = H_sample.max().item()
 
-                    max_p_per_sample = pi.max(dim=1)[0]
-                    max_p_mean = max_p_per_sample.mean().item()
-                    max_p_min  = max_p_per_sample.min().item()
-                    max_p_max  = max_p_per_sample.max().item()
+            #         max_p_per_sample = pi.max(dim=1)[0]
+            #         max_p_mean = max_p_per_sample.mean().item()
+            #         max_p_min  = max_p_per_sample.min().item()
+            #         max_p_max  = max_p_per_sample.max().item()
 
-                    ent_weight = float(getattr(self, "ent_reg", 0.0))
+            #         ent_weight = float(getattr(self, "ent_reg", 0.0))
 
-                    self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | {src_name} | Mode: {reg_mode}")
-                    self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
-                    self.logger.info(
-                        f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
-                    )
-                    self.logger.info(
-                        f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
-                    )
+            #         self.logger.info(f"\n[SAMPLE-WISE FGW] Step {step} | Epoch {self.current_epoch} | {src_name} | Mode: {reg_mode}")
+            #         self.logger.info(f"   >>> Distance Stats | Mean: {d_mean:.6f} | Std: {d_std:.6f}")
+            #         self.logger.info(
+            #             f"   >>> Entropy (mean/min/max): {H_mean:.4f} / {H_min:.4f} / {H_max:.4f} (H_max={H_max_val:.3f})"
+            #         )
+            #         self.logger.info(
+            #             f"   >>> Max p(pi) per sample (mean/min/max): {max_p_mean:.4f} / {max_p_min:.4f} / {max_p_max:.4f}"
+            #         )
 
-                    self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
-                    self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
-                    self.logger.info(f"       (2) Pop Diversity  (H_p): {H_p_norm.item():.4f} (Goal: High)")
-                    self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
+            #         self.logger.info(f"   >>> [MI-Reg Stats] (Norm 0~1)")
+            #         self.logger.info(f"       (1) Sample Sharpness (H_s): {H_s_norm.item():.4f} (Goal: Low)")
+            #         self.logger.info(f"       (2) Pop Diversity  (H_p): {H_p_norm.item():.4f} (Goal: High)")
+            #         self.logger.info(f"       -> Reg Value: {entropy_reg.item():.4f} (weight: {ent_weight:.3e})")
 
-                    self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
-                    self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
+            #         self.logger.info(f"   >>> Sample 0 Pi: {pi[0].detach().cpu().numpy().round(4)}")
+            #         self.logger.info(f"   >>> Sample 1 Pi: {pi[1].detach().cpu().numpy().round(4)}")
                     
-                    with torch.no_grad():
-                        nodes = lcg_feat_exp[:M]  # [M, K, D] — 첫 샘플의 M개 LCG
-                        centroids = nodes.mean(dim=1)  # [M, D]
-                        cdist_mat = torch.cdist(centroids.unsqueeze(0), centroids.unsqueeze(0)).squeeze(0)  # [M, M]
-                        mask = ~torch.eye(M, dtype=torch.bool, device=cdist_mat.device)
-                        off_diag = cdist_mat[mask]
-                        self.logger.info(
-                            f"   >>> LCG centroid dist: mean={off_diag.mean():.4f}, "
-                            f"min={off_diag.min():.4f}, max={off_diag.max():.4f}"
-                        )
-                    self.logger.info(f"   prog : {prog:.3f}")
-                    self.logger.info(
-                        f"       soft_tau_now={soft_tau_now:.6f} | "
-                        f"lambdas: lamS={lambda_s:.3f}, lamP={lambda_p:.3f} | "
-                        f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
-                        f"Hp(raw)={H_batch.item():.4f}, Hp(norm)={H_p_norm.item():.4f}"
-                    )
+            #         with torch.no_grad():
+            #             nodes = lcg_feat_exp[:M]  # [M, K, D] — 첫 샘플의 M개 LCG
+            #             centroids = nodes.mean(dim=1)  # [M, D]
+            #             cdist_mat = torch.cdist(centroids.unsqueeze(0), centroids.unsqueeze(0)).squeeze(0)  # [M, M]
+            #             mask = ~torch.eye(M, dtype=torch.bool, device=cdist_mat.device)
+            #             off_diag = cdist_mat[mask]
+            #             self.logger.info(
+            #                 f"   >>> LCG centroid dist: mean={off_diag.mean():.4f}, "
+            #                 f"min={off_diag.min():.4f}, max={off_diag.max():.4f}"
+            #             )
+            #         self.logger.info(f"   prog : {prog:.3f}")
+            #         self.logger.info(
+            #             f"       soft_tau_now={soft_tau_now:.6f} | "
+            #             f"lambdas: lamS={lambda_s:.3f}, lamP={lambda_p:.3f} | "
+            #             f"Hs(raw)={H_sample_mean.item():.4f}, Hs(norm)={H_s_norm.item():.4f} | "
+            #             f"Hp(raw)={H_batch.item():.4f}, Hp(norm)={H_p_norm.item():.4f}"
+            #         )
             # =========================================================================
             # Step 5: Codebook FGW (encoder detach → codebook 전용 loss)
             # =========================================================================
@@ -475,8 +514,15 @@ class GraphQuantizer(nn.Module):
 
             loss_codebook   = (pi_detached * d_codebook).sum(dim=1).mean()
             loss_commitment = (pi_detached * d_commit).sum(dim=1).mean()
-            vq_loss         = loss_codebook + self.vq_beta * loss_commitment - self.ent_reg * entropy_reg
-            
+            vq_loss         = loss_codebook + self.vq_beta * loss_commitment + self.ent_reg * load_balance_loss
+            if self.log_step % self.log_interval == 0:
+                with torch.no_grad():
+                    self.logger.info(
+                        f"[LOSS SCALE] codebook={loss_codebook:.4f} | "
+                        f"commitment={self.vq_beta * loss_commitment:.4f} | "
+                        f"LB={self.ent_reg * load_balance_loss:.4f} | "
+                        f"vq_total={vq_loss:.4f}"
+                    )
 
             # =========================================================================
             # Step 7 (추가): barycentric pushforward로 sample-conditioned LCG view 만들기
@@ -503,7 +549,15 @@ class GraphQuantizer(nn.Module):
 
                 # (4) 전역 코드북 + residual → 샘플별 LCG view
                 Fy_res_batch = lcg_feat_batch + bary   # [B, M, K, D]
-
+                # ← 여기! if 블록 안에
+                if self.log_step % self.log_interval == 0:
+                    with torch.no_grad():
+                        lcg_norm = lcg_feat_batch.norm(dim=-1).mean().item()
+                        bary_norm = bary.norm(dim=-1).mean().item()
+                        self.logger.info(
+                            f"[SCALE] lcg_feat={lcg_norm:.4f} | bary={bary_norm:.4f} | "
+                            f"ratio={bary_norm/(lcg_norm+1e-8):.2f}"
+                        )
             # =========================================================================
             # 최종 출력: sample-conditioned LCG view + 구조 + pi + vq_loss
             # =========================================================================
