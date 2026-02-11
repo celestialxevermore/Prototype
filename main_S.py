@@ -112,6 +112,7 @@ def get_args():
     parser.add_argument('--lcg_struct_type', type = str, default = 'static', choices = ['projection', 'static', ' residual'])
     parser.add_argument('--feat_distance', type = str, default = 'cosine', choices=['cosine','l2'])
     parser.add_argument('--orth_reg', type = float, default = 0.1)
+    parser.add_argument('--div_reg', type = float, default = 1)
     '''
         Basis GAT Configuration
     '''
