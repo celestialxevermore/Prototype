@@ -13,16 +13,7 @@ def binary_train(model, train_loader, criterion, optimizer, device):
         loss = model(batch, batch['y'])
         #output = model(data.x, data.edge_index, data.edge_attr, data.batch)
         loss.backward()
-        # --- 임시: gradient flow check ---
-        if step == 0:
-            # optimizer.zero_grad()  ← 이거 삭제! gradient 지워버림
-            for name, param in model.named_parameters():
-                if 'latent_graph' in name:
-                    g = param.grad
-                    if g is None:
-                        print(f"[GRAD] {name}: None !!!")
-                    else:
-                        print(f"[GRAD] {name}: norm={g.norm().item():.6f}")
+        
         optimizer.step()
         total_loss += loss.item() * len(batch['y'])
         #print(f"Step [{step+1}/{len(train_loader)}], Loss: {loss.item():.4f}")

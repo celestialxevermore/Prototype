@@ -94,7 +94,7 @@ def get_args():
     parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
     parser.add_argument("--graph_dim", type = int, default = 768, help = "Global node embedding dimensions")
     parser.add_argument('--fgw_alpha', type = float, default = 1)
-    parser.add_argument('--alpha' , type = float, default = 0.9)
+    parser.add_argument('--alpha' , type = float, default = 0.7)
     parser.add_argument('--eps', type = float , default = 0.01)
     parser.add_argument('--reg', type = float, default = 0.01)
     parser.add_argument('--tau', type = float, default=0.5)
@@ -111,6 +111,7 @@ def get_args():
     parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential', 'balanced_hierarchical'])
     parser.add_argument('--lcg_struct_type', type = str, default = 'static', choices = ['projection', 'static', ' residual'])
     parser.add_argument('--feat_distance', type = str, default = 'cosine', choices=['cosine','l2'])
+    parser.add_argument('--orth_reg', type = float, default = 0.1)
     '''
         Basis GAT Configuration
     '''
@@ -1606,7 +1607,7 @@ def main():
                 logger.info(f"[INIT CHECK] {src_name}: argmax counts={torch.bincount(pi.argmax(1), minlength=pi.shape[1]).cpu().numpy()}")
                 
         fix_seed(args.random_seed)
-        pdb.set_trace()
+        #pdb.set_trace()
         # --- [Step 3] Phase 2: Joint Training ---
         logger.info(f"\n{'='*40}\n>>> [Phase 2] Start Joint Training (Global ON)\n{'='*40}")
         args.use_lcg = True 
