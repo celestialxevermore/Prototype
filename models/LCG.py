@@ -8,6 +8,7 @@ import numpy as np
 import logging
 import pandas as pd
 from ot.batch import solve_gromov_batch
+from utils.semirelaxed_fgw_batch import solve_semirelaxed_gromov_batch
 import os
 import matplotlib.pyplot as plt
 
@@ -148,7 +149,7 @@ class GraphQuantizer(nn.Module):
             cos_sim = torch.bmm(src_norm, tgt_norm.transpose(1,2))
             M_cost = 1.0 - torch.exp(-(1.0 - cos_sim))
         elif self.args.feat_distance == "l2":
-            dist_sq = torch.cdist(src_feat, tgt_feat, p = 2) * 2
+            dist_sq = torch.cdist(src_feat, tgt_feat, p = 2) ** 2
             M_raw = dist_sq / float(D)
             with torch.no_grad():
                 q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
@@ -198,7 +199,8 @@ class GraphQuantizer(nn.Module):
             src_str, tgt_str, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b, 
             max_iter=10, tol=1e-3, grad='envelope'
         )
-
+        # result = solve_semirelaxed_gromov_batch(src_str, tgt_str, M=M_cost, alpha=self.alpha,
+        #                                  reg=self.reg, a=a, max_iter=10)
         if self.log_step % self.log_interval == 0:
             with torch.no_grad():
                 if hasattr(result, 'plan') and result.plan is not None:
@@ -514,8 +516,8 @@ class GraphQuantizer(nn.Module):
 
             loss_codebook   = (pi_detached * d_codebook).sum(dim=1).mean()
             loss_commitment = (pi_detached * d_commit).sum(dim=1).mean()
-            #vq_loss         = loss_codebook + self.vq_beta * loss_commitment + self.ent_reg * load_balance_loss
-            vq_loss         = loss_codebook + self.ent_reg * load_balance_loss
+            vq_loss         = loss_codebook + self.vq_beta * loss_commitment + self.ent_reg * load_balance_loss
+            #vq_loss         = loss_codebook + self.ent_reg * load_balance_loss
             if self.log_step % self.log_interval == 0:
                 with torch.no_grad():
                     self.logger.info(
