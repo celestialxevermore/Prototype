@@ -66,7 +66,7 @@ def get_args():
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--source_lr', type=float, default=0.0001)
-    parser.add_argument('--source_lr_few', type=float, default=0.00001)
+    parser.add_argument('--source_lr_few', type=float, default=0.0001)
     parser.add_argument('--llm_model', type=str, default='gpt2_mean',
                         choices=['gpt2_mean','gpt2_auto','sentence-bert','bio-bert','bio-clinical-bert','bio-llama',
                                  'new','LLAMA_mean','LLAMA_auto'])
@@ -93,7 +93,7 @@ def get_args():
     parser.add_argument("--n_graphs", type=int, default=8, help="Global slot space number M")
     parser.add_argument("--n_nodes", type = int , default = 8, help = "Global node embedding numbers")
     parser.add_argument("--graph_dim", type = int, default = 768, help = "Global node embedding dimensions")
-    parser.add_argument('--fgw_alpha', type = float, default = 1)
+    parser.add_argument('--fgw_alpha', type = float, default = 0.3)
     parser.add_argument('--alpha' , type = float, default = 0.7)
     parser.add_argument('--eps', type = float , default = 0.01)
     parser.add_argument('--reg', type = float, default = 0.01)
@@ -113,6 +113,9 @@ def get_args():
     parser.add_argument('--feat_distance', type = str, default = 'cosine', choices=['cosine','l2'])
     parser.add_argument('--orth_reg', type = float, default = 0.1)
     parser.add_argument('--div_reg', type = float, default = 1)
+    parser.add_argument('--hp_reg', type=float, default=1.0)
+    parser.add_argument('--hs_reg', type=float, default=0.1)
+    parser.add_argument('--hs_warmup', type=int, default=30)
     '''
         Basis GAT Configuration
     '''
@@ -374,19 +377,19 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
             for m in range(M):
                 logger.info(f"   LCG {m}: CT mean={ct[m].mean():.4f}, std={ct[m].std():.4f}")
 
-    # =========================================================================
-    # Save initial state for dead code reset
-    # =========================================================================
-    model.latent_graph.register_buffer(
-        'init_node_embeddings', 
-        model.latent_graph.node_embeddings.data.clone()
-    )
-    if model.latent_graph.struct_mode == 'static':
-        model.latent_graph.register_buffer(
-            'init_adj_param',
-            model.latent_graph.adj_param.data.clone()
-        )
-    logger.info(f">> ✅ Initial LCG state saved for dead code reset")
+    # # =========================================================================
+    # # Save initial state for dead code reset
+    # # =========================================================================
+    # model.latent_graph.register_buffer(
+    #     'init_node_embeddings', 
+    #     model.latent_graph.node_embeddings.data.clone()
+    # )
+    # if model.latent_graph.struct_mode == 'static':
+    #     model.latent_graph.register_buffer(
+    #         'init_adj_param',
+    #         model.latent_graph.adj_param.data.clone()
+    #     )
+    # logger.info(f">> ✅ Initial LCG state saved for dead code reset")
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -630,8 +633,8 @@ def train_and_validate(args, model, train_loader, val_loader,
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
-    #checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}/{args.run_tag}"
+    #checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}"
+    checkpoint_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/{mode}/{model_sig}/{args.random_seed}/{args.run_tag}"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     log_file_path = os.path.join(checkpoint_dir, f"train_log.log")
@@ -1002,6 +1005,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
 
     # [수정 1] Mean AUC 기준을 위한 초기화
     best_mean_auc = -1.0 
+    best_min_auc = -1.0
     no_improve = 0
     best_state = None
     last_best_epoch = -1
@@ -1025,8 +1029,8 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
-    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
+    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
+    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
     
     os.makedirs(ckpt_dir, exist_ok=True)
     ckpt_latest = os.path.join(ckpt_dir, "best.pt")
@@ -1122,13 +1126,18 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         print(f"\n[DEBUG CHECK][Epoch {epoch+1}] args.use_lcg: {current_lcg_status} -> Watching: {'Global (LCG)' if current_lcg_status else 'Local (GAT)'}")
         # 현재 평균 계산
         current_mean_auc = float(np.mean(target_aucs))
-        
+        #current_min_auc = float(np.min(target_aucs))
         current_mean_auprc = float(np.mean(target_auprcs))
+        #current_min_auprc = float(np.min(target_auprcs))
+
         # 평균이 기존 최고 평균보다 높으면 저장
         if current_mean_auc > best_mean_auc:
             best_mean_auc = current_mean_auc
             improved = True
-
+        # if current_min_auc > best_min_auc:
+        #     best_min_auc = current_min_auc 
+        #     best_mean_auc = current_mean_auc 
+        #     improved = True
         # === Logging ===
         mean_auc_l = float(np.mean(aucs_local))
         mean_auc_g = float(np.mean(aucs_global))
@@ -1138,6 +1147,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             f"   >>> Local (GAT): Mean AUC {mean_auc_l:.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
             f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
         )
+        # log_msg = (
+        #     f"[Pre][Epoch {epoch+1}/{total_epochs}]\n"
+        #     f"   >>> Local (GAT): Mean AUC {mean_auc_l:.4f} | Min AUC {np.min(aucs_local):.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
+        #     f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Min AUC {np.min(aucs_global):.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
+        # )
         logger.info(log_msg)
 
 
@@ -1191,6 +1205,17 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 'val_auprcs_per_source': target_auprcs,
                 'args': args
             }, ckpt_latest)
+            # torch.save({
+            #     'model_state_dict': model.state_dict(),
+            #     'epoch': epoch,
+            #     'val_auc_mean': best_mean_auc,
+            #     'val_auc_min': best_min_auc,
+            #     'val_aucs_per_source': target_aucs,
+            #     'val_auprc_mean': current_mean_auprc,
+            #     'val_auprc_min': current_min_auprc,
+            #     'val_auprcs_per_source': target_auprcs,
+            #     'args': args
+            # }, ckpt_latest)
             try:
                 shutil.copyfile(ckpt_latest, ckpt_hist)
             except Exception as e:
@@ -1516,8 +1541,8 @@ def main():
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
-    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
+    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
+    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
     os.makedirs(ckpt_dir, exist_ok = True)
     ckpt_final = os.path.join(ckpt_dir, "best_joint.pt")
     ckpt_vanilla = os.path.join(ckpt_dir, "best_vanilla.pt")
@@ -1617,7 +1642,7 @@ def main():
         _wandb_log({"pretrain/phase": 2, "pretrain/use_lcg": 1})
 
         # [수정] patience 50으로 증가 (Global 학습 충분히)
-        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=10)
+        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=30)
         
         # 최종 저장
         shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_final)
@@ -1892,12 +1917,12 @@ def main():
 
         if args.few_shot > 0:
             #val_shot = int(math.ceil(args.few_shot * 0.25))
-            val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
-            import copy
-            args_val = copy.deepcopy(args)
-            args_val.few_shot = val_shot 
+            #val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+            #import copy
+            #args_val = copy.deepcopy(args)
+            #args_val.few_shot = val_shot 
             train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-            val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
+            #val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
         else:
             train_loader_epi = train_loader_t 
 
@@ -1908,7 +1933,7 @@ def main():
          train_f1s_few,        val_f1s_few,
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
-        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_epi, crit_t,
+        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
                                optimizer_few, device, args.train_epochs, is_binary_t, patience=50,
                                mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 

@@ -122,7 +122,8 @@ class Model(nn.Module):
 
     def set_freeze_target(self):
         for p in self.parameters(): p.requires_grad = False
-        for p in self.gnn_experts.parameters(): p.requires_grad = True
+        #for p in self.gnn_experts.parameters(): p.requires_grad = True
+        for p in self.latent_graph.parameters(): p.requires_grad = True
         for p in self.ghead2.parameters(): p.requires_grad = True
     # ---- training ----
     def forward(self, batch, y):
@@ -143,12 +144,12 @@ class Model(nn.Module):
             local_loss = self.criterion(local_pred, target)
             global_loss = self.criterion(global_pred, target)
 
-            fgw_loss = self.fgw_loss 
+            reg_loss = self.reg_loss 
             current_mode = getattr(self, 'mode', 'Full')
             if current_mode == 'Few':
                 total_loss = global_loss #+ (self.args.fgw_alpha * fgw_loss)
             else: 
-                total_loss = local_loss + global_loss + (self.args.fgw_alpha * fgw_loss)
+                total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
             return total_loss
 
     # ---- inference ----
@@ -209,14 +210,14 @@ class Model(nn.Module):
                 self._last_P_basis = torch.zeros(B, N, N, device = self.device)
             lcg_feat, lcg_struct = self.latent_graph() 
 
-            q_lcg_feat, q_lcg_struct, coordinates, fgw_loss = self.graph_quantizer( 
+            q_lcg_feat, q_lcg_struct, coordinates, reg_loss = self.graph_quantizer( 
             source_struct = self._last_P_basis, 
             source_feat = self.x_basis[:, 1:, :], 
             lcg_struct = lcg_struct, 
             lcg_feat = lcg_feat, 
             batch = batch,
             )
-        self.fgw_loss = fgw_loss
+        self.reg_loss = reg_loss
 
         expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
 

@@ -101,6 +101,9 @@ class GraphQuantizer(nn.Module):
         self.soft_tau = args.soft_tau
         self.orth_reg = getattr(args, 'orth_reg', 0.1)
         self.div_reg = getattr(args, 'div_reg', 0.1)
+
+        self.div_reg = getattr(args, 'div_reg', 0.0)
+
         self.logger = logging.getLogger("my_experiment_logger")
         self.logger_name = "my_experiment_logger"
         self.register_buffer("has_printed_initial_weights", torch.tensor(False), persistent=False)
@@ -156,12 +159,6 @@ class GraphQuantizer(nn.Module):
                 q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
             M_cost = M_raw / q90 
 
-            with torch.no_grad():
-                raw_min = dist_sq.min(dim=1, keepdim=True)[0]
-                raw_dist_max = dist_sq.max().item()
-                raw_dist_mean = dist_sq.mean().item()
-                scale_factor = dist_sq.max() + 1e-8     
-
         # ====== put this block inside compute_fgw() after you define M_cost ======
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
             with torch.no_grad():
@@ -200,8 +197,7 @@ class GraphQuantizer(nn.Module):
             src_str, tgt_str, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b, 
             max_iter=10, tol=1e-3, grad='envelope'
         )
-        # result = solve_semirelaxed_gromov_batch(src_str, tgt_str, M=M_cost, alpha=self.alpha,
-        #                                  reg=self.reg, a=a, max_iter=10)
+
         if self.log_step % self.log_interval == 0:
             with torch.no_grad():
                 if hasattr(result, 'plan') and result.plan is not None:
@@ -309,10 +305,10 @@ class GraphQuantizer(nn.Module):
         # =========================================================================
         pi = torch.softmax(-d_commit / self.soft_tau, dim=1)
         
+        # (1) Entropic regularization 
+        
         p = pi.mean(dim=0)
-        load_balance_loss = M * (p * p).sum()   
-
-
+        load_balancing_loss = M * (p **2).sum()
 
 
 
@@ -322,13 +318,13 @@ class GraphQuantizer(nn.Module):
         gram = centroids_norm @ centroids_norm.t() 
         orth_loss = (gram - torch.eye(M, device=gram.device)).pow(2).mean()
         
-        # (3) Diversifying regularization
-        y = batch['y'].to(pi.device)
-        div_loss = self.get_diversifying_loss(pi,y)
+        # # (3) Diversifying regularization
+        # y = batch['y'].to(pi.device)
+        # div_loss = self.get_diversifying_loss(pi,y)
         
         
         
-        reg_loss = load_balance_loss + self.orth_reg * orth_loss + self.div_reg * div_loss
+        reg_loss = load_balancing_loss + self.orth_reg * orth_loss #+ self.div_reg * div_loss
 
         # =========================================================================
         # Logging
@@ -377,7 +373,7 @@ class GraphQuantizer(nn.Module):
                     best = pi_np[s].argmax()
                     self.logger.info(f"   >>> Sample {s} Pi: {np.array2string(pi_np[s], precision=4)} | best=LCG{best}({pi_np[s,best]:.3f})")
                 self.logger.info(
-                    f"[REG] LB={load_balance_loss:.4f} | Orth={orth_loss:.4f} | "
+                    f"[REG] LB={load_balancing_loss:.4f} | Orth={orth_loss:.4f} | "
                     f"weighted_orth={self.orth_reg * orth_loss:.4f} | total_reg={reg_loss:.4f}"
                 )
         # =========================================================================
@@ -389,23 +385,23 @@ class GraphQuantizer(nn.Module):
 
         Fy_res_batch = lcg_feat_batch
 
-        if plan is not None:
-            Pi_bmnk = plan.detach().reshape(B, M, N, K)
-            src_feat_bmn = src_feat_exp.reshape(B, M, N, D)
+        # if plan is not None:
+        #     Pi_bmnk = plan.detach().reshape(B, M, N, K)
+        #     src_feat_bmn = src_feat_exp.reshape(B, M, N, D)
 
-            num   = torch.einsum("bmnk,bmnd->bmkd", Pi_bmnk, src_feat_bmn)
-            denom = Pi_bmnk.sum(dim=2, keepdim=False).unsqueeze(-1).clamp_min(1e-8)
-            bary  = num / denom
+        #     num   = torch.einsum("bmnk,bmnd->bmkd", Pi_bmnk, src_feat_bmn)
+        #     denom = Pi_bmnk.sum(dim=2, keepdim=False).unsqueeze(-1).clamp_min(1e-8)
+        #     bary  = num / denom
 
-            with torch.no_grad():
-                scale = lcg_feat_batch.norm(dim=-1).mean() / bary.norm(dim=-1).mean().clamp_min(1e-8)
-            Fy_res_batch = lcg_feat_batch + scale * bary
+        #     with torch.no_grad():
+        #         scale = lcg_feat_batch.norm(dim=-1).mean() / bary.norm(dim=-1).mean().clamp_min(1e-8)
+        #     Fy_res_batch = lcg_feat_batch + scale * bary
 
-            if self.log_step % self.log_interval == 0:
-                with torch.no_grad():
-                    lcg_norm = lcg_feat_batch.norm(dim=-1).mean().item()
-                    bary_norm = (scale * bary).norm(dim=-1).mean().item()
-                    self.logger.info(f"[SCALE] lcg={lcg_norm:.4f} | bary={bary_norm:.4f} | scale={scale:.4f}")
+        #     if self.log_step % self.log_interval == 0:
+        #         with torch.no_grad():
+        #             lcg_norm = lcg_feat_batch.norm(dim=-1).mean().item()
+        #             bary_norm = (scale * bary).norm(dim=-1).mean().item()
+        #             self.logger.info(f"[SCALE] lcg={lcg_norm:.4f} | bary={bary_norm:.4f} | scale={scale:.4f}")
 
         # =========================================================================
         # Return (vq_loss=0으로 인터페이스 호환)
