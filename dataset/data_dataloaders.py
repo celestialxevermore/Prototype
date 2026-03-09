@@ -341,11 +341,11 @@ def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_load
 
 
 
-def prepare_embedding_dataloaders(args, dataset_name):
-    """저장된 embedding 데이터를 로드하고 train/val로 분할한 뒤 DataLoader로 변환
+def prepare_embedding_dataloaders(args, dataset_name, no_test=False):
+    """저장된 embedding 데이터를 로드하고 train/val(/test)로 분할한 뒤 DataLoader로 변환
     
-    수정: test split 제거 → 80/20 (train/val)
-    기존 test_loader는 빈 loader로 반환 (하위 호환성 유지)
+    no_test=True:  Source용 80/20 (train/val), test 없음
+    no_test=False: Target용 60/20/20 (train/val/test) 기존 유지
     """
     
     torch.manual_seed(args.random_seed)
@@ -385,21 +385,42 @@ def prepare_embedding_dataloaders(args, dataset_name):
         labels = [labels[i] for i in selected_indices]
     
     # ========================================
-    # 수정: Train/Val만 (80/20), test 없음
+    # Split
     # ========================================
-    indices = list(range(len(embeddings)))
-    train_idx, val_idx = train_test_split(
-        indices, test_size=0.2,
-        stratify=labels,
-        random_state=args.random_seed
-    )
+    if no_test:
+        # Source용: 80/20 (train/val), test 없음
+        indices = list(range(len(embeddings)))
+        train_idx, val_idx = train_test_split(
+            indices, test_size=0.2,
+            stratify=labels,
+            random_state=args.random_seed
+        )
+        train_dataset = [embeddings[i] for i in train_idx]
+        val_dataset = [embeddings[i] for i in val_idx]
+        test_dataset = []
+    else:
+        # Target용: 기존 60/20/20 유지
+        indices = list(range(len(embeddings)))
+        train_val_idx, test_idx = train_test_split(
+            indices, test_size=0.2,
+            stratify=labels,
+            random_state=args.random_seed
+        )
+        train_val_embeddings = [embeddings[i] for i in train_val_idx]
+        train_val_labels = [labels[i] for i in train_val_idx]
+        train_idx, val_idx = train_test_split(
+            list(range(len(train_val_embeddings))),
+            test_size=0.25,
+            stratify=train_val_labels,
+            random_state=args.random_seed
+        )
+        train_dataset = [train_val_embeddings[i] for i in train_idx]
+        val_dataset = [train_val_embeddings[i] for i in val_idx]
+        test_dataset = [embeddings[i] for i in test_idx]
     
-    train_dataset = [embeddings[i] for i in train_idx]
-    val_dataset = [embeddings[i] for i in val_idx]
-    
-    # 하위 호환성: test_loader는 빈 리스트로
-    test_dataset = []
-    
+    # ========================================
+    # DataLoader
+    # ========================================
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.random_seed)
     def seed_worker(worker_id):
@@ -426,23 +447,23 @@ def prepare_embedding_dataloaders(args, dataset_name):
         num_workers=0
     )
     
-    # 빈 test_loader (하위 호환)
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
+        generator=loader_generator,
+        worker_init_fn=seed_worker,
         num_workers=0
     )
     
     print(f"Training data size: {len(train_dataset)}")
     print(f"Validation data size: {len(val_dataset)}")
-    print(f"Test data size: {len(test_dataset)} (disabled)")
+    print(f"Test data size: {len(test_dataset)}{' (disabled)' if no_test else ''}")
     
     return {
         'loaders': (train_loader, val_loader, test_loader),
         'num_classes': num_classes
     }
-
 
 
 # '''

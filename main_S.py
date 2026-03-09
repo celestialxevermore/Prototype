@@ -477,8 +477,8 @@ def make_step(loaders, mode='random', seed=42):
 
 
 
-def load_one(args, name):
-    res = prepare_embedding_dataloaders(args, name)
+def load_one(args, name, no_test=False):
+    res = prepare_embedding_dataloaders(args, name, no_test=no_test)
     train_loader, val_loader, test_loader = res['loaders']
     num_classes = res['num_classes']
     return train_loader, val_loader, test_loader, num_classes
@@ -944,7 +944,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     name_to_idx = {name: i for i, name in enumerate(sources)}
     trains, vals, tests, ncs = [], [], [], []
     for name in sources:
-        tr, va, te, nc = load_one(args, name)
+        tr, va, te, nc = load_one(args, name, no_test=True)
         trains.append(tr); vals.append(va); tests.append(te); ncs.append(nc)
 
     if len(set(ncs)) != 1:
