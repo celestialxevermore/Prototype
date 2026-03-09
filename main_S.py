@@ -477,8 +477,8 @@ def make_step(loaders, mode='random', seed=42):
 
 
 
-def load_one(args, name, no_test=False):
-    res = prepare_embedding_dataloaders(args, name, no_test=no_test)
+def load_one(args, name):
+    res = prepare_embedding_dataloaders(args, name)
     train_loader, val_loader, test_loader = res['loaders']
     num_classes = res['num_classes']
     return train_loader, val_loader, test_loader, num_classes
@@ -941,10 +941,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     import shutil
     logger_name = "my_experiment_logger"
     logger = logging.getLogger(logger_name)
+    #pdb.set_trace()
     name_to_idx = {name: i for i, name in enumerate(sources)}
     trains, vals, tests, ncs = [], [], [], []
     for name in sources:
-        tr, va, te, nc = load_one(args, name, no_test=True)
+        tr, va, te, nc = load_one(args, name)
         trains.append(tr); vals.append(va); tests.append(te); ncs.append(nc)
 
     if len(set(ncs)) != 1:
@@ -952,22 +953,18 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     args.num_classes = ncs[0]
     args.output_dim  = args.num_classes if args.num_classes > 2 else 1
 
+    # 학습은 다중 소스를 섞어서
     tr_step = make_step(trains, mode='random', seed=args.random_seed)
 
+    # 검증/테스트/개별-학습 평가용
     val_steps   = [MultiSourceStepLoader([vals[i]],   mode='round', seed=args.random_seed, src_idx=i) for i in range(len(vals))]
+    test_steps  = [MultiSourceStepLoader([tests[i]],  mode='round', seed=args.random_seed, src_idx=i) for i in range(len(tests))]
     train_steps = [MultiSourceStepLoader([trains[i]], mode='round', seed=args.random_seed, src_idx=i) for i in range(len(trains))]
-    
-    # test_steps: 빈 loader면 None으로
-    has_test = any(len(te.dataset) > 0 for te in tests)
-    if has_test:
-        test_steps = [MultiSourceStepLoader([tests[i]], mode='round', seed=args.random_seed, src_idx=i) for i in range(len(tests))]
-    else:
-        test_steps = None
-        logger.info("[Pretrain] No test set detected. Skipping test evaluation.")
 
     is_bin = (args.num_classes == 2)
     crit   = nn.BCEWithLogitsLoss() if is_bin else nn.CrossEntropyLoss()
     
+
     from sklearn.metrics import average_precision_score  
 
     base_params = [
@@ -1006,12 +1003,14 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     eval_fn  = binary_evaluate if is_bin else multi_evaluate
     train_fn = binary_train    if is_bin else multi_train
 
+    # [수정 1] Mean AUC 기준을 위한 초기화
     best_mean_auc = -1.0 
     best_min_auc = -1.0
     no_improve = 0
     best_state = None
     last_best_epoch = -1
 
+    # === 체크포인트 설정 ===
     src_tag   = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
     model_sig = (
         f"ngraphs-{args.n_graphs}"
@@ -1030,6 +1029,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
+    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
     
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -1048,6 +1048,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     from utils.util import fix_seed 
     fix_seed(args.random_seed)
 
+    # ===========================
+    # ✅ wandb: 함수 시작 시점에 현재 HP 한번 로깅 (로직 영향 X)
+    # ===========================
     try:
         wandb_safe_log({
             "hp/alpha": getattr(args, "alpha", None),
@@ -1064,7 +1067,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     except Exception:
         pass
     
-    # === 학습 루프 (변경 없음) ===
+    # === 학습 루프 ===
     for epoch in range(total_epochs):
         _ = train_fn(model, tr_step, crit, opt, device)
         if scheduler_ep is not None: 
@@ -1076,6 +1079,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 n_reset = model.graph_quantizer.reset_dead(model.latent_graph)
         if hasattr(model, 'current_epoch'):
             model.current_epoch = epoch + 1 
+            #print(model.current_epoch)
             if model.current_epoch == model.switch_epoch:
                 logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Global Inference ON")
         
@@ -1092,6 +1096,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             if is_bin:
                 score_l = roc_auc_score(y_true_l, y_pred_l)
                 score_g = roc_auc_score(y_true_g, y_pred_g)
+
                 ap_l = average_precision_score(y_true_l, y_pred_l)
                 ap_g = average_precision_score(y_true_g, y_pred_g)
             else:
@@ -1100,28 +1105,40 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 y_bin_g = label_binarize(y_true_g, classes=range(n_cls))
                 score_l = roc_auc_score(y_bin_l, y_pred_l, multi_class='ovr', average='macro')
                 score_g = roc_auc_score(y_bin_g, y_pred_g, multi_class='ovr', average='macro')
+
+                # === [AUPRC 추가] ===
                 ap_l = average_precision_score(y_bin_l, y_pred_l, average='macro')
                 ap_g = average_precision_score(y_bin_g, y_pred_g, average='macro')
 
             aucs_local.append(score_l)
             aucs_global.append(score_g)
+
             auprcs_local.append(ap_l)
             auprcs_global.append(ap_g)
 
+        # === [수정 2] Best 갱신 로직 (Mean 기준) ===
         improved = False
         target_aucs = aucs_global if getattr(args, 'use_lcg', False) else aucs_local 
+        # === [AUPRC 추가] ===
         target_auprcs = auprcs_global if getattr(args, 'use_lcg', False) else auprcs_local
         
         current_lcg_status = getattr(args, 'use_lcg', False)
         print(f"\n[DEBUG CHECK][Epoch {epoch+1}] args.use_lcg: {current_lcg_status} -> Watching: {'Global (LCG)' if current_lcg_status else 'Local (GAT)'}")
-        
+        # 현재 평균 계산
         current_mean_auc = float(np.mean(target_aucs))
+        #current_min_auc = float(np.min(target_aucs))
         current_mean_auprc = float(np.mean(target_auprcs))
+        #current_min_auprc = float(np.min(target_auprcs))
 
+        # 평균이 기존 최고 평균보다 높으면 저장
         if current_mean_auc > best_mean_auc:
             best_mean_auc = current_mean_auc
             improved = True
-
+        # if current_min_auc > best_min_auc:
+        #     best_min_auc = current_min_auc 
+        #     best_mean_auc = current_mean_auc 
+        #     improved = True
+        # === Logging ===
         mean_auc_l = float(np.mean(aucs_local))
         mean_auc_g = float(np.mean(aucs_global))
         
@@ -1130,7 +1147,13 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             f"   >>> Local (GAT): Mean AUC {mean_auc_l:.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
             f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
         )
+        # log_msg = (
+        #     f"[Pre][Epoch {epoch+1}/{total_epochs}]\n"
+        #     f"   >>> Local (GAT): Mean AUC {mean_auc_l:.4f} | Min AUC {np.min(aucs_local):.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
+        #     f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Min AUC {np.min(aucs_global):.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
+        # )
         logger.info(log_msg)
+
 
         mean_auprc_l = float(np.mean(auprcs_local))
         mean_auprc_g = float(np.mean(auprcs_global))
@@ -1141,6 +1164,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         )
         logger.info(log_msg_auprc)
 
+        # ===========================
+        # ✅ wandb: epoch 로그 (로직 영향 X)
+        # ===========================
         try:
             lr_gat = opt.param_groups[0]["lr"] if len(opt.param_groups) > 0 else None
             lr_global = opt.param_groups[1]["lr"] if len(opt.param_groups) > 1 else None
@@ -1154,6 +1180,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 "lr/gat": lr_gat,
                 "lr/global": lr_global,
                 "Pre/epoch": epoch + 1,
+                # sweep에서 보고 싶은 hp도 계속 찍어두기
                 "hp/alpha": getattr(args, "alpha", None),
                 "hp/tau": getattr(args, "tau", None),
                 "hp/soft_tau": getattr(args, "soft_tau", None),
@@ -1165,6 +1192,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             pass
         
         if improved:
+            #best_state = model.state_dict()
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             last_best_epoch = epoch
             no_improve = 0
@@ -1177,11 +1205,23 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 'val_auprcs_per_source': target_auprcs,
                 'args': args
             }, ckpt_latest)
+            # torch.save({
+            #     'model_state_dict': model.state_dict(),
+            #     'epoch': epoch,
+            #     'val_auc_mean': best_mean_auc,
+            #     'val_auc_min': best_min_auc,
+            #     'val_aucs_per_source': target_aucs,
+            #     'val_auprc_mean': current_mean_auprc,
+            #     'val_auprc_min': current_min_auprc,
+            #     'val_auprcs_per_source': target_auprcs,
+            #     'args': args
+            # }, ckpt_latest)
             try:
                 shutil.copyfile(ckpt_latest, ckpt_hist)
             except Exception as e:
                 logger.warning(f"History copy failed: {e}")
 
+            # ✅ wandb: best 갱신 이벤트(선택)
             try:
                 wandb_safe_log({
                     "Pre/best_epoch": last_best_epoch + 1,
@@ -1196,6 +1236,8 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                 no_improve = 0 
             if no_improve >= patience : 
                 logger.info(f"Early stop at epoch {epoch+1}")
+
+                # ✅ wandb: early stop 표시(선택)
                 try:
                     wandb_safe_log({
                         "Pre/early_stop": 1,
@@ -1204,13 +1246,14 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
                     }, step=epoch + 1)
                 except Exception:
                     pass
+
                 break
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     # -----------------------------
-    # 최종 리포트 (test 없으면 train/val만)
+    # 최종 리포트 (소스별 threshold 산출 -> train/val/test 지표)
     # -----------------------------
     per_train_loss, per_val_loss, per_test_loss = [], [], []
     per_train_auc,  per_val_auc,  per_test_auc  = [], [], []
@@ -1223,6 +1266,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     all_y_pred_full_list = []
 
     for i in range(len(sources)):
+        # <--- [확인] Global 결과 우선 (res_g)
         (val_loss_i, y_true_val_i, y_pred_val_i), _ = eval_fn(model, val_steps[i], crit, device)
         
         if is_bin:
@@ -1261,6 +1305,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             val_recall_i    = recall_score(y_true_val_i, y_bin_val, zero_division=0)
             val_f1_i        = f1_score(y_true_val_i, y_bin_val, zero_division=0)
             val_acc_i       = accuracy_score(y_true_val_i, y_bin_val)
+            
         else:
             n_cls = y_pred_val_i.shape[1]
             y_bin_val = label_binarize(y_true_val_i, classes=range(n_cls))
@@ -1272,36 +1317,28 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             val_f1_i        = f1_score(y_true_val_i, preds_val, average='macro', zero_division=0)
             val_acc_i       = accuracy_score(y_true_val_i, preds_val)
 
-        # Test (있을 때만)
-        if has_test:
-            (test_loss_i, y_true_te_i, y_pred_te_i), _ = eval_fn(model, test_steps[i], crit, device)
-            
-            if is_bin:
-                test_auc_i = roc_auc_score(y_true_te_i, y_pred_te_i)
-                test_auprc_i = average_precision_score(y_true_te_i, y_pred_te_i)
-                y_bin_te = (y_pred_te_i > thr_i).astype(int)
-                test_precision_i = precision_score(y_true_te_i, y_bin_te, zero_division=0)
-                test_recall_i    = recall_score(y_true_te_i, y_bin_te, zero_division=0)
-                test_f1_i        = f1_score(y_true_te_i, y_bin_te, zero_division=0)
-                test_acc_i       = accuracy_score(y_true_te_i, y_bin_te)
-            else:
-                n_cls = y_pred_te_i.shape[1]
-                y_bin_te = label_binarize(y_true_te_i, classes=range(n_cls))
-                test_auc_i = roc_auc_score(y_bin_te, y_pred_te_i, multi_class='ovr', average='macro')
-                test_auprc_i = average_precision_score(y_bin_te, y_pred_te_i, average='macro')
-                preds_te = y_pred_te_i.argmax(axis=1)
-                test_precision_i = precision_score(y_true_te_i, preds_te, average='macro', zero_division=0)
-                test_recall_i    = recall_score(y_true_te_i, preds_te, average='macro', zero_division=0)
-                test_f1_i        = f1_score(y_true_te_i, preds_te, average='macro', zero_division=0)
-                test_acc_i       = accuracy_score(y_true_te_i, preds_te)
-            
-            all_y_true_full_list.append(y_true_te_i)
-            all_y_pred_full_list.append(y_pred_te_i)
+        # Test
+        (test_loss_i, y_true_te_i, y_pred_te_i), _ = eval_fn(model, test_steps[i], crit, device)
+        
+        if is_bin:
+            test_auc_i = roc_auc_score(y_true_te_i, y_pred_te_i)
+            test_auprc_i = average_precision_score(y_true_te_i, y_pred_te_i)
+            y_bin_te = (y_pred_te_i > thr_i).astype(int)
+            test_precision_i = precision_score(y_true_te_i, y_bin_te, zero_division=0)
+            test_recall_i    = recall_score(y_true_te_i, y_bin_te, zero_division=0)
+            test_f1_i        = f1_score(y_true_te_i, y_bin_te, zero_division=0)
+            test_acc_i       = accuracy_score(y_true_te_i, y_bin_te)
         else:
-            test_loss_i = 0.0
-            test_auc_i = 0.0; test_auprc_i = 0.0
-            test_precision_i = 0.0; test_recall_i = 0.0
-            test_f1_i = 0.0; test_acc_i = 0.0
+            n_cls = y_pred_te_i.shape[1]
+            y_bin_te = label_binarize(y_true_te_i, classes=range(n_cls))
+            test_auc_i = roc_auc_score(y_bin_te, y_pred_te_i, multi_class='ovr', average='macro')
+            test_auprc_i = average_precision_score(y_bin_te, y_pred_te_i, average='macro')
+
+            preds_te = y_pred_te_i.argmax(axis=1)
+            test_precision_i = precision_score(y_true_te_i, preds_te, average='macro', zero_division=0)
+            test_recall_i    = recall_score(y_true_te_i, preds_te, average='macro', zero_division=0)
+            test_f1_i        = f1_score(y_true_te_i, preds_te, average='macro', zero_division=0)
+            test_acc_i       = accuracy_score(y_true_te_i, preds_te)
 
         # 누적
         per_train_loss.append(train_loss_i); per_val_loss.append(val_loss_i); per_test_loss.append(test_loss_i)
@@ -1311,6 +1348,9 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         per_train_f1.append(train_f1_i);               per_val_f1.append(val_f1_i);               per_test_f1.append(test_f1_i)
         per_train_acc.append(train_acc_i);             per_val_acc.append(val_acc_i);             per_test_acc.append(test_acc_i)
         per_train_auprc.append(train_auprc_i); per_val_auprc.append(val_auprc_i); per_test_auprc.append(test_auprc_i)
+
+        all_y_true_full_list.append(y_true_te_i)
+        all_y_pred_full_list.append(y_pred_te_i)
 
     # 평균 집계
     train_losses_full = [float(np.mean(per_train_loss))]
@@ -1331,26 +1371,22 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     train_accs_full = [float(np.mean(per_train_acc))]
     val_accs_full   = [float(np.mean(per_val_acc))]
     test_acc_full   = float(np.mean(per_test_acc))
-    
-    if all_y_true_full_list:
-        all_y_true_full = np.concatenate(all_y_true_full_list, axis=0)
-        all_y_pred_full = np.concatenate(all_y_pred_full_list, axis=0)
-    else:
-        # test가 없으면 val 기준으로 대체
-        all_y_true_full = np.array([])
-        all_y_pred_full = np.array([])
-    
+    all_y_true_full = np.concatenate(all_y_true_full_list, axis=0)
+    all_y_pred_full = np.concatenate(all_y_pred_full_list, axis=0)
     best_epoch_full = last_best_epoch
     train_auprcs_full = [float(np.mean(per_train_auprc))]
     val_auprcs_full   = [float(np.mean(per_val_auprc))]
     test_auprc_full   = float(np.mean(per_test_auprc))
-
+    # ===========================
+    # ✅ wandb: 최종 요약 로그(선택)
+    # ===========================
     try:
+        # 이건 step 없이 찍어도 됨 (summary용으로)
         wandb_safe_log({
             "Pre/final_train_auc_mean": float(np.mean(per_train_auc)) if len(per_train_auc) else None,
             "Pre/final_val_auc_mean": float(np.mean(per_val_auc)) if len(per_val_auc) else None,
-            "Pre/final_test_auc_mean": float(np.mean(per_test_auc)) if has_test and len(per_test_auc) else None,
-            "Pre/final_test_acc_mean": float(np.mean(per_test_acc)) if has_test and len(per_test_acc) else None,
+            "Pre/final_test_auc_mean": float(np.mean(per_test_auc)) if len(per_test_auc) else None,
+            "Pre/final_test_acc_mean": float(np.mean(per_test_acc)) if len(per_test_acc) else None,
             "Pre/best_epoch": int(best_epoch_full) + 1 if best_epoch_full is not None and best_epoch_full >= 0 else None,
             "Pre/best_mean_auc": float(best_mean_auc),
         })
