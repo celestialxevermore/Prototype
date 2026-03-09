@@ -340,19 +340,13 @@ def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_load
     }
 
 
+
 def prepare_embedding_dataloaders(args, dataset_name):
-    """저장된 embedding 데이터를 로드하고 train/val/test로 분할한 뒤 DataLoader로 변환"""
+    """저장된 embedding 데이터를 로드하고 train/val로 분할한 뒤 DataLoader로 변환
     
-    '''
-        최대 성능을 위해 주석처리함. 
-        2025.07.24. 주석처리 된 코드를 재활성화하면, 
-        재현성이 확실히 보장됨.
-    '''
-    # 재현성을 위한 설정
-    # os.environ['PYTHONHASHSEED'] = str(args.random_seed)
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
-    # torch.use_deterministic_algorithms(True)
+    수정: test split 제거 → 80/20 (train/val)
+    기존 test_loader는 빈 loader로 반환 (하위 호환성 유지)
+    """
     
     torch.manual_seed(args.random_seed)
     np.random.seed(args.random_seed)
@@ -361,20 +355,20 @@ def prepare_embedding_dataloaders(args, dataset_name):
         torch.cuda.manual_seed(args.random_seed)
         torch.cuda.manual_seed_all(args.random_seed)
     torch.backends.cudnn.benchmark = True
+    
     # 파일 경로 설정
     base_path = "/storage/personal/eungyeop/dataset/embedding"
     if args.embed_type == "_":
-        sub_dir = sub_dir = f"tabular_embeddings_/{args.llm_model}"
+        sub_dir = f"tabular_embeddings_/{args.llm_model}"
     else:
         sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
-    emb_name =  f"embedding_{dataset_name}.pkl"
+    emb_name = f"embedding_{dataset_name}.pkl"
     file_path = os.path.join(base_path, sub_dir, emb_name)
     
     print(f"Loading embeddings from: {file_path}")
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
     
-    # 데이터 로드
     with open(file_path, 'rb') as f:
         data = pickle.load(f)
     
@@ -382,52 +376,38 @@ def prepare_embedding_dataloaders(args, dataset_name):
     labels = [emb['y'].item() for emb in embeddings]
     num_classes = data['num_classes']
     
-
-
     if dataset_name == "heart_disease_clean":
-        print("Using custom sampling : 100 random samples (60/20/20 split)")
+        print("Using custom sampling : 100 random samples")
         total_indices = np.arange(len(embeddings))
         np.random.shuffle(total_indices)
         selected_indices = total_indices[:100]
         embeddings = [embeddings[i] for i in selected_indices]
         labels = [labels[i] for i in selected_indices]
-        
-    # Train/Val/Test Split (60/20/20)
+    
+    # ========================================
+    # 수정: Train/Val만 (80/20), test 없음
+    # ========================================
     indices = list(range(len(embeddings)))
-    train_val_idx, test_idx = train_test_split(
+    train_idx, val_idx = train_test_split(
         indices, test_size=0.2,
         stratify=labels,
         random_state=args.random_seed
     )
     
-    train_val_embeddings = [embeddings[i] for i in train_val_idx]
-    train_val_labels = [labels[i] for i in train_val_idx]
+    train_dataset = [embeddings[i] for i in train_idx]
+    val_dataset = [embeddings[i] for i in val_idx]
     
-    train_idx, val_idx = train_test_split(
-        list(range(len(train_val_embeddings))),
-        test_size=0.25,
-        stratify=train_val_labels,
-        random_state=args.random_seed
-    )
+    # 하위 호환성: test_loader는 빈 리스트로
+    test_dataset = []
     
-    # Split datasets
-    train_dataset = [train_val_embeddings[i] for i in train_idx]
-    val_dataset = [train_val_embeddings[i] for i in val_idx]
-    test_dataset = [embeddings[i] for i in test_idx]
-    
-
-    '''
-        2025.12.08 수정
-        전역 시드 상태 여부 상관없이 args.random-seed
-    '''
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.random_seed)
     def seed_worker(worker_id):
-        worker_seed = torch.initial_seed() % 2**32 
+        worker_seed = torch.initial_seed() % 2**32
         np.random.seed(worker_seed)
         random.seed(worker_seed)
     print(f">>> [DataLoader] Created isolated generator with seed {args.random_seed}")
-    # DataLoader 생성
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -435,7 +415,6 @@ def prepare_embedding_dataloaders(args, dataset_name):
         generator=loader_generator,
         worker_init_fn=seed_worker,
         num_workers=0
-
     )
     
     val_loader = DataLoader(
@@ -447,23 +426,158 @@ def prepare_embedding_dataloaders(args, dataset_name):
         num_workers=0
     )
     
+    # 빈 test_loader (하위 호환)
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        generator=loader_generator,
-        worker_init_fn=seed_worker,
         num_workers=0
     )
     
     print(f"Training data size: {len(train_dataset)}")
     print(f"Validation data size: {len(val_dataset)}")
-    print(f"Test data size: {len(test_dataset)}")
+    print(f"Test data size: {len(test_dataset)} (disabled)")
     
     return {
         'loaders': (train_loader, val_loader, test_loader),
         'num_classes': num_classes
     }
+
+
+
+# '''
+#     이 아래 버전이 원래 내가 쓰던 버전, Source에 test set을 엉뚱하게 넣던 버전
+# '''
+
+
+# def prepare_embedding_dataloaders(args, dataset_name):
+#     """저장된 embedding 데이터를 로드하고 train/val/test로 분할한 뒤 DataLoader로 변환"""
+    
+#     '''
+#         최대 성능을 위해 주석처리함. 
+#         2025.07.24. 주석처리 된 코드를 재활성화하면, 
+#         재현성이 확실히 보장됨.
+#     '''
+#     # 재현성을 위한 설정
+#     # os.environ['PYTHONHASHSEED'] = str(args.random_seed)
+#     # torch.backends.cudnn.deterministic = True
+#     # torch.backends.cudnn.benchmark = False
+#     # torch.use_deterministic_algorithms(True)
+    
+#     torch.manual_seed(args.random_seed)
+#     np.random.seed(args.random_seed)
+#     random.seed(args.random_seed)
+#     if torch.cuda.is_available():
+#         torch.cuda.manual_seed(args.random_seed)
+#         torch.cuda.manual_seed_all(args.random_seed)
+#     torch.backends.cudnn.benchmark = True
+#     # 파일 경로 설정
+#     base_path = "/storage/personal/eungyeop/dataset/embedding"
+#     if args.embed_type == "_":
+#         sub_dir = sub_dir = f"tabular_embeddings_/{args.llm_model}"
+#     else:
+#         sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
+#     emb_name =  f"embedding_{dataset_name}.pkl"
+#     file_path = os.path.join(base_path, sub_dir, emb_name)
+    
+#     print(f"Loading embeddings from: {file_path}")
+#     if not os.path.exists(file_path):
+#         raise FileNotFoundError(f"File not found: {file_path}")
+    
+#     # 데이터 로드
+#     with open(file_path, 'rb') as f:
+#         data = pickle.load(f)
+    
+#     embeddings = data['embeddings']
+#     labels = [emb['y'].item() for emb in embeddings]
+#     num_classes = data['num_classes']
+    
+
+
+#     if dataset_name == "heart_disease_clean":
+#         print("Using custom sampling : 100 random samples (60/20/20 split)")
+#         total_indices = np.arange(len(embeddings))
+#         np.random.shuffle(total_indices)
+#         selected_indices = total_indices[:100]
+#         embeddings = [embeddings[i] for i in selected_indices]
+#         labels = [labels[i] for i in selected_indices]
+        
+#     # Train/Val/Test Split (60/20/20)
+#     indices = list(range(len(embeddings)))
+#     train_val_idx, test_idx = train_test_split(
+#         indices, test_size=0.2,
+#         stratify=labels,
+#         random_state=args.random_seed
+#     )
+    
+#     train_val_embeddings = [embeddings[i] for i in train_val_idx]
+#     train_val_labels = [labels[i] for i in train_val_idx]
+    
+#     train_idx, val_idx = train_test_split(
+#         list(range(len(train_val_embeddings))),
+#         test_size=0.25,
+#         stratify=train_val_labels,
+#         random_state=args.random_seed
+#     )
+    
+#     # Split datasets
+#     train_dataset = [train_val_embeddings[i] for i in train_idx]
+#     val_dataset = [train_val_embeddings[i] for i in val_idx]
+#     test_dataset = [embeddings[i] for i in test_idx]
+    
+
+#     '''
+#         2025.12.08 수정
+#         전역 시드 상태 여부 상관없이 args.random-seed
+#     '''
+#     loader_generator = torch.Generator()
+#     loader_generator.manual_seed(args.random_seed)
+#     def seed_worker(worker_id):
+#         worker_seed = torch.initial_seed() % 2**32 
+#         np.random.seed(worker_seed)
+#         random.seed(worker_seed)
+#     print(f">>> [DataLoader] Created isolated generator with seed {args.random_seed}")
+#     # DataLoader 생성
+#     train_loader = DataLoader(
+#         train_dataset,
+#         batch_size=args.batch_size,
+#         shuffle=True,
+#         generator=loader_generator,
+#         worker_init_fn=seed_worker,
+#         num_workers=0
+
+#     )
+    
+#     val_loader = DataLoader(
+#         val_dataset,
+#         batch_size=args.batch_size,
+#         shuffle=False,
+#         generator=loader_generator,
+#         worker_init_fn=seed_worker,
+#         num_workers=0
+#     )
+    
+#     test_loader = DataLoader(
+#         test_dataset,
+#         batch_size=args.batch_size,
+#         shuffle=False,
+#         generator=loader_generator,
+#         worker_init_fn=seed_worker,
+#         num_workers=0
+#     )
+    
+#     print(f"Training data size: {len(train_dataset)}")
+#     print(f"Validation data size: {len(val_dataset)}")
+#     print(f"Test data size: {len(test_dataset)}")
+    
+#     return {
+#         'loaders': (train_loader, val_loader, test_loader),
+#         'num_classes': num_classes
+#     }
+
+
+
+
 
 
 # def get_few_shot_embedding_samples(train_loader, args):
