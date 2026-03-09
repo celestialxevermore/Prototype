@@ -1915,16 +1915,45 @@ def main():
         )
         logger.info(f"[Few-shot][Ep {r+1}] LR schedule: warmup_epochs={warmup_epochs_few}, final_mult={args.min_lr_mult}")
 
+        # if args.few_shot > 0:
+        #     #val_shot = int(math.ceil(args.few_shot * 0.25))
+        #     #val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+        #     #import copy
+        #     #args_val = copy.deepcopy(args)
+        #     #args_val.few_shot = val_shot 
+        #     train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
+        #     #val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
+        # else:
+        #     train_loader_epi = train_loader_t 
+
+        # (train_losses_few, val_losses_few,
+        #  train_aucs_few,   val_aucs_few,
+        #  train_precisions_few, val_precisions_few,
+        #  train_recalls_few,    val_recalls_few,
+        #  train_f1s_few,        val_f1s_few,
+        #  train_accs_few,       val_accs_few,
+        #  best_epoch_few, best_val_auc_few, best_threshold_few
+        # ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
+        #                        optimizer_few, device, args.train_epochs, is_binary_t, patience=50,
+        #                        mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+        
+        
+        ## XTFORMER SETTING ##
+
         if args.few_shot > 0:
-            #val_shot = int(math.ceil(args.few_shot * 0.25))
-            #val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
-            #import copy
-            #args_val = copy.deepcopy(args)
-            #args_val.few_shot = val_shot 
+            # XTFORMER 기준: val = train total의 25%
+            train_total = args.few_shot * 2  # binary (2-way)
+            val_total = max(5, int(math.ceil(train_total * 0.25)))
+            val_shot = max(3, int(math.ceil(val_total / 2)))  # per class로 변환
+            
+            import copy
+            args_val = copy.deepcopy(args)
+            args_val.few_shot = val_shot 
             train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-            #val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
+            val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
         else:
-            train_loader_epi = train_loader_t 
+            train_loader_epi = train_loader_t
+            val_loader_epi = val_loader_t
 
         (train_losses_few, val_losses_few,
          train_aucs_few,   val_aucs_few,
@@ -1933,9 +1962,10 @@ def main():
          train_f1s_few,        val_f1s_few,
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
-        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
+        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_epi, crit_t,
                                optimizer_few, device, args.train_epochs, is_binary_t, patience=50,
                                mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
+
 
         (test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few,
          test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
