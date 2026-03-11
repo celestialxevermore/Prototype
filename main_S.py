@@ -1876,36 +1876,41 @@ def main():
         model_few.set_freeze_target() 
 
         gat_params_few = []
-        global_params_few = []
+        lcg_params_few = []
+        head_params_few = []
         
         for name, p in model_few.named_parameters():
             if not p.requires_grad: continue
             if 'basis' in name: 
                 gat_params_few.append(p)
+            elif 'latent_graph' in name:
+                lcg_params_few.append(p)
             else:
-                global_params_few.append(p)
+                head_params_few.append(p)
         
         gat_lr_few = args.source_lr_few * 0.1 
-        global_lr_few = args.source_lr_few
+        lcg_lr_few = args.source_lr_few * 0.1
+        head_lr_few = args.source_lr_few
         
-        logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
+        logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | LCG LR: {lcg_lr_few} | Head LR: {head_lr_few}")
 
-        # ✅ wandb: episode/seed/lr 기록
         _wandb_log({
             "few/episode": int(r + 1),
             "few/episode_seed": int(current_seed),
             "few/gat_lr": float(gat_lr_few),
-            "few/global_lr": float(global_lr_few),
+            "few/lcg_lr": float(lcg_lr_few),
+            "few/head_lr": float(head_lr_few),
         })
 
         optimizer_few = optim.Adam(
             [
-                {'params': gat_params_few,    'lr': gat_lr_few},
-                {'params': global_params_few, 'lr': global_lr_few}
+                {'params': gat_params_few,  'lr': gat_lr_few},
+                {'params': lcg_params_few,  'lr': lcg_lr_few},
+                {'params': head_params_few, 'lr': head_lr_few}
             ],
             weight_decay=3e-5
         )
-        
+
         warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
         scheduler_few = make_warmup_cosine_epochs(
             optimizer_few,
@@ -1944,7 +1949,7 @@ def main():
             # XTFORMER 기준: val = train total의 25%
             train_total = args.few_shot * 2  # binary (2-way)
             val_total = max(5, int(math.ceil(train_total * 0.25)))
-            val_shot = max(3, int(math.ceil(val_total / 2)))  # per class로 변환
+            val_shot = max(3, int(math.ceil(val_total / 2)))
             
             import copy
             args_val = copy.deepcopy(args)
