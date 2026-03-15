@@ -1916,13 +1916,13 @@ def main():
         logger.info(f"[Few-shot][Ep {r+1}] LR schedule: warmup_epochs={warmup_epochs_few}, final_mult={args.min_lr_mult}")
 
         if args.few_shot > 0:
-            #val_shot = int(math.ceil(args.few_shot * 0.25))
-            #val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
-            #import copy
-            #args_val = copy.deepcopy(args)
-            #args_val.few_shot = val_shot 
+            val_shot = int(math.ceil(args.few_shot * 0.25))
+            val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+            import copy
+            args_val = copy.deepcopy(args)
+            args_val.few_shot = val_shot 
             train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-            #val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
+            val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
         else:
             train_loader_epi = train_loader_t 
 
@@ -1933,7 +1933,7 @@ def main():
          train_f1s_few,        val_f1s_few,
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
-        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_t, crit_t,
+        ) = train_and_validate(args, model_few, train_loader_epi, val_loader_epi, crit_t,
                                optimizer_few, device, args.train_epochs, is_binary_t, patience=50,
                                mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
