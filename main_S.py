@@ -108,7 +108,7 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential', 'balanced_hierarchical'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential', 'robust_hierarchical'])
     parser.add_argument('--lcg_struct_type', type = str, default = 'static', choices = ['projection', 'static', ' residual'])
     parser.add_argument('--feat_distance', type = str, default = 'cosine', choices=['cosine','l2'])
     parser.add_argument('--orth_reg', type = float, default = 0.1)
@@ -295,43 +295,41 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
         
         final_centroids = torch.tensor(final_centroids, dtype=torch.float32)
 
-    elif strategy == 'balanced_hierarchical':
-        logger.info(f">> [Balanced Hierarchical] Step 1: Global KMeans with M={M} clusters")
-        km_global = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed).fit(data_pool)
+    elif strategy == 'robust_hierarchical':
+        logger.info(f">> [Robust Hierarchical] Trying 20 KMeans runs, selecting most diverse centroids")
         
-        # Balanced assignment: 각 클러스터 최대 크기 제한
-        max_per_cluster = int(np.ceil(len(data_pool) / M * 1.3))  # 평균의 1.3배까지 허용
-        min_per_cluster = max(K, int(len(data_pool) / M * 0.5))   # 최소 K개 또는 평균의 0.5배
+        best_score = -1
+        best_km = None
         
-        # 모든 샘플에서 각 centroid까지 거리
-        centroids_global = km_global.cluster_centers_  # [M, D]
-        dists = np.linalg.norm(data_pool[:, None, :] - centroids_global[None, :, :], axis=2)  # [N, M]
+        for trial in range(20):
+            km = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed + trial).fit(data_pool)
+            
+            # centroid 간 cosine similarity로 diversity 측정
+            centers = km.cluster_centers_
+            norms = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-8)
+            gram = norms @ norms.T
+            off_diag = gram[~np.eye(M, dtype=bool)]
+            diversity = -off_diag.mean()
+            
+            # 클러스터 크기 균형
+            counts = np.bincount(km.labels_, minlength=M)
+            balance = counts.min() / (counts.max() + 1e-8)
+            
+            score = diversity + 0.3 * balance
+            logger.info(f"   Trial {trial}: diversity={-diversity:.4f}, balance={balance:.3f}, score={score:.4f}, sizes={counts.tolist()}")
+            
+            if score > best_score:
+                best_score = score
+                best_km = km
         
-        # 선호도 순서로 greedy assignment
-        assignments = -np.ones(len(data_pool), dtype=int)
-        cluster_counts = np.zeros(M, dtype=int)
+        km_global = best_km
+        counts_final = np.bincount(km_global.labels_, minlength=M)
+        logger.info(f">> [Robust] Selected best trial: score={best_score:.4f}, sizes={counts_final.tolist()}")
         
-        # 각 샘플의 "확신도" (1등과 2등 거리 차이)가 큰 순서대로 배정
-        sorted_dists = np.sort(dists, axis=1)
-        confidence = sorted_dists[:, 1] - sorted_dists[:, 0]  # 2등-1등 gap
-        order = np.argsort(-confidence)  # 확신이 큰 것부터
-        
-        for idx in order:
-            prefs = np.argsort(dists[idx])  # 가까운 순서
-            for pref in prefs:
-                if cluster_counts[pref] < max_per_cluster:
-                    assignments[idx] = pref
-                    cluster_counts[pref] += 1
-                    break
-        
-        logger.info(f">> [Balanced] Cluster sizes: {cluster_counts.tolist()} "
-                     f"(target: {len(data_pool)//M}, max: {max_per_cluster})")
-        
-        # Step 2: 각 balanced cluster 안에서 local KMeans
         final_centroids = np.zeros((M, K, D))
         for m in range(M):
-            group = data_pool[assignments == m]
-            logger.info(f"   LCG {m}: {len(group)} samples (balanced)")
+            group = data_pool[km_global.labels_ == m]
+            logger.info(f"   LCG {m}: {len(group)} samples in global cluster")
             if len(group) < K:
                 supp = data_pool[np.random.choice(len(data_pool), K - len(group))]
                 group = np.concatenate([group, supp], axis=0)
@@ -346,7 +344,7 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
         final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous()
     
     else:
-        raise ValueError(f"Unknown strategy: {strategy}. Use 'hierarchical', 'balanced_hierarchical', or 'round_robin'.")
+        raise ValueError(f"Unknown strategy: {strategy}. Use 'hierarchical', 'robust_hierarchical', or 'round_robin'.")
 
     # =========================================================================
     # Update node_embeddings
@@ -1081,7 +1079,8 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             #print(model.current_epoch)
             if model.current_epoch == model.switch_epoch:
                 logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Global Inference ON")
-        
+                model.graph_quantizer.phase2_start_epoch = model.current_epoch
+
         aucs_local = []
         aucs_global = []
         auprcs_local = [] 
@@ -1600,6 +1599,7 @@ def main():
     args.use_lcg = True 
     model_few.args.use_lcg = True
     model_few.load_state_dict(model_full.state_dict(), strict=False)
+    
     fix_seed(args.random_seed)
 
     # [변경] Target Data Load — is_source=False → 50/50 (train pool/test), val 없음
@@ -1723,6 +1723,7 @@ def main():
     FEW_SHOT_EPOCHS = 30  # UniPredict, TabLLM 따름
     
     model_few.set_freeze_target()
+    model_few.ghead2.load_state_dict(model_few.ghead.state_dict())  # ghead → ghead2 복사
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
     logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
@@ -1731,7 +1732,7 @@ def main():
     logger.info(f"[Few-shot] support resamples R = {R}")
     logger.info(f"[Few-shot] fixed epochs = {FEW_SHOT_EPOCHS} (no validation, no early stopping)")
 
-    base_state_cpu = {k: v.cpu() for k, v in model_full.state_dict().items()}
+    base_state_cpu = {k: v.cpu() for k, v in model_few.state_dict().items()}
 
     ep_test_metrics = [] 
     y_true_last, y_pred_last = None, None

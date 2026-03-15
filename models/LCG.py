@@ -305,12 +305,15 @@ class GraphQuantizer(nn.Module):
         # =========================================================================
         pi = torch.softmax(-d_commit / self.soft_tau, dim=1)
         
-        # (1) Entropic regularization 
-        
+        # (1) Dead penalty + Margin
         p = pi.mean(dim=0)
-        load_balancing_loss = M * (p **2).sum()
+        M = pi.shape[1] 
 
+        min_p = p.min()
+        dead_penalty = torch.clamp(0.02 - min_p, min=0.0) * M 
 
+        sorted_pi, _ = pi.sort(dim=1, descending=True)
+        margin_loss = -torch.clamp(sorted_pi[:, 0] - sorted_pi[:, 1] - 0.05, max=0.0).mean()
 
         # (2) LCG Orthogonalization 
         centroids = lcg_feat.mean(dim=1)
@@ -318,13 +321,7 @@ class GraphQuantizer(nn.Module):
         gram = centroids_norm @ centroids_norm.t() 
         orth_loss = (gram - torch.eye(M, device=gram.device)).pow(2).mean()
         
-        # # (3) Diversifying regularization
-        # y = batch['y'].to(pi.device)
-        # div_loss = self.get_diversifying_loss(pi,y)
-        
-        
-        
-        reg_loss = load_balancing_loss + self.orth_reg * orth_loss #+ self.div_reg * div_loss
+        reg_loss = dead_penalty + 0.1 * margin_loss + self.orth_reg * orth_loss
 
         # =========================================================================
         # Logging
@@ -341,8 +338,7 @@ class GraphQuantizer(nn.Module):
                 self.logger.info(f"   >>> d_commit: mean={d_mean:.6f}, std={d_std:.6f}, min={d_min:.6f}, max={d_max:.6f}")
                 self.logger.info(f"   >>> per-sample gap: mean={per_range.mean():.6f}, min={per_range.min():.6f}, max={per_range.max():.6f}")
 
-                tau_now = float(self.soft_tau)
-                logits = -d_commit / max(1e-8, tau_now)
+                logits = -d_commit / max(1e-8, self.soft_tau)
                 top2 = logits.topk(k=min(2, M), dim=1).values
                 if top2.shape[1] == 2:
                     gap = top2[:, 0] - top2[:, 1]
@@ -364,7 +360,7 @@ class GraphQuantizer(nn.Module):
                 src_name = f"src={src_idx}" if src_idx is not None else "src=?"
                 self.logger.info(
                     f"[ROUTING] Step {step} | Epoch {self.current_epoch} | {src_name} | "
-                    f"H_s={H_s:.3f} H_p={H_p:.3f} | "
+                    f"tau={self.soft_tau:.4f} | H_s={H_s:.3f} H_p={H_p:.3f} | "
                     f"top1={top1.mean():.3f}({top1.min():.3f}~{top1.max():.3f}) | "
                     f"p={np.array2string(p.cpu().numpy(), precision=3)} | "
                     f"argmax={argmax_counts}"
@@ -373,7 +369,7 @@ class GraphQuantizer(nn.Module):
                     best = pi_np[s].argmax()
                     self.logger.info(f"   >>> Sample {s} Pi: {np.array2string(pi_np[s], precision=4)} | best=LCG{best}({pi_np[s,best]:.3f})")
                 self.logger.info(
-                    f"[REG] LB={load_balancing_loss:.4f} | Orth={orth_loss:.4f} | "
+                    f"[REG] Dead={dead_penalty:.4f} | Margin={margin_loss:.4f} | Orth={orth_loss:.4f} | "
                     f"weighted_orth={self.orth_reg * orth_loss:.4f} | total_reg={reg_loss:.4f}"
                 )
         # =========================================================================

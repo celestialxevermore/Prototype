@@ -51,149 +51,126 @@ def get_args():
     
     args = parser.parse_args()
     return args
-
 def main():
     start_time = time.time()
     args = get_args()
     fix_seed(args.random_seed)
-    
+
     logger.info(f"Starting experiment with dataset: {args.source_data}")
     logger.info(f"Preparing Tabular datasets...")
 
-    # 데이터셋 준비
-    (X_train_full, X_val_full, X_test_full, 
-     y_train_full, y_val_full, y_test_full), _ = ml_prepare_tabular_dataloaders(
+    # ✅ 50/50 split — val=None
+    (X_train_full, _, X_test_full,
+     y_train_full, _, y_test_full), _ = ml_prepare_tabular_dataloaders(
         args, args.source_data, args.random_seed
     )
+    logger.info(f"[Target] Train pool: {len(X_train_full)} | Test: {len(X_test_full)}")
 
+    # ✅ K-shot 샘플링 (train pool에서만)
     X_train_few, y_train_few = get_few_shot_tabular_samples(X_train_full, y_train_full, args)
-    X_val_few, y_val_few = X_val_full, y_val_full
-    X_test_few, y_test_few = X_test_full, y_test_full
-    
-    logger.info(f"Datasets prepared, source dataset names : {args.source_data}")
-    
-    # 이진 분류 여부 확인
+    logger.info(f"[Few-shot] Support set size: {len(X_train_few)}")
+
     is_binary = (len(np.unique(y_train_full)) == 2)
-    
+
     full_baseline_results = {}
     few_baseline_results = {}
 
-    # baseline 반복
     for baseline in args.baseline:
+        logger.info(f"\n>>> Running baseline: {baseline}")
+
         if baseline == "rf":
-            # --------------------------------------------------------
-            # 1) Random Forest만을 위한 데이터 사본 생성
-            # --------------------------------------------------------
-            X_train_rf = X_train_full.copy()
-            X_val_rf = X_val_full.copy()
-            X_test_rf = X_test_full.copy()
+            X_train_rf   = X_train_full.copy()
+            X_test_rf    = X_test_full.copy()
+            X_few_rf     = X_train_few.copy()
 
-            # 범주형 열을 선택
             categorical_columns = X_train_rf.select_dtypes(include=['object', 'category']).columns
-
-            # Label Encoding (RF 전용)
             for col in categorical_columns:
                 le = LabelEncoder()
-                # 모든 데이터셋의 unique 값을 합쳐서 fit
-                all_values = pd.concat([
-                    X_train_rf[col],
-                    X_val_rf[col],
-                    X_test_rf[col]
-                ]).unique()
+                all_values = pd.concat([X_train_rf[col], X_test_rf[col]]).unique()
                 le.fit(all_values)
-                
-                # transform 적용
                 X_train_rf[col] = le.transform(X_train_rf[col])
-                X_val_rf[col] = le.transform(X_val_rf[col])
-                X_test_rf[col] = le.transform(X_test_rf[col])
-            
-            # Random Forest 학습 및 평가
+                X_test_rf[col]  = le.transform(X_test_rf[col])
+                # few-shot은 unseen value 있을 수 있으니 safe transform
+                X_few_rf[col]   = X_few_rf[col].map(
+                    lambda x: le.transform([x])[0] if x in le.classes_ else -1
+                )
+
             full_baseline_results[baseline] = random_forest_benchmark(
                 args,
-                X_train_rf, X_val_rf, X_test_rf, 
-                y_train_full, y_val_full, y_test_full,
+                X_train_rf, None, X_test_rf,
+                y_train_full, None, y_test_full,
                 is_binary=is_binary
             )
             few_baseline_results[baseline] = random_forest_benchmark(
                 args,
-                X_train_few.copy(), X_val_few.copy(), X_test_few.copy(), 
-                y_train_few, y_val_few, y_test_few,
+                X_few_rf, None, X_test_rf,
+                y_train_few, None, y_test_full,
                 is_binary=is_binary
             )
 
         elif baseline == "lr":
-            # Logistic Regression
             full_baseline_results[baseline] = logistic_regression_benchmark(
                 args,
-                X_train_full, X_val_full, X_test_full,
-                y_train_full, y_val_full, y_test_full,
+                X_train_full, None, X_test_full,
+                y_train_full, None, y_test_full,
                 is_binary=is_binary,
             )
             few_baseline_results[baseline] = logistic_regression_benchmark(
                 args,
-                X_train_few, X_val_few, X_test_few,
-                y_train_few, y_val_few, y_test_few,
+                X_train_few, None, X_test_full,
+                y_train_few, None, y_test_full,
                 is_binary=is_binary,
             )
 
         elif baseline == "xgb":
-            # XGBoost
             full_baseline_results[baseline] = xgboost_benchmark(
                 args,
-                X_train_full, X_val_full, X_test_full,
-                y_train_full, y_val_full, y_test_full,
+                X_train_full, None, X_test_full,
+                y_train_full, None, y_test_full,
                 is_binary=is_binary,
             )
             few_baseline_results[baseline] = xgboost_benchmark(
                 args,
-                X_train_few, X_val_few, X_test_few,
-                y_train_few, y_val_few, y_test_few,
+                X_train_few, None, X_test_full,
+                y_train_few, None, y_test_full,
                 is_binary=is_binary,
             )
 
         elif baseline == "mlp":
-            # MLP
             full_baseline_results[baseline] = mlp_benchmark(
                 args,
-                X_train_full, X_val_full, X_test_full,
-                y_train_full, y_val_full, y_test_full,
+                X_train_full, None, X_test_full,
+                y_train_full, None, y_test_full,
                 is_binary=is_binary,
             )
             few_baseline_results[baseline] = mlp_benchmark(
                 args,
-                X_train_few, X_val_few, X_test_few,
-                y_train_few, y_val_few, y_test_few,
+                X_train_few, None, X_test_full,
+                y_train_few, None, y_test_full,
                 is_binary=is_binary,
             )
 
         elif baseline == "cat":
-            # CatBoost
             full_baseline_results[baseline] = catboost_benchmark(
                 args,
-                X_train_full, X_val_full, X_test_full,
-                y_train_full, y_val_full, y_test_full,
+                X_train_full, None, X_test_full,
+                y_train_full, None, y_test_full,
                 is_binary=is_binary,
             )
             few_baseline_results[baseline] = catboost_benchmark(
                 args,
-                X_train_few, X_val_few, X_test_few,
-                y_train_few, y_val_few, y_test_few,
+                X_train_few, None, X_test_full,
+                y_train_few, None, y_test_full,
                 is_binary=is_binary,
             )
 
         else:
-            logger.warning(f"Invalid baseline specified: {baseline}. Skipping.")
+            logger.warning(f"Invalid baseline: {baseline}. Skipping.")
 
-    # 각 모델 결과 정리
     results = prepare_ml_results(args, full_baseline_results, few_baseline_results)
-
-    # 결과 저장
     save_ml_results(args, results)
     logger.info(f"Results saved")
-    
-    end_time = time.time()
-    total_time = end_time - start_time
-    logger.info(f"Total experiment time: {format_time(total_time)}")
+    logger.info(f"Total experiment time: {format_time(time.time() - start_time)}")
 
 
 if __name__ == "__main__":

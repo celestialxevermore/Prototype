@@ -26,7 +26,7 @@ for dataset in $datasets; do
             --batch_size 32 \
             --dropout_rate 0.3 \
             --threshold 0.5 \
-            --base_dir test20250724
+            --base_dir test20260312_
         done
     done
 done

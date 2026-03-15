@@ -124,11 +124,9 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
     Table -> Graph
 '''
 def ml_prepare_tabular_dataloaders(args, dataset_name, random_seed):
-    """데이터셋을 로드하고 train/val/test로 분할"""
-    DATASETS = {} 
+    DATASETS = {}
     DATASETS[dataset_name] = get_dataset_ml(args, dataset_name, random_seed)
 
-    # heart 데이터셋들 처리
     heart_datasets = ['cleveland', 'hungarian', 'switzerland', 'heart_statlog']
     if dataset_name in heart_datasets:
         X = DATASETS[dataset_name][0].drop('target_binary', axis=1)
@@ -139,24 +137,16 @@ def ml_prepare_tabular_dataloaders(args, dataset_name, random_seed):
     le = LabelEncoder()
     y = le.fit_transform(y)
     num_classes = len(le.classes_)
-    
-    # Train/val/test split
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, 
-        test_size=0.2, 
-        random_state=args.random_seed, 
+
+    # ✅ 50/50 split — val 없음 (우리 프로토콜)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.5,
+        random_state=args.random_seed,
         stratify=y
     )
-    
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, 
-        test_size=0.25,  # 0.25 * 0.8 = 0.2 for validation
-        random_state=args.random_seed, 
-        stratify=y_temp
-    )
-    
-    return (X_train, X_val, X_test, y_train, y_val, y_test), num_classes
 
+    return (X_train, None, X_test, y_train, None, y_test), num_classes
 
 
 '''
