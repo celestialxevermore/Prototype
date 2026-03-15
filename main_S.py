@@ -1934,7 +1934,7 @@ def main():
          train_accs_few,       val_accs_few,
          best_epoch_few, best_val_auc_few, best_threshold_few
         ) = train_and_validate(args, model_few, train_loader_epi, val_loader_epi, crit_t,
-                               optimizer_few, device, args.train_epochs, is_binary_t, patience=50,
+                               optimizer_few, device, args.train_epochs, is_binary_t, patience=15,
                                mode="Few", scheduler=scheduler_few, warmup_epochs=warmup_epochs_few)
 
         (test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few,
