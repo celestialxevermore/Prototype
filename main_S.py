@@ -108,7 +108,7 @@ def get_args():
     parser.add_argument('--diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_diversifying_loss', action='store_true', help = "diversifying the latent composite graph affinity")
     parser.add_argument('--lcg_hinge_margin_sq', type = float, default = 1.0)
-    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential', 'balanced_hierarchical'])
+    parser.add_argument('--lcg_strategy', type = str, default = 'hierarchical', choices = ['hierarchical', 'round_robin', 'sequential', 'robust_hierarchical'])
     parser.add_argument('--lcg_struct_type', type = str, default = 'static', choices = ['projection', 'static', ' residual'])
     parser.add_argument('--feat_distance', type = str, default = 'cosine', choices=['cosine','l2'])
     parser.add_argument('--orth_reg', type = float, default = 0.1)
@@ -295,43 +295,41 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
         
         final_centroids = torch.tensor(final_centroids, dtype=torch.float32)
 
-    elif strategy == 'balanced_hierarchical':
-        logger.info(f">> [Balanced Hierarchical] Step 1: Global KMeans with M={M} clusters")
-        km_global = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed).fit(data_pool)
+    elif strategy == 'robust_hierarchical':
+        logger.info(f">> [Robust Hierarchical] Trying 20 KMeans runs, selecting most diverse centroids")
         
-        # Balanced assignment: 각 클러스터 최대 크기 제한
-        max_per_cluster = int(np.ceil(len(data_pool) / M * 1.3))  # 평균의 1.3배까지 허용
-        min_per_cluster = max(K, int(len(data_pool) / M * 0.5))   # 최소 K개 또는 평균의 0.5배
+        best_score = -1
+        best_km = None
         
-        # 모든 샘플에서 각 centroid까지 거리
-        centroids_global = km_global.cluster_centers_  # [M, D]
-        dists = np.linalg.norm(data_pool[:, None, :] - centroids_global[None, :, :], axis=2)  # [N, M]
+        for trial in range(20):
+            km = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed + trial).fit(data_pool)
+            
+            # centroid 간 cosine similarity로 diversity 측정
+            centers = km.cluster_centers_
+            norms = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-8)
+            gram = norms @ norms.T
+            off_diag = gram[~np.eye(M, dtype=bool)]
+            diversity = -off_diag.mean()
+            
+            # 클러스터 크기 균형
+            counts = np.bincount(km.labels_, minlength=M)
+            balance = counts.min() / (counts.max() + 1e-8)
+            
+            score = diversity + 0.3 * balance
+            logger.info(f"   Trial {trial}: diversity={-diversity:.4f}, balance={balance:.3f}, score={score:.4f}, sizes={counts.tolist()}")
+            
+            if score > best_score:
+                best_score = score
+                best_km = km
         
-        # 선호도 순서로 greedy assignment
-        assignments = -np.ones(len(data_pool), dtype=int)
-        cluster_counts = np.zeros(M, dtype=int)
+        km_global = best_km
+        counts_final = np.bincount(km_global.labels_, minlength=M)
+        logger.info(f">> [Robust] Selected best trial: score={best_score:.4f}, sizes={counts_final.tolist()}")
         
-        # 각 샘플의 "확신도" (1등과 2등 거리 차이)가 큰 순서대로 배정
-        sorted_dists = np.sort(dists, axis=1)
-        confidence = sorted_dists[:, 1] - sorted_dists[:, 0]  # 2등-1등 gap
-        order = np.argsort(-confidence)  # 확신이 큰 것부터
-        
-        for idx in order:
-            prefs = np.argsort(dists[idx])  # 가까운 순서
-            for pref in prefs:
-                if cluster_counts[pref] < max_per_cluster:
-                    assignments[idx] = pref
-                    cluster_counts[pref] += 1
-                    break
-        
-        logger.info(f">> [Balanced] Cluster sizes: {cluster_counts.tolist()} "
-                     f"(target: {len(data_pool)//M}, max: {max_per_cluster})")
-        
-        # Step 2: 각 balanced cluster 안에서 local KMeans
         final_centroids = np.zeros((M, K, D))
         for m in range(M):
-            group = data_pool[assignments == m]
-            logger.info(f"   LCG {m}: {len(group)} samples (balanced)")
+            group = data_pool[km_global.labels_ == m]
+            logger.info(f"   LCG {m}: {len(group)} samples in global cluster")
             if len(group) < K:
                 supp = data_pool[np.random.choice(len(data_pool), K - len(group))]
                 group = np.concatenate([group, supp], axis=0)
@@ -346,7 +344,7 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
         final_centroids = centers.view(K, M, D).transpose(0, 1).contiguous()
     
     else:
-        raise ValueError(f"Unknown strategy: {strategy}. Use 'hierarchical', 'balanced_hierarchical', or 'round_robin'.")
+        raise ValueError(f"Unknown strategy: {strategy}. Use 'hierarchical', 'robust_hierarchical', or 'round_robin'.")
 
     # =========================================================================
     # Update node_embeddings
@@ -943,10 +941,10 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     logger = logging.getLogger(logger_name)
     #pdb.set_trace()
     name_to_idx = {name: i for i, name in enumerate(sources)}
-    trains, vals, tests, ncs = [], [], [], []
+    trains, vals, ncs = [], [], []
     for name in sources:
-        tr, va, te, nc = load_one(args, name)
-        trains.append(tr); vals.append(va); tests.append(te); ncs.append(nc)
+        tr, va, te, nc = load_one(args, name)  # te is None (source has no test)
+        trains.append(tr); vals.append(va); ncs.append(nc)
 
     if len(set(ncs)) != 1:
         raise ValueError(f"num_classes mismatch across sources: {ncs}")
@@ -956,9 +954,8 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     # 학습은 다중 소스를 섞어서
     tr_step = make_step(trains, mode='random', seed=args.random_seed)
 
-    # 검증/테스트/개별-학습 평가용
+    # 검증/개별-학습 평가용 (test 제거)
     val_steps   = [MultiSourceStepLoader([vals[i]],   mode='round', seed=args.random_seed, src_idx=i) for i in range(len(vals))]
-    test_steps  = [MultiSourceStepLoader([tests[i]],  mode='round', seed=args.random_seed, src_idx=i) for i in range(len(tests))]
     train_steps = [MultiSourceStepLoader([trains[i]], mode='round', seed=args.random_seed, src_idx=i) for i in range(len(trains))]
 
     is_bin = (args.num_classes == 2)
@@ -1082,7 +1079,8 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             #print(model.current_epoch)
             if model.current_epoch == model.switch_epoch:
                 logger.info(f">>> [PHASE CHANGE] Epoch {model.current_epoch}: Global Inference ON")
-        
+                model.graph_quantizer.phase2_start_epoch = model.current_epoch
+
         aucs_local = []
         aucs_global = []
         auprcs_local = [] 
@@ -1253,17 +1251,15 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         model.load_state_dict(best_state)
 
     # -----------------------------
-    # 최종 리포트 (소스별 threshold 산출 -> train/val/test 지표)
+    # 최종 리포트 (train/val만, source test 제거)
     # -----------------------------
-    per_train_loss, per_val_loss, per_test_loss = [], [], []
-    per_train_auc,  per_val_auc,  per_test_auc  = [], [], []
-    per_train_precision, per_val_precision, per_test_precision = [], [], []
-    per_train_recall,    per_val_recall,    per_test_recall    = [], [], []
-    per_train_f1,        per_val_f1,        per_test_f1        = [], [], []
-    per_train_acc,       per_val_acc,       per_test_acc       = [], [], []
-    per_train_auprc,  per_val_auprc,  per_test_auprc  = [], [], []
-    all_y_true_full_list = []
-    all_y_pred_full_list = []
+    per_train_loss, per_val_loss = [], []
+    per_train_auc,  per_val_auc  = [], []
+    per_train_precision, per_val_precision = [], []
+    per_train_recall,    per_val_recall    = [], []
+    per_train_f1,        per_val_f1        = [], []
+    per_train_acc,       per_val_acc       = [], []
+    per_train_auprc,     per_val_auprc     = [], []
 
     for i in range(len(sources)):
         # <--- [확인] Global 결과 우선 (res_g)
@@ -1317,76 +1313,39 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             val_f1_i        = f1_score(y_true_val_i, preds_val, average='macro', zero_division=0)
             val_acc_i       = accuracy_score(y_true_val_i, preds_val)
 
-        # Test
-        (test_loss_i, y_true_te_i, y_pred_te_i), _ = eval_fn(model, test_steps[i], crit, device)
-        
-        if is_bin:
-            test_auc_i = roc_auc_score(y_true_te_i, y_pred_te_i)
-            test_auprc_i = average_precision_score(y_true_te_i, y_pred_te_i)
-            y_bin_te = (y_pred_te_i > thr_i).astype(int)
-            test_precision_i = precision_score(y_true_te_i, y_bin_te, zero_division=0)
-            test_recall_i    = recall_score(y_true_te_i, y_bin_te, zero_division=0)
-            test_f1_i        = f1_score(y_true_te_i, y_bin_te, zero_division=0)
-            test_acc_i       = accuracy_score(y_true_te_i, y_bin_te)
-        else:
-            n_cls = y_pred_te_i.shape[1]
-            y_bin_te = label_binarize(y_true_te_i, classes=range(n_cls))
-            test_auc_i = roc_auc_score(y_bin_te, y_pred_te_i, multi_class='ovr', average='macro')
-            test_auprc_i = average_precision_score(y_bin_te, y_pred_te_i, average='macro')
+        # 누적 (test 제거)
+        per_train_loss.append(train_loss_i); per_val_loss.append(val_loss_i)
+        per_train_auc.append(train_auc_i);   per_val_auc.append(val_auc_i)
+        per_train_precision.append(train_precision_i); per_val_precision.append(val_precision_i)
+        per_train_recall.append(train_recall_i);       per_val_recall.append(val_recall_i)
+        per_train_f1.append(train_f1_i);               per_val_f1.append(val_f1_i)
+        per_train_acc.append(train_acc_i);             per_val_acc.append(val_acc_i)
+        per_train_auprc.append(train_auprc_i);         per_val_auprc.append(val_auprc_i)
 
-            preds_te = y_pred_te_i.argmax(axis=1)
-            test_precision_i = precision_score(y_true_te_i, preds_te, average='macro', zero_division=0)
-            test_recall_i    = recall_score(y_true_te_i, preds_te, average='macro', zero_division=0)
-            test_f1_i        = f1_score(y_true_te_i, preds_te, average='macro', zero_division=0)
-            test_acc_i       = accuracy_score(y_true_te_i, preds_te)
-
-        # 누적
-        per_train_loss.append(train_loss_i); per_val_loss.append(val_loss_i); per_test_loss.append(test_loss_i)
-        per_train_auc.append(train_auc_i);   per_val_auc.append(val_auc_i);   per_test_auc.append(test_auc_i)
-        per_train_precision.append(train_precision_i); per_val_precision.append(val_precision_i); per_test_precision.append(test_precision_i)
-        per_train_recall.append(train_recall_i);       per_val_recall.append(val_recall_i);       per_test_recall.append(test_recall_i)
-        per_train_f1.append(train_f1_i);               per_val_f1.append(val_f1_i);               per_test_f1.append(test_f1_i)
-        per_train_acc.append(train_acc_i);             per_val_acc.append(val_acc_i);             per_test_acc.append(test_acc_i)
-        per_train_auprc.append(train_auprc_i); per_val_auprc.append(val_auprc_i); per_test_auprc.append(test_auprc_i)
-
-        all_y_true_full_list.append(y_true_te_i)
-        all_y_pred_full_list.append(y_pred_te_i)
-
-    # 평균 집계
+    # 평균 집계 (test 제거)
     train_losses_full = [float(np.mean(per_train_loss))]
     val_losses_full   = [float(np.mean(per_val_loss))]
-    test_losses_full  = [float(np.mean(per_test_loss))]
     train_aucs_full = [float(np.mean(per_train_auc))]
     val_aucs_full   = [float(np.mean(per_val_auc))]
-    test_auc_full   = float(np.mean(per_test_auc))
     train_precisions_full = [float(np.mean(per_train_precision))]
     val_precisions_full   = [float(np.mean(per_val_precision))]
-    test_precision_full   = float(np.mean(per_test_precision))
     train_recalls_full = [float(np.mean(per_train_recall))]
     val_recalls_full   = [float(np.mean(per_val_recall))]
-    test_recall_full   = float(np.mean(per_test_recall))
     train_f1s_full = [float(np.mean(per_train_f1))]
     val_f1s_full   = [float(np.mean(per_val_f1))]
-    test_f1_full   = float(np.mean(per_test_f1))
     train_accs_full = [float(np.mean(per_train_acc))]
     val_accs_full   = [float(np.mean(per_val_acc))]
-    test_acc_full   = float(np.mean(per_test_acc))
-    all_y_true_full = np.concatenate(all_y_true_full_list, axis=0)
-    all_y_pred_full = np.concatenate(all_y_pred_full_list, axis=0)
     best_epoch_full = last_best_epoch
     train_auprcs_full = [float(np.mean(per_train_auprc))]
     val_auprcs_full   = [float(np.mean(per_val_auprc))]
-    test_auprc_full   = float(np.mean(per_test_auprc))
+
     # ===========================
     # ✅ wandb: 최종 요약 로그(선택)
     # ===========================
     try:
-        # 이건 step 없이 찍어도 됨 (summary용으로)
         wandb_safe_log({
             "Pre/final_train_auc_mean": float(np.mean(per_train_auc)) if len(per_train_auc) else None,
             "Pre/final_val_auc_mean": float(np.mean(per_val_auc)) if len(per_val_auc) else None,
-            "Pre/final_test_auc_mean": float(np.mean(per_test_auc)) if len(per_test_auc) else None,
-            "Pre/final_test_acc_mean": float(np.mean(per_test_acc)) if len(per_test_acc) else None,
             "Pre/best_epoch": int(best_epoch_full) + 1 if best_epoch_full is not None and best_epoch_full >= 0 else None,
             "Pre/best_mean_auc": float(best_mean_auc),
         })
@@ -1399,28 +1358,19 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     full_pack = dict(
         train_losses_full=train_losses_full,
         val_losses_full=val_losses_full,
-        test_losses_full=test_losses_full,
         train_aucs_full=train_aucs_full,
         val_aucs_full=val_aucs_full,
-        test_auc_full=test_auc_full,
         train_precisions_full=train_precisions_full,
         val_precisions_full=val_precisions_full,
-        test_precision_full=test_precision_full,
         train_recalls_full=train_recalls_full,
         val_recalls_full=val_recalls_full,
-        test_recall_full=test_recall_full,
         train_f1s_full=train_f1s_full,
         val_f1s_full=val_f1s_full,
-        test_f1_full=test_f1_full,
         train_accs_full=train_accs_full,
         val_accs_full=val_accs_full,
-        test_acc_full=test_acc_full,
-        all_y_true_full=all_y_true_full,
-        all_y_pred_full=all_y_pred_full,
         best_epoch_full=best_epoch_full,
         train_auprcs_full=train_auprcs_full,
         val_auprcs_full=val_auprcs_full,
-        test_auprc_full=test_auprc_full
     )
     return full_pack
 
@@ -1440,10 +1390,10 @@ def main():
     args = get_args()
     if not getattr(args, "run_tag", ""):
         from datetime import datetime
-        args.run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")  # 자동 생성
-    wandb_init_and_override_args(args)  # ✅ 추가 (sweep 값이 args로 들어옴)
+        args.run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wandb_init_and_override_args(args)
     wandb_update_config_minimal(args)
-    # ✅ [wandb 추가 1] 안전 로거/컨피그 업데이트 (로직 영향 X)
+
     def _wandb_log(d, step=None):
         try:
             import wandb
@@ -1461,7 +1411,6 @@ def main():
         except Exception:
             pass
 
-    # args 전체를 wandb.config에 저장 (가능한 값만/문자열 fallback)
     try:
         import wandb
         if wandb.run is not None:
@@ -1479,7 +1428,6 @@ def main():
 
     fix_seed(args.random_seed)
     
-    # 1. 로거 설정
     logger_name = "my_experiment_logger" 
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
@@ -1541,7 +1489,6 @@ def main():
         f"_entropic_reg-{args.entropy_reg}"
         f"_description-{args.des}"
     )
-    #ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}"
     ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
     os.makedirs(ckpt_dir, exist_ok = True)
     ckpt_final = os.path.join(ckpt_dir, "best_joint.pt")
@@ -1552,7 +1499,6 @@ def main():
     loaded_pretrain = False
     full_metrics = None
 
-    # ✅ [wandb 추가 3] 경로/세팅 로그 (로직 영향 X)
     _wandb_log({
         "ckpt/pre_dir": ckpt_dir,
         "ckpt/final_exists": int(os.path.exists(ckpt_final)),
@@ -1564,21 +1510,16 @@ def main():
     # ==================================================================
     
     if os.path.exists(ckpt_final):
-        # Case A: 이미 최종 학습(Phase 2) 완료됨 -> 로드
         logger.info(f"✅ [Pretrain] Found Final Checkpoint: {ckpt_final}")
         ckpt = torch.load(ckpt_final, map_location=device)
         model_full.load_state_dict(ckpt['model_state_dict'])
         loaded_pretrain = True
-
-        # ✅ wandb
         _wandb_log({"pretrain/loaded_final_ckpt": 1})
         
     else:
-        # Case B: 학습 필요
         logger.info(f"🚀 [Pretrain] Starting 2-Stage Training Pipeline...")
         _wandb_log({"pretrain/loaded_final_ckpt": 0})
 
-        # Loaders 준비 (Init용)
         all_loaders = {}
         src_list = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
         for s in src_list:
@@ -1590,30 +1531,18 @@ def main():
             logger.info(f"   -> Found Phase 1 Checkpoint. Loading...")
             ckpt = torch.load(ckpt_vanilla, map_location=device)
             model_full.load_state_dict(ckpt['model_state_dict'])
-
-            # ✅ wandb
             _wandb_log({"pretrain/phase1_loaded_ckpt": 1})
         else:
             logger.info(f"\n{'='*40}\n>>> [Phase 1] Start Vanilla GAT Training (LCG OFF)\n{'='*40}")
             args.use_lcg = False 
-
-            # ✅ wandb
             _wandb_log({"pretrain/phase": 1, "pretrain/use_lcg": 0})
-
-            # 학습 실행
             _ = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=20)
-            
-            # 결과 백업
             shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_vanilla)
             logger.info(f"   -> Phase 1 Saved to {ckpt_vanilla}")
-
-            # ✅ wandb
             _wandb_log({"pretrain/phase1_saved": 1, "ckpt/vanilla_path": ckpt_vanilla})
 
         # --- [Step 2] Bridge: LCG Init ---
         logger.info(f"\n{'='*40}\n>>> [Bridge] Initializing LCG from Pre-trained CLS\n{'='*40}")
-
-        # ✅ wandb
         _wandb_log({"pretrain/bridge_init_lcg": 1, "pretrain/lcg_strategy": str(getattr(args, "lcg_strategy", ""))})
 
         init_lcg(
@@ -1627,53 +1556,40 @@ def main():
                 batch = next(iter(loader))
                 batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
                 _ = model_full.predict(batch, return_all=True)
-                pi = model_full.graph_quantizer.last_pi  # [B, M]
-                
+                pi = model_full.graph_quantizer.last_pi
                 logger.info(f"[INIT CHECK] {src_name}: mean pi={pi.mean(0).cpu().numpy().round(4)}")
                 logger.info(f"[INIT CHECK] {src_name}: argmax counts={torch.bincount(pi.argmax(1), minlength=pi.shape[1]).cpu().numpy()}")
                 
         fix_seed(args.random_seed)
-        #pdb.set_trace()
+
         # --- [Step 3] Phase 2: Joint Training ---
         logger.info(f"\n{'='*40}\n>>> [Phase 2] Start Joint Training (Global ON)\n{'='*40}")
         args.use_lcg = True 
-
-        # ✅ wandb
         _wandb_log({"pretrain/phase": 2, "pretrain/use_lcg": 1})
-
-        # [수정] patience 50으로 증가 (Global 학습 충분히)
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=30)
-        
-        # 최종 저장
         shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_final)
         logger.info(f"   -> Phase 2 Saved to {ckpt_final}")
         loaded_pretrain = True
-
-        # ✅ wandb
         _wandb_log({"pretrain/phase2_saved": 1, "ckpt/final_path": ckpt_final})
 
     # 3) (옵션) Pretrain 모델로 소스 리포트 재평가 (eval-only)
-    # [수정] few_shot이 4이거나 0일 때 (비교를 위해) 수행하도록 복구
-    #pdb.set_trace()
+    #    [변경] source test 제거됨 → val 기준으로만 리포트
     if loaded_pretrain and (args.few_shot == 4 or args.few_shot == 0):
         logger.info("[Full] Using loaded pretrain for source metrics report (eval only).")
         _bak = args.train_epochs
         args.train_epochs = 0
         args.use_lcg = True
-
-        # ✅ wandb
         _wandb_log({"pretrain/eval_only_report": 1, "pretrain/eval_only_few_shot": int(args.few_shot)})
 
         full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=0)
         args.train_epochs = _bak
         fix_seed(args.random_seed)
 
-        # ✅ wandb: source report 핵심만 summary로 (있을 때만)
+        # [변경] source test 없으므로 val 기준으로 summary
         try:
             if full_metrics is not None:
                 _wandb_summary_set({
-                    "source_report/test_auc_full": float(full_metrics.get("test_auc_full", 0.0)),
-                    "source_report/test_acc_full": float(full_metrics.get("test_acc_full", 0.0)),
+                    "source_report/val_auc_full": float(full_metrics.get("val_aucs_full", [0.0])[0]),
                 })
         except Exception:
             pass
@@ -1683,12 +1599,17 @@ def main():
     args.use_lcg = True 
     model_few.args.use_lcg = True
     model_few.load_state_dict(model_full.state_dict(), strict=False)
+    
     fix_seed(args.random_seed)
 
-    # Target Data Load
+    # [변경] Target Data Load — is_source=False → 50/50 (train pool/test), val 없음
     logger.info(f"[Target] target = {args.target_data}")
+    # main에서 target 로드 직전에
     r_t = prepare_embedding_dataloaders(args, args.target_data, is_source=False)
+
+
     train_loader_t, val_loader_t, test_loader_t = r_t['loaders']
+    # val_loader_t is None (target has no val)
     num_classes_t = r_t['num_classes']
     args.num_classes = num_classes_t
     args.output_dim  = num_classes_t if num_classes_t > 2 else 1
@@ -1696,35 +1617,34 @@ def main():
     is_binary_t = (args.num_classes == 2)
     crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
 
-    # ✅ wandb: target meta
     _wandb_log({
         "target/num_classes": int(args.num_classes),
         "target/is_binary": int(is_binary_t),
         "target/few_shot": int(args.few_shot),
         "target/support_resamples": int(getattr(args, "support_resamples", 1)),
-        "target/train_epochs": int(getattr(args, "train_epochs", 0)),
     })
 
     # =========================================================
     # [분기 1] Zero-shot 평가 (학습 X, 평가 O, 종료)
+    # [변경] val 없음 → train pool에서 threshold 결정
     # =========================================================
-    #pdb.set_trace()
     if args.few_shot == 0:
         logger.info("\n>>> [Zero-shot] Evaluating pretrained model directly on target test set...")
         
         evaluate_func = binary_evaluate if is_binary_t else multi_evaluate
         model_full.eval()
-        # Validation set에서 threshold 결정
-        res_val = evaluate_func(model_full, val_loader_t, crit_t, device)
+
+        # [변경] val 대신 train pool에서 threshold 결정
+        res_tr = evaluate_func(model_full, train_loader_t, crit_t, device)
         
-        if isinstance(res_val, tuple) and len(res_val) == 2:
-            res_g_val, res_l_val = res_val
-            _, y_true_val, y_pred_val = res_g_val # Global 선택
+        if isinstance(res_tr, tuple) and len(res_tr) == 2:
+            res_g_tr, res_l_tr = res_tr
+            _, y_true_tr, y_pred_tr = res_g_tr
         else:
-            _, y_true_val, y_pred_val = res_val
+            _, y_true_tr, y_pred_tr = res_tr
         
         if is_binary_t:
-            best_threshold_zero = find_optimal_threshold(y_true_val, y_pred_val)
+            best_threshold_zero = find_optimal_threshold(y_true_tr, y_pred_tr)
         else:
             best_threshold_zero = None
 
@@ -1736,11 +1656,9 @@ def main():
         )
         
         logger.info(f"[Zero-shot] Test Results: "
-           f"AUC={test_auc_zero:.4f} AUPRC={test_auprc_zero:.4f} ACC={test_acc_zero:.4f} "  # ✅ [AUPRC 추가]
+           f"AUC={test_auc_zero:.4f} AUPRC={test_auprc_zero:.4f} ACC={test_acc_zero:.4f} "
            f"Prec={test_precision_zero:.4f} Rec={test_recall_zero:.4f} F1={test_f1_zero:.4f}")
 
-
-        # ✅ wandb: zero-shot 결과
         _wandb_log({
             "zero_shot/test_loss": float(test_loss_zero),
             "zero_shot/test_auc": float(test_auc_zero),
@@ -1757,42 +1675,8 @@ def main():
             "final/zero_shot_test_acc": float(test_acc_zero),
         })
         
-        # 결과 래핑
-        if full_metrics is not None:
-            full_test_auprc = compute_auprc(full_metrics["all_y_true_full"], full_metrics["all_y_pred_full"])  # ✅ [AUPRC 추가]
-
-            full_ours_results = wrap_up_results_(
-                train_losses=full_metrics['train_losses_full'],
-                val_losses=full_metrics['val_losses_full'],
-                test_losses=full_metrics['test_losses_full'],
-                train_aucs=full_metrics['train_aucs_full'],
-                val_aucs=full_metrics['val_aucs_full'],
-                test_aucs=[full_metrics['test_auc_full']],
-                train_precisions=full_metrics['train_precisions_full'],
-                val_precisions=full_metrics['val_precisions_full'],
-                test_precisions=[full_metrics['test_precision_full']],
-                train_recalls=full_metrics['train_recalls_full'],
-                val_recalls=full_metrics['val_recalls_full'],
-                test_recalls=[full_metrics['test_recall_full']],
-                train_f1s=full_metrics['train_f1s_full'],
-                val_f1s=full_metrics['val_f1s_full'],
-                test_f1s=[full_metrics['test_f1_full']],
-                all_y_true=[full_metrics['all_y_true_full']],
-                all_y_pred=[full_metrics['all_y_pred_full']],
-                best_epoch=full_metrics['best_epoch_full'],
-                best_ours_auc=full_metrics['test_auc_full'],
-                best_ours_acc=full_metrics['test_acc_full'],
-                best_ours_precision=full_metrics['test_precision_full'],
-                best_ours_recall=full_metrics['test_recall_full'],
-                best_ours_f1=full_metrics['test_f1_full'],
-                train_accs=full_metrics['train_accs_full'],
-                val_accs=full_metrics['val_accs_full'],
-                test_accs=[full_metrics['test_acc_full']],
-                test_auprcs = [full_test_auprc],
-                best_ours_auprc = full_test_auprc
-            )
-        else:
-            full_ours_results = None
+        # [변경] full_ours_results: source test 없으므로 None
+        full_ours_results = None
         
         zero_shot_results = wrap_up_results_(
             train_losses=[], val_losses=[], test_losses=[],
@@ -1811,7 +1695,6 @@ def main():
         
         results = prepare_results_(full_ours_results, zero_shot_results)
         
-        # 저장 및 종료
         logger.info("Saving Zero-shot results...")
         import copy
         args_for_save = copy.deepcopy(args)
@@ -1823,7 +1706,6 @@ def main():
         save_results_(args_for_save, results)
         logger.info("Results saved")
 
-        # ✅ wandb 종료
         try:
             import wandb
             if wandb.run is not None:
@@ -1835,10 +1717,13 @@ def main():
 
     # =========================================================
     # [분기 2] Few-shot 학습 (Target Adaptation)
+    # [변경] val 없음, fixed epoch, no early stopping
     # =========================================================
     
-    # 1. Freeze 설정 (GAT Unfreeze 전략)
+    FEW_SHOT_EPOCHS = 30  # UniPredict, TabLLM 따름
+    
     model_few.set_freeze_target()
+    model_few.ghead2.load_state_dict(model_few.ghead.state_dict())
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
     logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
@@ -1846,51 +1731,43 @@ def main():
     R = int(getattr(args, 'support_resamples', 1))
     logger.info(f"[Few-shot] support resamples R = {R}")
 
-    base_state_cpu = {k: v.cpu() for k, v in model_full.state_dict().items()}
+    base_state_cpu = {k: v.cpu() for k, v in model_few.state_dict().items()}
 
     acc = {
-        'train_losses':  init_accum(),
-        'val_losses':    init_accum(),
-        'train_aucs':    init_accum(),
-        'val_aucs':      init_accum(),
-        'train_precs':   init_accum(),
-        'val_precs':     init_accum(),
-        'train_recalls': init_accum(),
-        'val_recalls':   init_accum(),
-        'train_f1s':     init_accum(),
-        'val_f1s':       init_accum(),
-        'train_accs':    init_accum(),
-        'val_accs':      init_accum(),
+        'train_losses':  init_accum(), 'val_losses':    init_accum(),
+        'train_aucs':    init_accum(), 'val_aucs':      init_accum(),
+        'train_precs':   init_accum(), 'val_precs':     init_accum(),
+        'train_recalls': init_accum(), 'val_recalls':   init_accum(),
+        'train_f1s':     init_accum(), 'val_f1s':       init_accum(),
+        'train_accs':    init_accum(), 'val_accs':      init_accum(),
     }
     ep_best_epochs = []
-    ep_test_metrics = [] 
+    ep_test_metrics = []
     y_true_last, y_pred_last = None, None
 
     import numpy as _np
 
     for r in range(R):
         current_seed = args.random_seed + (r + 1)
-        fix_seed(current_seed) 
-        
+        fix_seed(current_seed)
+
         model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
-        model_few.set_freeze_target() 
+        model_few.set_freeze_target()
 
         gat_params_few = []
         global_params_few = []
-        
         for name, p in model_few.named_parameters():
             if not p.requires_grad: continue
-            if 'basis' in name: 
+            if 'basis' in name:
                 gat_params_few.append(p)
             else:
                 global_params_few.append(p)
-        
-        gat_lr_few = args.source_lr_few * 0.1 
-        global_lr_few = args.source_lr_few
-        
-        logger.info(f"[Few-shot][Ep {r+1}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
 
-        # ✅ wandb: episode/seed/lr 기록
+        gat_lr_few = args.source_lr_few * 0.1
+        global_lr_few = args.source_lr_few
+
+        logger.info(f"[Few-shot][Ep {r+1}/{R}] GAT LR: {gat_lr_few} | Global LR: {global_lr_few}")
+
         _wandb_log({
             "few/episode": int(r + 1),
             "few/episode_seed": int(current_seed),
@@ -1905,7 +1782,7 @@ def main():
             ],
             weight_decay=3e-5
         )
-        
+
         warmup_epochs_few = max(1, int(args.warmup_ratio * args.train_epochs))
         scheduler_few = make_warmup_cosine_epochs(
             optimizer_few,
@@ -1913,18 +1790,14 @@ def main():
             warmup_epochs=warmup_epochs_few,
             min_lr_mult=args.min_lr_mult
         )
-        logger.info(f"[Few-shot][Ep {r+1}] LR schedule: warmup_epochs={warmup_epochs_few}, final_mult={args.min_lr_mult}")
+        logger.info(f"[Few-shot][Ep {r+1}/{R}] LR schedule: warmup={warmup_epochs_few}, total={args.train_epochs}")
 
-        if args.few_shot > 0:
-            val_shot = int(math.ceil(args.few_shot * 0.25))
-            val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
-            import copy
-            args_val = copy.deepcopy(args)
-            args_val.few_shot = val_shot 
-            train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-            val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
-        else:
-            train_loader_epi = train_loader_t 
+        import copy as _copy
+        train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
+        val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+        args_val = _copy.deepcopy(args)
+        args_val.few_shot = val_shot
+        val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
 
         (train_losses_few, val_losses_few,
          train_aucs_few,   val_aucs_few,
@@ -1939,25 +1812,23 @@ def main():
 
         (test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few,
          test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
-            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few,
-            mode='Few', args = args
+            model_few, test_loader_t, crit_t, device, is_binary_t,
+            threshold=best_threshold_few, mode='Few', args=args
         )
 
-        logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} AUPRC={test_auprc_few:.4f} ACC={test_acc_few:.4f} "  # ✅ [AUPRC 추가]
-            f"Prec={test_precision_few:.4f} Rec={test_recall_few:.4f} F1={test_f1_few:.4f}")
+        logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} AUPRC={test_auprc_few:.4f} "
+                    f"ACC={test_acc_few:.4f} Prec={test_precision_few:.4f} "
+                    f"Rec={test_recall_few:.4f} F1={test_f1_few:.4f}")
 
-        # ✅ wandb: episode test 결과
         _wandb_log({
             "few_ep/test_loss": float(test_loss_few),
             "few_ep/test_auc": float(test_auc_few),
-            "few_ep/test_auprc": float(test_auprc_few),  
+            "few_ep/test_auprc": float(test_auprc_few),
             "few_ep/test_acc": float(test_acc_few),
             "few_ep/test_precision": float(test_precision_few),
             "few_ep/test_recall": float(test_recall_few),
             "few_ep/test_f1": float(test_f1_few),
             "few_ep/best_epoch": int(best_epoch_few),
-            "few_ep/best_val_auc": float(best_val_auc_few),
-            "few_ep/best_threshold": float(best_threshold_few) if best_threshold_few is not None else None,
             "few_ep/episode": int(r + 1),
         })
 
@@ -1975,33 +1846,37 @@ def main():
         acc['val_accs']      = accum(acc['val_accs'],      val_accs_few)
 
         ep_best_epochs.append(best_epoch_few)
-        ep_test_metrics.append((test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few, test_acc_few))
+        ep_test_metrics.append((test_loss_few, test_auc_few, test_auprc_few,
+                                 test_precision_few, test_recall_few, test_f1_few, test_acc_few))
+        y_true_last, y_pred_last = all_y_true_few, all_y_pred_few
 
-        y_true_last, y_pred_last = all_y_true_few, all_y_pred_few 
-
-    train_losses_few_mean = finalize_mean(acc['train_losses'])
-    val_losses_few_mean   = finalize_mean(acc['val_losses'])
-    train_aucs_few_mean   = finalize_mean(acc['train_aucs'])
-    val_aucs_few_mean     = finalize_mean(acc['val_aucs'])
-    train_precs_few_mean  = finalize_mean(acc['train_precs'])
-    val_precs_few_mean    = finalize_mean(acc['val_precs'])
-    train_recalls_few_mean= finalize_mean(acc['train_recalls'])
-    val_recalls_few_mean  = finalize_mean(acc['val_recalls'])
-    train_f1s_few_mean    = finalize_mean(acc['train_f1s'])
-    val_f1s_few_mean      = finalize_mean(acc['val_f1s'])
-    train_accs_few_mean   = finalize_mean(acc['train_accs'])
-    val_accs_few_mean     = finalize_mean(acc['val_accs'])
+    train_losses_few_mean  = finalize_mean(acc['train_losses'])
+    val_losses_few_mean    = finalize_mean(acc['val_losses'])
+    train_aucs_few_mean    = finalize_mean(acc['train_aucs'])
+    val_aucs_few_mean      = finalize_mean(acc['val_aucs'])
+    train_precs_few_mean   = finalize_mean(acc['train_precs'])
+    val_precs_few_mean     = finalize_mean(acc['val_precs'])
+    train_recalls_few_mean = finalize_mean(acc['train_recalls'])
+    val_recalls_few_mean   = finalize_mean(acc['val_recalls'])
+    train_f1s_few_mean     = finalize_mean(acc['train_f1s'])
+    val_f1s_few_mean       = finalize_mean(acc['val_f1s'])
+    train_accs_few_mean    = finalize_mean(acc['train_accs'])
+    val_accs_few_mean      = finalize_mean(acc['val_accs'])
 
     ep_arr = _np.asarray(ep_test_metrics, dtype=_np.float32)
     mean_test_loss, mean_test_auc, mean_test_auprc, mean_test_prec, mean_test_rec, mean_test_f1, mean_test_acc = ep_arr.mean(axis=0).tolist()
-    Rf = float(max(len(ep_best_epochs), 1))
-    best_epoch_few_mean = int(round(sum(ep_best_epochs) / Rf))
+    std_test_auc   = float(ep_arr[:, 1].std())
+    std_test_auprc = float(ep_arr[:, 2].std())
+    best_epoch_few_mean = int(round(sum(ep_best_epochs) / max(len(ep_best_epochs), 1)))
 
-    # ✅ wandb: few-shot 최종 평균
+    logger.info(f"[Few-shot][Summary] AUC={mean_test_auc:.4f}±{std_test_auc:.4f} AUPRC={mean_test_auprc:.4f}±{std_test_auprc:.4f}")
+
     _wandb_log({
         "few_mean/test_loss": float(mean_test_loss),
         "few_mean/test_auc": float(mean_test_auc),
+        "few_mean/test_auc_std": std_test_auc,
         "few_mean/test_auprc": float(mean_test_auprc),
+        "few_mean/test_auprc_std": std_test_auprc,
         "few_mean/test_acc": float(mean_test_acc),
         "few_mean/test_precision": float(mean_test_prec),
         "few_mean/test_recall": float(mean_test_rec),
@@ -2010,46 +1885,12 @@ def main():
     })
     _wandb_summary_set({
         "final/few_shot_test_auc_mean": float(mean_test_auc),
+        "final/few_shot_test_auc_std": std_test_auc,
         "final/few_shot_test_auprc_mean": float(mean_test_auprc),
         "final/few_shot_test_acc_mean": float(mean_test_acc),
-        "final/few_shot_best_epoch_mean": int(best_epoch_few_mean),
     })
 
-    # 결과 래핑
-    if full_metrics is not None:
-        full_test_auprc = compute_auprc(full_metrics["all_y_true_full"], full_metrics["all_y_pred_full"])  # ✅ [AUPRC 추가]
-        full_ours_results = wrap_up_results_(
-            train_losses=full_metrics['train_losses_full'],
-            val_losses=full_metrics['val_losses_full'],
-            test_losses=full_metrics['test_losses_full'],
-            train_aucs=full_metrics['train_aucs_full'],
-            val_aucs=full_metrics['val_aucs_full'],
-            test_aucs=[full_metrics['test_auc_full']],
-            train_precisions=full_metrics['train_precisions_full'],
-            val_precisions=full_metrics['val_precisions_full'],
-            test_precisions=[full_metrics['test_precision_full']],
-            train_recalls=full_metrics['train_recalls_full'],
-            val_recalls=full_metrics['val_recalls_full'],
-            test_recalls=[full_metrics['test_recall_full']],
-            train_f1s=full_metrics['train_f1s_full'],
-            val_f1s=full_metrics['val_f1s_full'],
-            test_f1s=[full_metrics['test_f1_full']],
-            all_y_true=[full_metrics['all_y_true_full']],
-            all_y_pred=[full_metrics['all_y_pred_full']],
-            best_epoch=full_metrics['best_epoch_full'],
-            best_ours_auc=full_metrics['test_auc_full'],
-            best_ours_acc=full_metrics['test_acc_full'],
-            best_ours_precision=full_metrics['test_precision_full'],
-            best_ours_recall=full_metrics['test_recall_full'],
-            best_ours_f1=full_metrics['test_f1_full'],
-            train_accs=full_metrics['train_accs_full'],
-            val_accs=full_metrics['val_accs_full'],
-            test_accs=[full_metrics['test_acc_full']], 
-            test_auprcs=[full_test_auprc],
-            best_ours_auprc=full_test_auprc
-        )
-    else:
-        full_ours_results = None
+    full_ours_results = None
 
     few_ours_results = wrap_up_results_(
         train_losses_few_mean, val_losses_few_mean, [],
@@ -2061,13 +1902,12 @@ def main():
         best_epoch_few_mean, mean_test_auc, mean_test_acc,
         mean_test_prec, mean_test_rec, mean_test_f1,
         train_accs=train_accs_few_mean, val_accs=val_accs_few_mean, test_accs=[mean_test_acc],
-        test_auprcs = [mean_test_auprc],
+        test_auprcs=[mean_test_auprc],
         best_ours_auprc=mean_test_auprc
     )
 
     results = prepare_results_(full_ours_results, few_ours_results)
 
-    # 9) 저장
     logger.info("Saving results...")
     import copy
     args_for_save = copy.deepcopy(args)
@@ -2080,7 +1920,6 @@ def main():
     logger.info("Results saved")
     logger.info(f"Total experiment time: {format_time(time.time() - start_time)}")
 
-    # ✅ wandb: 종료 전 최종 시간/종료
     _wandb_log({"exp/total_time_sec": float(time.time() - start_time)})
     try:
         import wandb
