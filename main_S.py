@@ -1720,10 +1720,10 @@ def main():
     # [변경] val 없음, fixed epoch, no early stopping
     # =========================================================
     
-    FEW_SHOT_EPOCHS = 30  # UniPredict, TabLLM 따름
+    FEW_SHOT_EPOCHS = 90  # UniPredict, TabLLM 따름
     
     model_few.set_freeze_target()
-    model_few.ghead2.load_state_dict(model_few.ghead.state_dict())  # ghead → ghead2 복사
+    #model_few.ghead2.load_state_dict(model_few.ghead.state_dict())  # ghead → ghead2 복사
 
     trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
     logger.info("Few-shot trainable params:\n" + "\n".join(trainables))

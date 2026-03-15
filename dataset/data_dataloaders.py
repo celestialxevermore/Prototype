@@ -401,7 +401,7 @@ def prepare_embedding_dataloaders(args, dataset_name, is_source=False):
         print(f"[Source] Validation data size: {len(val_dataset)}")
     else:
         train_idx, test_idx = train_test_split(
-            indices, test_size=0.5, 
+            indices, test_size=0.2, 
             stratify=labels, 
             random_state = args.random_seed
         )
