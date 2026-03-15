@@ -340,7 +340,7 @@ def prepare_few_shot_dataloaders(X_train_few, y_train_few, val_loader, test_load
     }
 
 
-def prepare_embedding_dataloaders(args, dataset_name):
+def prepare_embedding_dataloaders(args, dataset_name, is_source=False):
     """저장된 embedding 데이터를 로드하고 train/val/test로 분할한 뒤 DataLoader로 변환"""
     
     '''
@@ -382,39 +382,8 @@ def prepare_embedding_dataloaders(args, dataset_name):
     labels = [emb['y'].item() for emb in embeddings]
     num_classes = data['num_classes']
     
-
-
-    if dataset_name == "heart_disease_clean":
-        print("Using custom sampling : 100 random samples (60/20/20 split)")
-        total_indices = np.arange(len(embeddings))
-        np.random.shuffle(total_indices)
-        selected_indices = total_indices[:100]
-        embeddings = [embeddings[i] for i in selected_indices]
-        labels = [labels[i] for i in selected_indices]
-        
     # Train/Val/Test Split (60/20/20)
     indices = list(range(len(embeddings)))
-    train_val_idx, test_idx = train_test_split(
-        indices, test_size=0.2,
-        stratify=labels,
-        random_state=args.random_seed
-    )
-    
-    train_val_embeddings = [embeddings[i] for i in train_val_idx]
-    train_val_labels = [labels[i] for i in train_val_idx]
-    
-    train_idx, val_idx = train_test_split(
-        list(range(len(train_val_embeddings))),
-        test_size=0.25,
-        stratify=train_val_labels,
-        random_state=args.random_seed
-    )
-    
-    # Split datasets
-    train_dataset = [train_val_embeddings[i] for i in train_idx]
-    val_dataset = [train_val_embeddings[i] for i in val_idx]
-    test_dataset = [embeddings[i] for i in test_idx]
-    
 
     '''
         2025.12.08 수정
@@ -427,17 +396,50 @@ def prepare_embedding_dataloaders(args, dataset_name):
         np.random.seed(worker_seed)
         random.seed(worker_seed)
     print(f">>> [DataLoader] Created isolated generator with seed {args.random_seed}")
+
+    if is_source:
+        train_idx, val_idx = train_test_split(
+            indices, test_size=0.15, 
+            stratify=labels, 
+            random_state = args.random_seed
+        )
+        train_dataset = [embeddings[i] for i in train_idx]
+        val_dataset = [embeddings[i] for i in val_idx]
+        test_dataset = [] 
+
+        print(f"[Source] Training data size: {len(train_dataset)}")
+        print(f"[Source] Validation data size: {len(val_dataset)}")
+    else:
+        train_val_idx, test_idx = train_test_split(
+        indices, test_size=0.2,
+        stratify=labels,
+        random_state=args.random_seed
+        )
+        train_val_embeddings = [embeddings[i] for i in train_val_idx]
+        train_val_labels = [labels[i] for i in train_val_idx]
+        
+        train_idx, val_idx = train_test_split(
+            list(range(len(train_val_embeddings))),
+            test_size=0.2,  # train pool의 20% → XTFORMER 방식
+            stratify=train_val_labels,
+            random_state=args.random_seed
+        )
+        train_dataset = [train_val_embeddings[i] for i in train_idx]
+        val_dataset   = [train_val_embeddings[i] for i in val_idx]
+        test_dataset  = [embeddings[i] for i in test_idx]
+
     # DataLoader 생성
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size = args.batch_size, 
         shuffle=True,
         generator=loader_generator,
-        worker_init_fn=seed_worker,
+        worker_init_fn=seed_worker, 
         num_workers=0
-
-    )
+    ) if len(train_dataset) > 0 else None 
     
+
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -445,8 +447,8 @@ def prepare_embedding_dataloaders(args, dataset_name):
         generator=loader_generator,
         worker_init_fn=seed_worker,
         num_workers=0
-    )
-    
+    ) if len(val_dataset) > 0 else None
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
@@ -454,12 +456,8 @@ def prepare_embedding_dataloaders(args, dataset_name):
         generator=loader_generator,
         worker_init_fn=seed_worker,
         num_workers=0
-    )
-    
-    print(f"Training data size: {len(train_dataset)}")
-    print(f"Validation data size: {len(val_dataset)}")
-    print(f"Test data size: {len(test_dataset)}")
-    
+    ) if len(test_dataset) > 0 else None
+
     return {
         'loaders': (train_loader, val_loader, test_loader),
         'num_classes': num_classes

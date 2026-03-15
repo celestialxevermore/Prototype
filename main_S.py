@@ -478,7 +478,7 @@ def make_step(loaders, mode='random', seed=42):
 
 
 def load_one(args, name):
-    res = prepare_embedding_dataloaders(args, name)
+    res = prepare_embedding_dataloaders(args, name, is_source=True)
     train_loader, val_loader, test_loader = res['loaders']
     num_classes = res['num_classes']
     return train_loader, val_loader, test_loader, num_classes
@@ -1687,7 +1687,7 @@ def main():
 
     # Target Data Load
     logger.info(f"[Target] target = {args.target_data}")
-    r_t = prepare_embedding_dataloaders(args, args.target_data)
+    r_t = prepare_embedding_dataloaders(args, args.target_data, is_source=False)
     train_loader_t, val_loader_t, test_loader_t = r_t['loaders']
     num_classes_t = r_t['num_classes']
     args.num_classes = num_classes_t
