@@ -1746,7 +1746,14 @@ def main():
     y_true_last, y_pred_last = None, None
 
     import numpy as _np
-
+    
+    import copy as _copy
+    train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
+    val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+    args_val = _copy.deepcopy(args)
+    args_val.few_shot = val_shot
+    fix_seed(args.random_seed)
+    val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
     for r in range(R):
         current_seed = args.random_seed + (r + 1)
         fix_seed(current_seed)
@@ -1792,12 +1799,12 @@ def main():
         )
         logger.info(f"[Few-shot][Ep {r+1}/{R}] LR schedule: warmup={warmup_epochs_few}, total={args.train_epochs}")
 
-        import copy as _copy
-        train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-        val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
-        args_val = _copy.deepcopy(args)
-        args_val.few_shot = val_shot
-        val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
+        # import copy as _copy
+        # train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
+        # val_shot = max(5, int(math.ceil(args.few_shot * 0.25)))
+        # args_val = _copy.deepcopy(args)
+        # args_val.few_shot = val_shot
+        # val_loader_epi = get_few_shot_embedding_samples(val_loader_t, args_val)
 
         (train_losses_few, val_losses_few,
          train_aucs_few,   val_aucs_few,
