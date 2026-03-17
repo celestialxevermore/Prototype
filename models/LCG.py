@@ -148,53 +148,67 @@ class GraphQuantizer(nn.Module):
         B, N, D = src_feat.shape
 
         if self.args.feat_distance == "cosine":
-            src_norm = F.normalize(src_feat, dim = -1)
-            tgt_norm = F.normalize(tgt_feat, dim = -1)
-            cos_sim = torch.bmm(src_norm, tgt_norm.transpose(1,2))
+            src_norm = F.normalize(src_feat, dim=-1)
+            tgt_norm = F.normalize(tgt_feat, dim=-1)
+            cos_sim = torch.bmm(src_norm, tgt_norm.transpose(1, 2))
             M_cost = 1.0 - torch.exp(-(1.0 - cos_sim))
         elif self.args.feat_distance == "l2":
-            dist_sq = torch.cdist(src_feat, tgt_feat, p = 2) ** 2
+            dist_sq = torch.cdist(src_feat, tgt_feat, p=2) ** 2
             M_raw = dist_sq / float(D)
             with torch.no_grad():
                 q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
-            M_cost = M_raw / q90 
+            M_cost = M_raw / q90
 
-        # ====== put this block inside compute_fgw() after you define M_cost ======
+        # ====== Scale Normalization (여기부터 새로 추가) ======
+        with torch.no_grad():
+            feat_mean = M_cost.detach().mean()
+            struct_mean_src = src_str.detach().mean()
+            struct_mean_tgt = tgt_str.detach().mean()
+            struct_mean = (struct_mean_src + struct_mean_tgt) / 2
+            scale_ratio = feat_mean / struct_mean.clamp_min(1e-8)
+
+        src_str_scaled = src_str * scale_ratio
+        tgt_str_scaled = tgt_str * scale_ratio
+        # ====== Scale Normalization 끝 ======
+
+        # ====== Logging ======
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
             with torch.no_grad():
                 self.logger.info(f"\n[COST/RANGE CHECK] Step {int(self.log_step)}")
 
-                # ---- dist_norm (=M_cost if you use it) ----
                 y = M_cost.detach().float().flatten()
                 qy = torch.quantile(y, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=y.device))
                 self.logger.info(f"  [dist_sq/D] mean={y.mean().item():.4f} std={y.std().item():.4f} max={y.max().item():.4f}")
                 self.logger.info(f"    q00={qy[0].item():.4f} q50={qy[1].item():.4f} q90={qy[2].item():.4f} "
                                 f"q95={qy[3].item():.4f} q99={qy[4].item():.4f} q100={qy[5].item():.4f}")
 
-                # ---- src_str / tgt_str ----
-                cs = src_str.detach().float().flatten()
+                # ---- Pre-scaling struct ----
+                cs_pre = src_str.detach().float().flatten()
+                ct_pre = tgt_str.detach().float().flatten()
+                self.logger.info(f"  [PRE-SCALE] src_str mean={cs_pre.mean().item():.4f} | tgt_str mean={ct_pre.mean().item():.4f}")
+
+                # ---- Post-scaling struct ----
+                cs = src_str_scaled.detach().float().flatten()
+                ct = tgt_str_scaled.detach().float().flatten()
+                self.logger.info(f"  [POST-SCALE] src_str mean={cs.mean().item():.4f} | tgt_str mean={ct.mean().item():.4f} | scale_ratio={scale_ratio.item():.4f}")
+
                 qcs = torch.quantile(cs, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=cs.device))
                 self.logger.info(f"  [CS=src_str] mean={cs.mean().item():.4f} std={cs.std().item():.4f} "
                                 f"min={cs.min().item():.4f} max={cs.max().item():.4f}")
                 self.logger.info(f"    q00={qcs[0].item():.4f} q50={qcs[1].item():.4f} q90={qcs[2].item():.4f} "
                                 f"q95={qcs[3].item():.4f} q99={qcs[4].item():.4f} q100={qcs[5].item():.4f}")
 
-                ct = tgt_str.detach().float().flatten()
                 qct = torch.quantile(ct, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=ct.device))
                 self.logger.info(f"  [CT=tgt_str] mean={ct.mean().item():.4f} std={ct.std().item():.4f} "
                                 f"min={ct.min().item():.4f} max={ct.max().item():.4f}")
                 self.logger.info(f"    q00={qct[0].item():.4f} q50={qct[1].item():.4f} q90={qct[2].item():.4f} "
                                 f"q95={qct[3].item():.4f} q99={qct[4].item():.4f} q100={qct[5].item():.4f}")
 
-
-
-
-        
         a = torch.ones(src_feat.shape[0], src_feat.shape[1], device=src_feat.device) / src_feat.shape[1]
         b = torch.ones(tgt_feat.shape[0], tgt_feat.shape[1], device=tgt_feat.device) / tgt_feat.shape[1]
 
         result = solve_gromov_batch(
-            src_str, tgt_str, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b, 
+            src_str_scaled, tgt_str_scaled, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b,
             max_iter=10, tol=1e-3, grad='envelope'
         )
 
@@ -305,24 +319,24 @@ class GraphQuantizer(nn.Module):
         # =========================================================================
         pi = torch.softmax(-d_commit / self.soft_tau, dim=1)
         
-        # (1) Dead penalty + Margin
-        p = pi.mean(dim=0)
-        M = pi.shape[1] 
+        # # (1) Dead penalty + Margin
+        # p = pi.mean(dim=0)
+        # M = pi.shape[1] 
 
-        min_p = p.min()
-        dead_penalty = torch.clamp(0.02 - min_p, min=0.0) * M 
+        # min_p = p.min()
+        # dead_penalty = torch.clamp(0.02 - min_p, min=0.0) * M 
 
-        sorted_pi, _ = pi.sort(dim=1, descending=True)
-        margin_loss = -torch.clamp(sorted_pi[:, 0] - sorted_pi[:, 1] - 0.05, max=0.0).mean()
+        # sorted_pi, _ = pi.sort(dim=1, descending=True)
+        # margin_loss = -torch.clamp(sorted_pi[:, 0] - sorted_pi[:, 1] - 0.05, max=0.0).mean()
 
-        # (2) LCG Orthogonalization 
-        centroids = lcg_feat.mean(dim=1)
-        centroids_norm = F.normalize(centroids, dim=-1)
-        gram = centroids_norm @ centroids_norm.t() 
-        orth_loss = (gram - torch.eye(M, device=gram.device)).pow(2).mean()
+        # # (2) LCG Orthogonalization 
+        # centroids = lcg_feat.mean(dim=1)
+        # centroids_norm = F.normalize(centroids, dim=-1)
+        # gram = centroids_norm @ centroids_norm.t() 
+        # orth_loss = (gram - torch.eye(M, device=gram.device)).pow(2).mean()
         
-        reg_loss = dead_penalty + 0.1 * margin_loss + self.orth_reg * orth_loss
-
+        # reg_loss = dead_penalty + 0.1 * margin_loss + self.orth_reg * orth_loss
+        reg_loss = torch.tensor(0.0, device=pi.device)
         # =========================================================================
         # Logging
         # =========================================================================
@@ -368,10 +382,10 @@ class GraphQuantizer(nn.Module):
                 for s in range(min(2, B)):
                     best = pi_np[s].argmax()
                     self.logger.info(f"   >>> Sample {s} Pi: {np.array2string(pi_np[s], precision=4)} | best=LCG{best}({pi_np[s,best]:.3f})")
-                self.logger.info(
-                    f"[REG] Dead={dead_penalty:.4f} | Margin={margin_loss:.4f} | Orth={orth_loss:.4f} | "
-                    f"weighted_orth={self.orth_reg * orth_loss:.4f} | total_reg={reg_loss:.4f}"
-                )
+                # self.logger.info(
+                #     f"[REG] Dead={dead_penalty:.4f} | Margin={margin_loss:.4f} | Orth={orth_loss:.4f} | "
+                #     f"weighted_orth={self.orth_reg * orth_loss:.4f} | total_reg={reg_loss:.4f}"
+                # )
         # =========================================================================
         # Step 5: Barycentric pushforward
         # =========================================================================
