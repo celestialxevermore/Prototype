@@ -121,7 +121,7 @@ class Model(nn.Module):
                     nn_init.zeros_(m.bias)
 
     def set_freeze_target(self):
-        for p in self.parameters(): p.requires_grad = False
+        for p in self.parameters(): p.requires_grad = True
         #for p in self.gnn_experts.parameters(): p.requires_grad = True
         for p in self.latent_graph.parameters(): p.requires_grad = True
         for p in self.ghead2.parameters(): p.requires_grad = True
@@ -147,7 +147,7 @@ class Model(nn.Module):
             reg_loss = self.reg_loss 
             current_mode = getattr(self, 'mode', 'Full')
             if current_mode == 'Few':
-                total_loss = global_loss #+ (self.args.fgw_alpha * fgw_loss)
+                total_loss = global_loss + (self.args.fgw_alpha * reg_loss)
             else: 
                 total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
             return total_loss
