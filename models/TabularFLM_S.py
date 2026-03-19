@@ -123,7 +123,9 @@ class Model(nn.Module):
     def set_freeze_target(self):
         for p in self.parameters(): p.requires_grad = True
         #for p in self.gnn_experts.parameters(): p.requires_grad = True
-        for p in self.latent_graph.parameters(): p.requires_grad = True
+        for p in self.basis_layers.parameters(): p.requires_grad = True 
+        for p in self.basis_layer_norms.parameters(): p.requires_grad = True
+        #for p in self.latent_graph.parameters(): p.requires_grad = True
         for p in self.ghead2.parameters(): p.requires_grad = True
     # ---- training ----
     def forward(self, batch, y):
@@ -150,6 +152,21 @@ class Model(nn.Module):
                 total_loss = global_loss + (self.args.fgw_alpha * reg_loss)
             else: 
                 total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
+            
+            if hasattr(self, '_log_step_count'):
+                self._log_step_count += 1
+            else:
+                self._log_step_count = 1
+            if self._log_step_count % 50 == 0:
+                import logging
+                logger = logging.getLogger("my_experiment_logger")
+                logger.info(
+                    f"[LOSS] Step {self._log_step_count} | mode={current_mode} | "
+                    f"local={local_loss.item():.4f} | global={global_loss.item():.4f} | "
+                    f"reg={reg_loss.item():.4f} | weighted_reg={self.args.fgw_alpha * reg_loss.item():.4f} | "
+                    f"total={total_loss.item():.4f}"
+                )
+            
             return total_loss
 
     # ---- inference ----

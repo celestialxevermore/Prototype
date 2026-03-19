@@ -33,7 +33,7 @@ class lightGraphNeuralNet(nn.Module):
         """
 
         # Message Passing 
-        agg = torch.bmm(Ay_sel, Fy_res)
+        agg = torch.bmm(1-Ay_sel, Fy_res)
         agg = F.relu(self.linear(agg))
         update = self.update(self.dropout(agg))
 

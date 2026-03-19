@@ -159,17 +159,21 @@ class GraphQuantizer(nn.Module):
                 q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
             M_cost = M_raw / q90
 
-        # ====== Scale Normalization (여기부터 새로 추가) ======
-        with torch.no_grad():
-            feat_mean = M_cost.detach().mean()
-            struct_mean_src = src_str.detach().mean()
-            struct_mean_tgt = tgt_str.detach().mean()
-            struct_mean = (struct_mean_src + struct_mean_tgt) / 2
-            scale_ratio = feat_mean / struct_mean.clamp_min(1e-8)
+        exp_mode = getattr(self.args, 'exp_mode', 'EXP1')
+        if exp_mode != 'EXP1':  # EXP3 이상은 모두 scaling 적용
+            with torch.no_grad():
+                feat_mean = M_cost.detach().mean()
+                struct_mean_src = src_str.detach().mean()
+                struct_mean_tgt = tgt_str.detach().mean()
+                struct_mean = (struct_mean_src + struct_mean_tgt) / 2
+                scale_ratio = feat_mean / struct_mean.clamp_min(1e-8)
 
-        src_str_scaled = src_str * scale_ratio
-        tgt_str_scaled = tgt_str * scale_ratio
-        # ====== Scale Normalization 끝 ======
+            src_str_scaled = src_str * scale_ratio
+            tgt_str_scaled = tgt_str * scale_ratio
+        else:
+            src_str_scaled = src_str
+            tgt_str_scaled = tgt_str
+            scale_ratio = torch.tensor(1.0)
 
         # ====== Logging ======
         if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
@@ -319,6 +323,17 @@ class GraphQuantizer(nn.Module):
         # =========================================================================
         pi = torch.softmax(-d_commit / self.soft_tau, dim=1)
         
+        exp_mode = getattr(self.args, 'exp_mode', 'EXP1')
+        if exp_mode.startswith('EXP3_reg'):  # EXP3_reg, EXP3_reg_alpha05, EXP3_reg_alpha05_fgwalpha1
+            p = pi.mean(dim=0)
+            H_max = math.log(M)
+            H_p = -(p * (p + 1e-9).log()).sum() / H_max
+            pi_safe = pi.clamp_min(1e-12)
+            H_s = -(pi_safe * pi_safe.log()).sum(dim=1).mean() / H_max
+            reg_loss = 1.0 * (1 - H_p) ** 2 + 0.1 * H_s
+        else:  # EXP1, EXP3
+            reg_loss = torch.tensor(0.0, device=pi.device)
+        
         # # (1) Dead penalty + Margin
         # p = pi.mean(dim=0)
         # M = pi.shape[1] 
@@ -336,19 +351,35 @@ class GraphQuantizer(nn.Module):
         # orth_loss = (gram - torch.eye(M, device=gram.device)).pow(2).mean()
         
         # reg_loss = dead_penalty + 0.1 * margin_loss + self.orth_reg * orth_loss
-        reg_loss = torch.tensor(0.0, device=pi.device)
+        #reg_loss = torch.tensor(0.0, device=pi.device)
+        # pi = torch.softmax(-d_commit / self.soft_tau, dim=1)
+        # #reg_loss = torch.tensor(0.0, device=pi.device)
+        # #Coordinate-level regularization
+        # p = pi.mean(dim=0)
+        # H_max = math.log(M)
+        
+        # # H_p: population entropy (높을수록 골고루)
+        # H_p = -(p * (p + 1e-9).log()).sum() / H_max
+        
+        # # H_s: sample entropy (낮을수록 sharp)
+        # pi_safe = pi.clamp_min(1e-12)
+        # H_s = -(pi_safe * pi_safe.log()).sum(dim=1).mean() / H_max
+        
+        # reg_loss = 1.0 * (1 - H_p) ** 2 + 0.1 * H_s
         # =========================================================================
         # Logging
         # =========================================================================
         if self.log_step % self.log_interval == 0:
             with torch.no_grad():
                 step = int(self.log_step)
+                exp_mode = getattr(self.args, 'exp_mode', 'EXP1')
+
 
                 d_min, d_max = d_commit.min().item(), d_commit.max().item()
                 d_mean, d_std = d_commit.mean().item(), d_commit.std().item()
                 per_range = d_commit.max(dim=1).values - d_commit.min(dim=1).values
 
-                self.logger.info(f"\n[DCOMMIT] Step {step} | Epoch {self.current_epoch}")
+                self.logger.info(f"\n[DCOMMIT] Step {step} | Epoch {self.current_epoch} | exp_mode={exp_mode}")
                 self.logger.info(f"   >>> d_commit: mean={d_mean:.6f}, std={d_std:.6f}, min={d_min:.6f}, max={d_max:.6f}")
                 self.logger.info(f"   >>> per-sample gap: mean={per_range.mean():.6f}, min={per_range.min():.6f}, max={per_range.max():.6f}")
 

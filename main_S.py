@@ -126,7 +126,7 @@ def get_args():
     parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
     parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2'])
     parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
-
+    parser.add_argument('--exp_mode', default = 'EXP3_reg_alpha05_fgwalpha1', choices =['EXP1', 'EXP3', 'EXP3_reg', 'EXP3_reg_alpha05', 'EXP3_reg_alpha05_fgwalpha1'])
     # Experiments Resampling
     parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
     parser.add_argument('--warmup_ratio', type=float, default=0.06,
@@ -1720,7 +1720,7 @@ def main():
     # [변경] val 없음, fixed epoch, no early stopping
     # =========================================================
     
-    FEW_SHOT_EPOCHS = 30  # UniPredict, TabLLM 따름
+    FEW_SHOT_EPOCHS = 90  # UniPredict, TabLLM 따름
     
     model_few.set_freeze_target()
     model_few.ghead2.load_state_dict(model_few.ghead.state_dict())  # ghead → ghead2 복사
@@ -1762,8 +1762,8 @@ def main():
             else:
                 head_params_few.append(p)
         
-        gat_lr_few = args.source_lr_few * 0.1 
-        lcg_lr_few = args.source_lr_few * 0.1
+        gat_lr_few = args.source_lr_few #* 0.1 
+        lcg_lr_few = args.source_lr_few #* 0.1
         head_lr_few = args.source_lr_few
         
         logger.info(f"[Few-shot][Ep {r+1}/{R}] GAT LR: {gat_lr_few} | LCG LR: {lcg_lr_few} | Head LR: {head_lr_few}")
