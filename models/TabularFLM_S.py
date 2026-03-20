@@ -121,7 +121,7 @@ class Model(nn.Module):
                     nn_init.zeros_(m.bias)
 
     def set_freeze_target(self):
-        for p in self.parameters(): p.requires_grad = True
+        for p in self.parameters(): p.requires_grad = False
         #for p in self.gnn_experts.parameters(): p.requires_grad = True
         for p in self.basis_layers.parameters(): p.requires_grad = True 
         for p in self.basis_layer_norms.parameters(): p.requires_grad = True
