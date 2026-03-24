@@ -138,7 +138,8 @@ def get_args():
 
 WANDB_KEYS = [
     "alpha", "tau", "soft_tau", "vq_beta",
-    "source_lr", "source_lr_few", "dropout_rate"
+    "source_lr", "source_lr_few", "dropout_rate",
+    "fgw_alpha", "few_shot", "random_seed", "entropy_reg"
 ]
 def wandb_make_serializable_config(args):
     """args -> wandb.config에 안전하게 들어가도록 직렬화 가능한 dict로 변환"""
@@ -1557,8 +1558,7 @@ def main():
                 _ = model_full.predict(batch, return_all=True)
                 pi = model_full.graph_quantizer.last_pi
                 logger.info(f"[INIT CHECK] {src_name}: mean pi={pi.mean(0).cpu().numpy().round(4)}")
-                logger.info(f"[INIT CHECK] {src_name}: argmax counts={torch.bincount(pi.argmax(1), minlength=pi.shape[1]).cpu().numpy()}")
-                
+                logger.info(f"[INIT CHECK] {src_name}: argmax counts={torch.bincount(pi.argmax(1).cpu(), minlength=pi.shape[1]).numpy()}")                
         fix_seed(args.random_seed)
 
         # --- [Step 3] Phase 2: Joint Training ---
@@ -1719,8 +1719,18 @@ def main():
     # [변경] val 없음, fixed epoch, no early stopping
     # =========================================================
     
-    FEW_SHOT_EPOCHS = 60  # UniPredict, TabLLM 따름
+    #FEW_SHOT_EPOCHS = 60  # UniPredict, TabLLM 따름
     
+    total_shot = args.few_shot * args.num_classes
+
+    FEW_SHOT_EPOCHS = 2 if total_shot <= 16 else 60
+    lr_scale = 0.1 if total_shot <= 16 else 1.0
+
+    gat_lr_few = args.source_lr_few * lr_scale
+    lcg_lr_few = args.source_lr_few * lr_scale
+    head_lr_few = args.source_lr_few
+
+
     model_few.set_freeze_target()
     model_few.ghead2.load_state_dict(model_few.ghead.state_dict())  # ghead → ghead2 복사
 
@@ -1761,9 +1771,9 @@ def main():
             else:
                 head_params_few.append(p)
         
-        gat_lr_few = args.source_lr_few #* 0.1 
-        lcg_lr_few = args.source_lr_few #* 0.1
-        head_lr_few = args.source_lr_few
+        # gat_lr_few = args.source_lr_few #* 0.1 
+        # lcg_lr_few = args.source_lr_few #* 0.1
+        # head_lr_few = args.source_lr_few
         
         logger.info(f"[Few-shot][Ep {r+1}/{R}] GAT LR: {gat_lr_few} | LCG LR: {lcg_lr_few} | Head LR: {head_lr_few}")
 

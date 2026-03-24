@@ -1,0 +1,32 @@
+program: main_S.py
+method: bayes
+
+metric:
+  name: few_mean/test_auc
+  goal: maximize
+
+parameters:
+  random_seed:
+    values: [44]
+  alpha:
+    values: [0.3, 0.4, 0.5, 0.6]
+  fgw_alpha:
+    values: [0.5, 1.0, 1.5]
+  soft_tau:
+    values: [0.01, 0.02, 0.05, 0.1]
+  source_lr:
+    values: [5e-4, 1e-3, 2e-3]
+  source_lr_few:
+    values: [5e-5, 1e-4, 3e-4]
+  dropout_rate:
+    values: [0.1, 0.2, 0.3]
+  few_shot:
+    values: [32]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}
+  - --base_dir
+  - sweep_test20260320
