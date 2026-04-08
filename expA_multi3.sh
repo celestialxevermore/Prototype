@@ -1,0 +1,63 @@
+#!/bin/bash
+# ================================================================================
+# Exp A — Case 1 + Case 2 (alpha 0.6~0.8, all seeds)
+# 2026.04.04
+# ================================================================================
+gpu_id=3
+random_seeds="42 44 46 48 50"
+alphas="0.6 0.7 0.8"
+base_dir="expA_20260404"
+
+ALL_SOURCES="Medicaldataset Cardiovascular_Disease_Dataset Heart_disease_statlog Erbil_Cardiovascular_Health_Dataset cardio_SAheart heart_failure_clinical_records heart"
+
+echo "=== [Case 1] alpha=0.6~0.8 ==="
+for alpha in $alphas; do
+    for seed in $random_seeds; do
+        echo "[Case1] alpha=${alpha}, seed=${seed}"
+        CUDA_VISIBLE_DEVICES=$gpu_id OMP_NUM_THREADS=10 python main_E.py \
+            --exp_mode case1 \
+            --sampling_alpha $alpha \
+            --source_data $ALL_SOURCES \
+            --target_data heart \
+            --random_seed $seed \
+            --base_dir $base_dir \
+            --alpha 0.7 \
+            --fgw_alpha 1 \
+            --tau 0.2 \
+            --soft_tau 0.005 \
+            --vq_beta 0.2 \
+            --entropy_reg 0.01 \
+            --dropout_rate 0.3 \
+            --source_lr 0.001 \
+            --source_lr_few 0.0001 \
+            --struct_hidden_dim 192 \
+            --num_basis_layers 2
+    done
+done
+
+echo "=== [Case 2] alpha=0.6~0.8 ==="
+for alpha in $alphas; do
+    for seed in $random_seeds; do
+        echo "[Case2] alpha=${alpha}, seed=${seed}"
+        CUDA_VISIBLE_DEVICES=$gpu_id OMP_NUM_THREADS=10 python main_E.py \
+            --exp_mode case2 \
+            --sampling_alpha $alpha \
+            --source_data $ALL_SOURCES \
+            --target_data heart \
+            --random_seed $seed \
+            --base_dir $base_dir \
+            --alpha 0.7 \
+            --fgw_alpha 1 \
+            --tau 0.2 \
+            --soft_tau 0.005 \
+            --vq_beta 0.2 \
+            --entropy_reg 0.01 \
+            --dropout_rate 0.3 \
+            --source_lr 0.001 \
+            --source_lr_few 0.0001 \
+            --struct_hidden_dim 192 \
+            --num_basis_layers 2
+    done
+done
+
+echo "=== 완료 ==="

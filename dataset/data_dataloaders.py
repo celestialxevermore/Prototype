@@ -510,6 +510,43 @@ def get_few_shot_embedding_samples(train_loader, args):
    
    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
 
+def get_few_shot_embedding_samples_(train_loader, args, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+    else:
+        np.random.seed(args.random_seed)
+        random.seed(args.random_seed)
+    
+    dataset = train_loader.dataset
+    labels = [data['y'].item() for data in dataset]
+    num_classes = len(set(labels))
+    
+    shot_per_class = args.few_shot
+    
+    support_data = []
+    selected_indices = []
+    for cls in range(num_classes):
+        cls_data = [(i, data) for i, data in enumerate(dataset) if data['y'].item() == cls]
+        
+        if len(cls_data) < shot_per_class:
+            selected = random.choices(cls_data, k=shot_per_class)
+        else:
+            selected = random.sample(cls_data, k=shot_per_class)
+        
+        for idx, data in selected:
+            support_data.append(data)
+            selected_indices.append(idx)
+    
+    print(f"[Seed={seed}] Selected indices: {sorted(selected_indices)}")
+    
+    return DataLoader(support_data, batch_size=args.batch_size, shuffle=True)
+
+
+
+
+
+
 '''
     2025.12.08 ge_few_shot_embedding_samples 수정
     def get_few_shot_embedding_samples(train_loader, args):
@@ -686,3 +723,144 @@ def load_tabular_and_split(args, DATASETS, dataset_name, few_shot=False):
 
     pdb.set_trace()
     return train_loader, val_loader, test_loader, num_classes
+
+
+'''
+    2026.04.02 추가
+    ================================================================================
+    Exp A / Exp B 전용 데이터 로더 함수들
+    ================================================================================
+
+    Source split: train 60% / val 20% / test 20%  (stratified, seed=42 고정)
+    - Test + Val index는 최초 1회 생성 → .npy 파일로 저장 → 이후 모든 실험에서 로드
+    - α scaling은 train set에만 적용 (val, test는 항상 고정)
+
+    사용 함수:
+    1. generate_and_save_split_indices()  — 최초 1회: split index 생성 및 저장
+    2. prepare_exp_embedding_dataloaders() — Exp A/B 메인 로더: index 로드 → α sampling → DataLoader 반환
+'''
+
+def generate_and_save_split_indices(args, source_list):
+    """
+    [2026.04.02 수정] .npy 저장 방식 제거.
+    test split은 prepare_exp_embedding_dataloaders에서 args.random_seed로 on-the-fly 생성.
+    이 함수는 하위 호환을 위해 남겨두되, 아무 동작도 하지 않음.
+    """
+    pass
+
+
+def prepare_exp_embedding_dataloaders(args, dataset_name, alpha=1.0, mode='multi'):
+    """
+    Exp A / Exp B 전용 데이터 로더.
+    args.random_seed를 사용하여 on-the-fly로 test/train/val을 구성한다.
+
+    Split 구조:
+        1. 전체 데이터를 args.random_seed 기준으로 80/20 stratified split → train pool / test
+        2. train pool에서 α 비율만큼 stratified sampling → active pool
+        3. active pool을 75/25로 train / val 분리
+
+    같은 seed 내에서는 single/multi 모두 동일한 test set을 공유 → 상대 비교 공정
+    seed가 다르면 test set도 달라짐 → mean±std가 test 변동성도 반영
+
+    Args:
+        args: argparse namespace
+        dataset_name: source dataset 이름
+        alpha: train pool sampling 비율 (0.0 ~ 1.0). default=1.0 (전부 사용)
+        mode: 'multi' / 'single' (구분용)
+
+    Returns:
+        dict with keys:
+            'loaders': (train_loader, val_loader, test_loader)
+            'num_classes': int
+            'split_sizes': dict  — {'train': int, 'val': int, 'test': int}
+    """
+    # ── embedding 로드 ──
+    base_path = "/storage/personal/eungyeop/dataset/embedding"
+    if args.embed_type == "_":
+        sub_dir = f"tabular_embeddings_/{args.llm_model}"
+    else:
+        sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
+    emb_file = os.path.join(base_path, sub_dir, f"embedding_{dataset_name}.pkl")
+
+    with open(emb_file, 'rb') as f:
+        data = pickle.load(f)
+    embeddings = data['embeddings']
+    num_classes = data['num_classes']
+    n = len(embeddings)
+
+    # ── Step 1: test split (args.random_seed 기준, on-the-fly) ──
+    labels = [emb['y'].item() for emb in embeddings]
+    indices = np.arange(n)
+    train_pool_idx, test_idx = train_test_split(
+        indices, test_size=0.2,
+        stratify=labels,
+        random_state=args.random_seed
+    )
+
+    # ── Step 2: α sampling (train pool에 적용) ──
+    if alpha < 1.0:
+        labels_pool = [embeddings[i]['y'].item() for i in train_pool_idx]
+
+        # stratified sampling: 각 클래스 비율 유지
+        rng = np.random.RandomState(args.random_seed)
+        unique_labels = sorted(set(labels_pool))
+        sampled_positions = []
+        for cls in unique_labels:
+            cls_positions = [j for j, lab in enumerate(labels_pool) if lab == cls]
+            cls_n = max(1, int(len(cls_positions) * alpha))
+            chosen = rng.choice(cls_positions, size=cls_n, replace=False)
+            sampled_positions.extend(chosen)
+        active_pool_idx = train_pool_idx[sampled_positions]
+    else:
+        active_pool_idx = train_pool_idx
+
+    # ── Step 3: active pool → train / val 분리 (75% / 25%) ──
+    labels_active = [embeddings[i]['y'].item() for i in active_pool_idx]
+    train_idx, val_idx = train_test_split(
+        active_pool_idx, test_size=0.25,
+        stratify=labels_active,
+        random_state=args.random_seed
+    )
+
+    # ── dataset 구성 ──
+    train_dataset = [embeddings[i] for i in train_idx]
+    val_dataset   = [embeddings[i] for i in val_idx]
+    test_dataset  = [embeddings[i] for i in test_idx]
+
+    # ── DataLoader 생성 ──
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.random_seed)
+
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        generator=loader_generator, worker_init_fn=seed_worker, num_workers=0
+    ) if len(train_dataset) > 0 else None
+
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        generator=loader_generator, worker_init_fn=seed_worker, num_workers=0
+    ) if len(val_dataset) > 0 else None
+
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False,
+        generator=loader_generator, worker_init_fn=seed_worker, num_workers=0
+    ) if len(test_dataset) > 0 else None
+
+    split_sizes = {
+        'train': len(train_dataset),
+        'val': len(val_dataset),
+        'test': len(test_dataset),
+    }
+    print(f"[ExpLoader] {dataset_name} (α={alpha}, mode={mode}, seed={args.random_seed}): "
+          f"train={split_sizes['train']}, val={split_sizes['val']}, test={split_sizes['test']}")
+
+    return {
+        'loaders': (train_loader, val_loader, test_loader),
+        'num_classes': num_classes,
+        'split_sizes': split_sizes,
+    }

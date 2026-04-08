@@ -324,8 +324,9 @@ class GraphQuantizer(nn.Module):
         H_p = -(p * (p + 1e-9).log()).sum() / H_max
         pi_safe = pi.clamp_min(1e-12)
         H_s = -(pi_safe * pi_safe.log()).sum(dim=1).mean() / H_max
-        hs_coeff = getattr(self.args, 'hs_reg', 0.1)
-        reg_loss = 1.0 * (1 - H_p) ** 2 + hs_coeff * H_s
+        #reg_loss = 1.0 * (1 - H_p) ** 2 + 0.1 * H_s
+        reg_loss = 1.0 * (1 - H_p) ** 2 + 0.5 * H_s
+
 
         
 
