@@ -1,0 +1,36 @@
+program: main_SS.py
+method: bayes
+
+metric:
+  name: final/zero_shot_test_auc
+  goal: maximize
+
+parameters:
+  random_seed:
+    values: [42, 44, 46, 48, 50]
+  n_graphs:
+    values: [4, 6, 8, 10, 12]
+  n_nodes:
+    values: [4, 6, 8, 10, 12]
+  alpha:
+    values: [0.3, 0.4, 0.5]
+  fgw_alpha:
+    values: [1.0, 1.5]
+  soft_tau:
+    values: [0.01, 0.02]
+  source_lr:
+    values: [1e-3, 2e-3]
+  dropout_rate:
+    values: [0.2, 0.3]
+  hs_reg:
+    values: [0.5, 1.0]
+  few_shot:
+    values: [0]
+
+command:
+  - ${env}
+  - /home/eungyeop/anaconda3/envs/protollm/bin/python
+  - ${program}
+  - ${args}
+  - --base_dir
+  - sweep_zeroshot_graph_20260417

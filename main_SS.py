@@ -140,7 +140,8 @@ def get_args():
 WANDB_KEYS = [
     "alpha", "tau", "soft_tau", "vq_beta",
     "source_lr", "source_lr_few", "dropout_rate",
-    "fgw_alpha", "few_shot", "random_seed", "entropy_reg", "hs_reg"
+    "fgw_alpha", "few_shot", "random_seed", "entropy_reg", "hs_reg",
+    "n_graphs", "n_nodes",
 ]
 def wandb_make_serializable_config(args):
     """args -> wandb.config에 안전하게 들어가도록 직렬화 가능한 dict로 변환"""

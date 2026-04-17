@@ -135,7 +135,8 @@ def get_args():
                         help='Final LR multiplier vs. base LR for cosine annealing (e.g., 0.1 means 10% of base)')
     # ── Exp A / Exp B (2026.04.02) ──
     parser.add_argument('--exp_mode', type=str, default='case1',
-                        choices=['single_source', 'multi_source', 'case1', 'case2', 'exp_b_analysis', 'exp_b_retrain'],
+                        choices=['single_source', 'multi_source', 'case1', 'case2', 'case2_exclude',
+                                 'exp_b_analysis', 'exp_b_retrain'],
                         help='Experiment mode for Exp A/B')
     parser.add_argument('--sampling_alpha', type=float, default=1.0,
                         help='Train set sampling ratio (0.0~1.0) for multi-source scaling')
@@ -1838,6 +1839,163 @@ def main():
             with open(result_file, 'w') as f:
                 json.dump(save_data, f, indent=2)
             logger.info(f"[Case 2] Results saved to {result_file}")
+
+            # wandb sweep metric
+            mean_ft_auc = float(sum(ft_auc) / len(ft_auc)) if ft_auc else 0.0
+            mean_ft_auprc = float(sum(ft_auprc) / len(ft_auprc)) if ft_auprc else 0.0
+            try:
+                _wandb_log({
+                    f"case2{freeze_tag}/mean_test_auc": mean_ft_auc,
+                    f"case2{freeze_tag}/mean_test_auprc": mean_ft_auprc,
+                })
+                _wandb_summary_set({
+                    f"final/case2{freeze_tag}_mean_auc": mean_ft_auc,
+                    f"final/case2{freeze_tag}_mean_auprc": mean_ft_auprc,
+                })
+            except Exception:
+                pass
+
+        # sweep metric용: freeze=False 기준 mean AUC
+        try:
+            _wandb_log({"final/few_shot_test_auc_mean": mean_ft_auc})
+            _wandb_summary_set({"final/few_shot_test_auc_mean": mean_ft_auc})
+        except Exception:
+            pass
+
+    # ==================================================================
+    # [Mode 4b] case2_exclude — Exp B Step 3: F(M-1) source exclusion
+    #   특정 source 1개 제외 → 나머지 M-1개로 pretrain → M-1개 fine-tune (freeze 여부 둘 다)
+    #   Alpha=1.0 고정
+    # ==================================================================
+    elif args.exp_mode == 'case2_exclude':
+        if not args.exclude_sources:
+            raise ValueError("--exclude_sources is required for case2_exclude (at least 1 source)")
+        excluded = args.exclude_sources
+        if isinstance(excluded, str):
+            excluded = [excluded]
+        remaining = [s for s in src_list if s not in excluded]
+        if not remaining:
+            raise ValueError("No sources remaining after exclusion!")
+
+        excluded_tag = "+".join(excluded)
+        logger.info(f"\n{'='*60}\n>>> [Case 2 Exclude] excluded={excluded_tag}\n"
+                    f"    remaining={remaining}\n{'='*60}")
+
+        alpha = 1.0  # 고정
+
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+
+        # ── Pretrain: remaining source, alpha=1.0 ──
+        args.use_lcg = False
+        pretrain_and_eval_sources(
+            args, model, device, sources=remaining, patience=20,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        all_loaders_init = {}
+        for s in remaining:
+            tr, _, _, _ = load_one(args, s, sampling_alpha=alpha, use_exp=True)
+            all_loaders_init[s] = tr
+        init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        args.use_lcg = True
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
+        fix_seed(args.random_seed)
+
+        pretrain_and_eval_sources(
+            args, model, device, sources=remaining, patience=30,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        # pretrained state 저장
+        pretrained_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        logger.info(f"[Case 2 Exclude] Pretrained model saved (excluded={excluded_tag})")
+
+        # ── Fine-tune: remaining source 각각에 freeze=False → freeze=True 순차 ──
+        for do_freeze in [False, True]:
+            freeze_tag = '_freeze' if do_freeze else ''
+            ft_save_dir = f"/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}/case2_exclude{freeze_tag}"
+            os.makedirs(ft_save_dir, exist_ok=True)
+
+            logger.info(f"\n{'='*40}\n>>> [Case 2 Exclude] Fine-tune (freeze={do_freeze})\n{'='*40}")
+
+            ft_sources = []
+            ft_auc, ft_auprc, ft_acc, ft_f1 = [], [], [], []
+            ft_precision, ft_recall, ft_loss = [], [], []
+
+            for src_name in remaining:
+                logger.info(f"\n{'='*60}")
+                logger.info(f"[Case 2 Exclude Fine-tune] dataset='{src_name}' "
+                            f"(excluded={excluded_tag})")
+                logger.info(f"   alpha={alpha}, freeze={do_freeze}, mode→Few (ghead→ghead2 copy)")
+                logger.info(f"{'='*60}")
+                model.load_state_dict({k: v.to(device) for k, v in pretrained_state.items()})
+                model.ghead2.load_state_dict(model.ghead.state_dict())
+                model.mode = 'Few'
+                if do_freeze:
+                    model.set_freeze_target()
+                fix_seed(args.random_seed)
+
+                ft_pack = pretrain_and_eval_sources(
+                    args, model, device, sources=[src_name], patience=20,
+                    use_exp=True, sampling_alpha=alpha
+                )
+
+                ps_test = ft_pack.get('per_source_test', {})
+                ft_sources.append(src_name)
+                for key, lst in [('auc', ft_auc), ('auprc', ft_auprc), ('acc', ft_acc),
+                                 ('f1', ft_f1), ('precision', ft_precision),
+                                 ('recall', ft_recall), ('loss', ft_loss)]:
+                    vals = ps_test.get(key, [])
+                    lst.append(vals[0] if vals else float('nan'))
+
+            # 결과 저장
+            result_file = os.path.join(
+                ft_save_dir,
+                f"case2_exclude{freeze_tag}_excl-{excluded_tag}_seed{args.random_seed}_{args.run_tag}.json"
+            )
+            save_data = {
+                'exp_mode': 'case2_exclude',
+                'freeze_ft': do_freeze,
+                'excluded_sources': excluded,
+                'remaining_sources': remaining,
+                'sampling_alpha': alpha,
+                'seed': args.random_seed,
+                'per_source_test': {
+                    'sources': ft_sources,
+                    'auc': ft_auc, 'auprc': ft_auprc, 'acc': ft_acc,
+                    'f1': ft_f1, 'precision': ft_precision,
+                    'recall': ft_recall, 'loss': ft_loss,
+                },
+            }
+            with open(result_file, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            logger.info(f"[Case 2 Exclude] Results saved to {result_file}")
+
+            # wandb: mean test AUC 로그 (sweep metric용)
+            mean_ft_auc = float(np.mean(ft_auc)) if ft_auc else 0.0
+            mean_ft_auprc = float(np.mean(ft_auprc)) if ft_auprc else 0.0
+            try:
+                _wandb_log({
+                    f"case2_exclude{freeze_tag}/mean_test_auc": mean_ft_auc,
+                    f"case2_exclude{freeze_tag}/mean_test_auprc": mean_ft_auprc,
+                    f"case2_exclude{freeze_tag}/excluded": excluded_tag,
+                })
+                _wandb_summary_set({
+                    f"final/case2_exclude{freeze_tag}_mean_auc": mean_ft_auc,
+                    f"final/case2_exclude{freeze_tag}_mean_auprc": mean_ft_auprc,
+                })
+            except Exception:
+                pass
+
+        # sweep metric용: freeze=False 기준 mean AUC를 'final/few_shot_test_auc_mean'에 기록
+        try:
+            _wandb_log({"final/few_shot_test_auc_mean": mean_ft_auc})
+            _wandb_summary_set({"final/few_shot_test_auc_mean": mean_ft_auc})
+        except Exception:
+            pass
 
     # ==================================================================
     # [Mode 5] exp_b_analysis — Exp B Step 1/2: LCG routing analysis
