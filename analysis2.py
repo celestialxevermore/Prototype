@@ -1,6 +1,9 @@
 """
-Batch Qualitative Analysis
-Usage: python analysis.py /path/to/Pre
+Batch Qualitative Analysis (v2)
+  - Radar gate: soft WPR >= clip(overall_pos + 0.10, 0.45, 0.65)
+  - Empty panel fallback: largest w_tp basis drawn dim (gray dotted)
+  - Z-score clipping: raw features clipped to ±3σ before median
+Usage: python analysis2.py /path/to/Pre
 """
 
 import argparse
@@ -31,6 +34,8 @@ from utils.util import fix_seed
 from torch.utils.data import ConcatDataset, DataLoader
 
 EXCLUDE_FEATURES = {'patientid', 'patient_id', 'id', 'ID', 'time'}
+
+OUTPUT_DIR_NAME = 'analysis3_results'
 
 BASE_TABLE_PATH = "/storage/personal/eungyeop/dataset/table/origin_table"
 
@@ -210,14 +215,36 @@ def extract_tp_tn_with_tabular(model, loader, device, dataset_name):
 # Radar Plots
 # ============================================================
 
-def plot_radar_single(result, onehot_probs, ax, max_features=8, min_tp=3):
+def _weighted_median_cols(X, w):
+    """Per-column weighted median. X: (N, F), w: (N,) non-negative weights."""
+    X = np.asarray(X, dtype=float)
+    w = np.asarray(w, dtype=float)
+    total_w = w.sum()
+    F = X.shape[1]
+    if total_w < 1e-9:
+        return np.zeros(F)
+    out = np.empty(F)
+    half = total_w / 2.0
+    for j in range(F):
+        order = np.argsort(X[:, j])
+        cum = np.cumsum(w[order])
+        idx = int(np.searchsorted(cum, half))
+        idx = min(idx, len(order) - 1)
+        out[j] = X[order[idx], j]
+    return out
+
+def plot_radar_single(result, onehot_probs, ax, max_features=8, min_weff=3.0, wpr_lift=0.10):
     src_name = result['dataset_name']
     X = result['X']
     argmax = result['argmax']
     tp_mask = result['tp_mask']
+    tn_mask = result['tn_mask']
     ys = result['ys']
-    M = result['pis'].shape[1]
+    pis = result['pis']
+    M = pis.shape[1]
     short_name = src_name.replace('_Dataset', '').replace('_clinical_records', '')
+    overall_pos = float(ys.mean())
+    wpr_threshold = float(np.clip(overall_pos + wpr_lift, 0.45, 0.65))
 
     num_cols = [c for c in X.select_dtypes(include=[np.number]).columns
                 if c.lower() not in {f.lower() for f in EXCLUDE_FEATURES}][:max_features]
@@ -228,27 +255,49 @@ def plot_radar_single(result, onehot_probs, ax, max_features=8, min_tp=3):
     X_num = X[num_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
     scaler = StandardScaler()
     scaler.fit(X_num)
+    X_z = np.clip(scaler.transform(X_num.values), -3, 3)
+
+    # Soft WPR (pi-weighted) + weighted TP count per basis. Division-by-zero guard.
+    tp_float = tp_mask.astype(float)
+    w_sum = pis.sum(axis=0)
+    w_tp = (pis * tp_float[:, None]).sum(axis=0)
+    wpr = np.zeros(M)
+    valid_mask = w_sum >= 1e-6
+    wpr[valid_mask] = (pis[:, valid_mask] * ys[:, None]).sum(axis=0) / w_sum[valid_mask]
 
     high_risk_bases = [k for k in range(M) if onehot_probs[k] > 0.5]
-    active_bases = []
-    for k in high_risk_bases:
-        if ((argmax == k) & tp_mask).sum() >= min_tp:
-            active_bases.append(k)
 
-    # Add TP top-3
-    tp_counts = sorted([(k, int(((argmax == k) & tp_mask).sum())) for k in range(M)], key=lambda x: -x[1])
-    for k, n in tp_counts[:3]:
-        if n >= min_tp and k not in active_bases:
-            active_bases.append(k)
+    # Gate: high-risk AND weighted TP >= min_weff AND WPR >= threshold (+ valid denom)
+    active_h = [k for k in high_risk_bases
+                if valid_mask[k] and w_tp[k] >= min_weff and wpr[k] >= wpr_threshold]
 
-    # Low-risk TN reference
+    # Fallback: WPR 통과 0개 → high-risk 내에서 w_tp 최대인 basis 1개 (dim)
+    fallback_k = None
+    if not active_h and high_risk_bases:
+        hi_valid = [k for k in high_risk_bases if valid_mask[k] and w_tp[k] >= min_weff]
+        if hi_valid:
+            fallback_k = max(hi_valid, key=lambda k: w_tp[k])
+
+    # Low-risk TN reference: π weight 최대 기준
+    tn_ref = None
     low_risk_bases = [k for k in range(M) if onehot_probs[k] <= 0.5]
-    for k in sorted(low_risk_bases, key=lambda k: onehot_probs[k]):
-        if ((argmax == k) & (ys == 0)).sum() >= 3 and k not in active_bases:
-            active_bases.insert(0, k)
-            break
+    best_l_weff = 0.0
+    for k in low_risk_bases:
+        if not valid_mask[k]:
+            continue
+        weff = float(pis[tn_mask, k].sum())
+        if weff >= min_weff and weff > best_l_weff:
+            tn_ref, best_l_weff = k, weff
 
-    if len(active_bases) < 1:
+    draw_list = []  # (k, kind) — kind in {'tn_ref','high','dim'}
+    if tn_ref is not None:
+        draw_list.append((tn_ref, 'tn_ref'))
+    for k in active_h:
+        draw_list.append((k, 'high'))
+    if fallback_k is not None:
+        draw_list.append((fallback_k, 'dim'))
+
+    if not draw_list:
         ax.text(0.5, 0.5, f'[{short_name}]\nNo active bases', ha='center', va='center', transform=ax.transAxes)
         return
 
@@ -256,37 +305,39 @@ def plot_radar_single(result, onehot_probs, ax, max_features=8, min_tp=3):
     angles = np.linspace(0, 2 * np.pi, n_features, endpoint=False).tolist()
     angles += angles[:1]
 
-    for k in active_bases:
-        is_high = onehot_probs[k] > 0.5
-        if is_high:
-            k_mask = (argmax == k) & tp_mask
-            label_prefix = "TP"
-            linestyle = '-'
+    X_tp = X_z[tp_mask]
+    X_tn = X_z[tn_mask]
+
+    for k, kind in draw_list:
+        if kind == 'tn_ref':
+            w = pis[tn_mask, k]
+            if w.sum() < 1e-9 or X_tn.shape[0] < 1:
+                continue
+            n_eff = float(w.sum())
+            color = BASIS_COLORS.get(f'B{k}', '#999999')
+            linestyle, linewidth, line_alpha, alpha_fill = '--', 2.0, 1.0, 0.05
+            risk, tag, n_str = 'L', 'TN ref', f'n_eff={n_eff:.1f}'
+            z_median = _weighted_median_cols(X_tn, w).tolist()
         else:
-            if ((argmax == k) & tp_mask).sum() >= min_tp:
-                k_mask = (argmax == k) & tp_mask
-                label_prefix = "TP"
-                linestyle = '-'
-            else:
-                k_mask = (argmax == k) & (ys == 0)
-                label_prefix = "TN (ref)"
-                linestyle = '--'
+            # high/dim: π-weighted median over TP samples — gate와 일관
+            w = pis[tp_mask, k]
+            if w.sum() < 1e-9 or X_tp.shape[0] < 1:
+                continue
+            n_eff = float(w.sum())
+            if kind == 'dim':
+                color = '#888888'
+                linestyle, linewidth, line_alpha, alpha_fill = ':', 1.5, 0.4, 0.03
+                risk, tag = 'H*', f'WPR={wpr[k]:.2f}<{wpr_threshold:.2f}'
+            else:  # 'high'
+                color = BASIS_COLORS.get(f'B{k}', '#999999')
+                linestyle, linewidth, line_alpha, alpha_fill = '-', 2.5, 1.0, 0.15
+                risk, tag = 'H', f'WPR={wpr[k]:.2f}'
+            z_median = _weighted_median_cols(X_tp, w).tolist()
+            n_str = f'n_eff={n_eff:.1f}'
 
-        n = k_mask.sum()
-        if n < 1:
-            continue
-
-        vals = X_num.loc[k_mask].values
-        z_median = np.median(scaler.transform(vals), axis=0).tolist()
         z_median += z_median[:1]
-
-        color = BASIS_COLORS.get(f'B{k}', '#999999')
-        risk = "H" if is_high else "L"
-        linewidth = 2.0 if label_prefix == "TN (ref)" else 2.5
-        alpha_fill = 0.05 if label_prefix == "TN (ref)" else 0.15
-
         ax.plot(angles, z_median, color=color, linewidth=linewidth, linestyle=linestyle,
-                label=f'B{k} [{risk}] ({label_prefix} n={n})')
+                alpha=line_alpha, label=f'B{k} [{risk}] ({tag} {n_str})')
         ax.fill(angles, z_median, color=color, alpha=alpha_fill)
 
     ax.set_xticks(angles[:-1])
@@ -305,7 +356,7 @@ def plot_radar_single(result, onehot_probs, ax, max_features=8, min_tp=3):
     ax.set_yticks(yticks)
     ax.set_yticklabels([f'{t:+d}σ' if t != 0 else 'median' for t in yticks], fontsize=6, color='gray')
     ax.legend(fontsize=6, loc='upper right', bbox_to_anchor=(1.3, 1.1))
-    ax.set_title(f'[{short_name}]', fontsize=9, pad=15)
+    ax.set_title(f'[{short_name}] (z-median, clipped ±3σ | WPR≥{wpr_threshold:.2f})', fontsize=9, pad=15)
 
 
 def save_radar_combined(all_results, onehot_probs, sources, save_path):
@@ -489,7 +540,7 @@ def main():
         print(f"  Path: {ckpt_path}")
 
         # Output directory
-        out_dir = os.path.join(args.pre_dir, 'analysis_results', run_tag)
+        out_dir = os.path.join(args.pre_dir, OUTPUT_DIR_NAME, run_tag)
         if os.path.exists(os.path.join(out_dir, 'radar_1xM.png')):
             print(f"  [SKIP] already analyzed")
             continue
@@ -538,7 +589,7 @@ def main():
             del model
         torch.cuda.empty_cache()
 
-    print(f"\nAll done. Results in {os.path.join(args.pre_dir, 'analysis_results')}")
+    print(f"\nAll done. Results in {os.path.join(args.pre_dir, OUTPUT_DIR_NAME)}")
 
 
 if __name__ == '__main__':

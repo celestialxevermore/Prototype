@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import cross_val_score
@@ -34,9 +35,15 @@ def logistic_regression_benchmark(
     # ── 전처리 파이프라인 ───────────────────────────────────────
     transformers = []
     if len(numeric_columns) > 0:
-        transformers.append(('num', StandardScaler(), numeric_columns))
+        transformers.append(('num', Pipeline([
+            ('imp', SimpleImputer(strategy='median')),
+            ('sc', StandardScaler()),
+        ]), numeric_columns))
     if len(categorical_columns) > 0:
-        transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_columns))
+        transformers.append(('cat', Pipeline([
+            ('imp', SimpleImputer(strategy='most_frequent')),
+            ('oh', OneHotEncoder(handle_unknown='ignore')),
+        ]), categorical_columns))
 
     preprocessor = ColumnTransformer(transformers=transformers) if transformers else None
 

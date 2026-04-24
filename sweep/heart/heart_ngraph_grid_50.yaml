@@ -1,5 +1,5 @@
 program: main_SS.py
-method: bayes
+method: grid
 
 metric:
   name: final/zero_shot_test_auc
@@ -7,23 +7,23 @@ metric:
 
 parameters:
   n_graphs:
-    values: [4, 8, 12, 16, 32]
+    values: [8]
   n_nodes:
-    values: [4, 8, 12, 16, 32]
+    values: [8]
   random_seed:
-    values: [42, 44, 46, 48, 50]
+    values: [50]
   alpha:
-    values: [0.3, 0.4, 0.5]
-  fgw_alpha:
-    values: [1.0, 1.5]
+    values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
   soft_tau:
-    values: [0.01, 0.02]
-  source_lr:
-    values: [1e-3, 2e-3]
-  dropout_rate:
-    values: [0.2, 0.3]
+    values: [0.02]
   hs_reg:
-    values: [0.5, 1.0]
+    values: [1.0]
+  fgw_alpha:
+    values: [1.5]
+  source_lr:
+    values: [0.001]
+  dropout_rate:
+    values: [0.2]
   few_shot:
     values: [0]
 
@@ -33,4 +33,4 @@ command:
   - ${program}
   - ${args}
   - --base_dir
-  - sweep_zeroshot_graph_20260417
+  - sweep_alpha_20260419

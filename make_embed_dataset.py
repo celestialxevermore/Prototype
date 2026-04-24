@@ -40,7 +40,13 @@ class TabularToEmbeddingDataset:
             "heart1" : ['target_binary', ['no', 'yes']],
             "Heart_disease_statlog" : ['target_binary', ['no','yes']],
             "heart_disease" : ['target_binary', ['no','yes']],
-            "heart_disease_clean" : ['target_binary', ['no','yes']]
+            "heart_disease_clean" : ['target_binary', ['no','yes']],
+            "mimic_mortality": ['label', [0,1]],
+            "eicu_mortality": ['label', [0,1]],
+            "hirid_mortality" : ['label', [0,1]], 
+            "support_mortality": ['label', [0,1]],
+            "zigong_mortality": ['label',[0,1]],
+            "sic_mortality" : ['label', [0,1]]
 
         }
         self.transformer_class = self._get_transformer_class(args.embed_type)

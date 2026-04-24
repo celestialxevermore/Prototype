@@ -1,6 +1,10 @@
 """
-Batch Qualitative Analysis
-Usage: python analysis.py /path/to/Pre
+Batch Qualitative Analysis v3
+  - Radar: argmax basis, n>=5 gate, clean titles
+  - Matrix: soft coordinate WPR (unchanged)
+  - Z-score clipping ±3σ
+  - Feature label color: red=higher is worse, blue=lower is worse
+Usage: python analysis_argmax.py /path/to/Pre
 """
 
 import argparse
@@ -31,6 +35,8 @@ from utils.util import fix_seed
 from torch.utils.data import ConcatDataset, DataLoader
 
 EXCLUDE_FEATURES = {'patientid', 'patient_id', 'id', 'ID', 'time'}
+
+OUTPUT_DIR_NAME = 'analysis_argmax_results'
 
 BASE_TABLE_PATH = "/storage/personal/eungyeop/dataset/table/origin_table"
 
@@ -194,103 +200,118 @@ def extract_tp_tn_with_tabular(model, loader, device, dataset_name):
     valid = sidxs < len(X_orig)
     if not valid.all():
         pis, ys, probs, sidxs, preds = pis[valid], ys[valid], probs[valid], sidxs[valid], preds[valid]
-    tp = (ys == 1) & (preds == 1)
-    tn = (ys == 0) & (preds == 0)
-    fp = (ys == 0) & (preds == 1)
-    fn = (ys == 1) & (preds == 0)
     X_mapped = X_orig.iloc[sidxs].reset_index(drop=True)
     return {
         'dataset_name': dataset_name, 'X': X_mapped, 'pis': pis, 'ys': ys,
         'probs': probs, 'preds': preds, 'argmax': pis.argmax(axis=1),
-        'tp_mask': tp, 'tn_mask': tn, 'fp_mask': fp, 'fn_mask': fn,
+        'tp_mask': (ys == 1) & (preds == 1),
+        'tn_mask': (ys == 0) & (preds == 0),
     }
 
 
 # ============================================================
-# Radar Plots
+# Radar Plots (argmax-based, n>=5 gate)
 # ============================================================
 
-def plot_radar_single(result, onehot_probs, ax, max_features=8, min_tp=3):
+def infer_risk_direction(X_num, ys):
+    """Auto-detect: higher is worse (high) or lower is worse (low)."""
+    directions = {}
+    for col in X_num.columns:
+        tp_mean = X_num.loc[ys == 1, col].mean()
+        tn_mean = X_num.loc[ys == 0, col].mean()
+        directions[col] = 'high' if tp_mean > tn_mean else 'low'
+    return directions
+
+
+def plot_radar_single(result, onehot_probs, ax, max_features=12, min_n=5):
     src_name = result['dataset_name']
     X = result['X']
     argmax = result['argmax']
     tp_mask = result['tp_mask']
+    tn_mask = result['tn_mask']
     ys = result['ys']
-    M = result['pis'].shape[1]
-    short_name = src_name.replace('_Dataset', '').replace('_clinical_records', '')
+    pis = result['pis']
+    M = pis.shape[1]
+    short_name = src_name.replace('_Dataset', '').replace('_clinical_records', '').replace('_Health_Dataset', '')
 
     num_cols = [c for c in X.select_dtypes(include=[np.number]).columns
                 if c.lower() not in {f.lower() for f in EXCLUDE_FEATURES}][:max_features]
     if len(num_cols) < 3:
-        ax.text(0.5, 0.5, f'[{short_name}]\nNot enough features', ha='center', va='center', transform=ax.transAxes)
+        ax.text(0.5, 0.5, f'[{short_name}]\nNot enough features',
+                ha='center', va='center', transform=ax.transAxes)
         return
 
     X_num = X[num_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
     scaler = StandardScaler()
     scaler.fit(X_num)
+    X_z = np.clip(scaler.transform(X_num.values), -3, 3)
+
+    directions = infer_risk_direction(X_num, ys)
 
     high_risk_bases = [k for k in range(M) if onehot_probs[k] > 0.5]
-    active_bases = []
-    for k in high_risk_bases:
-        if ((argmax == k) & tp_mask).sum() >= min_tp:
-            active_bases.append(k)
-
-    # Add TP top-3
-    tp_counts = sorted([(k, int(((argmax == k) & tp_mask).sum())) for k in range(M)], key=lambda x: -x[1])
-    for k, n in tp_counts[:3]:
-        if n >= min_tp and k not in active_bases:
-            active_bases.append(k)
-
-    # Low-risk TN reference
     low_risk_bases = [k for k in range(M) if onehot_probs[k] <= 0.5]
-    for k in sorted(low_risk_bases, key=lambda k: onehot_probs[k]):
-        if ((argmax == k) & (ys == 0)).sum() >= 3 and k not in active_bases:
-            active_bases.insert(0, k)
-            break
 
-    if len(active_bases) < 1:
-        ax.text(0.5, 0.5, f'[{short_name}]\nNo active bases', ha='center', va='center', transform=ax.transAxes)
+    active_h = []
+    for k in high_risk_bases:
+        mask = (argmax == k) & tp_mask
+        n = mask.sum()
+        if n >= min_n:
+            active_h.append((k, int(n)))
+    active_h.sort(key=lambda x: -x[1])
+    active_h = active_h[:5]
+
+    tn_ref = None
+    best_tn_n = 0
+    for k in low_risk_bases:
+        mask = (argmax == k) & tn_mask
+        n = mask.sum()
+        if n >= min_n and n > best_tn_n:
+            tn_ref = k
+            best_tn_n = int(n)
+
+    draw_list = []
+    if tn_ref is not None:
+        draw_list.append((tn_ref, 'tn_ref', best_tn_n))
+    for k, n in active_h:
+        draw_list.append((k, 'high', n))
+
+    if not draw_list:
+        ax.text(0.5, 0.5, f'[{short_name}]\nNo active bases (n<{min_n})',
+                ha='center', va='center', transform=ax.transAxes)
         return
 
     n_features = len(num_cols)
     angles = np.linspace(0, 2 * np.pi, n_features, endpoint=False).tolist()
     angles += angles[:1]
 
-    for k in active_bases:
-        is_high = onehot_probs[k] > 0.5
-        if is_high:
-            k_mask = (argmax == k) & tp_mask
-            label_prefix = "TP"
-            linestyle = '-'
+    for k, kind, n in draw_list:
+        color = BASIS_COLORS.get(f'B{k}', '#999999')
+
+        if kind == 'tn_ref':
+            mask = (argmax == k) & tn_mask
+            linestyle, linewidth, alpha_fill = '--', 2.0, 0.05
+            risk_label = 'L'
+            tag = f'TN n={n}'
         else:
-            if ((argmax == k) & tp_mask).sum() >= min_tp:
-                k_mask = (argmax == k) & tp_mask
-                label_prefix = "TP"
-                linestyle = '-'
-            else:
-                k_mask = (argmax == k) & (ys == 0)
-                label_prefix = "TN (ref)"
-                linestyle = '--'
+            mask = (argmax == k) & tp_mask
+            linestyle, linewidth, alpha_fill = '-', 2.5, 0.15
+            risk_label = 'H'
+            tag = f'TP n={n}'
 
-        n = k_mask.sum()
-        if n < 1:
-            continue
-
-        vals = X_num.loc[k_mask].values
-        z_median = np.median(scaler.transform(vals), axis=0).tolist()
+        z_median = np.median(X_z[mask], axis=0).tolist()
         z_median += z_median[:1]
 
-        color = BASIS_COLORS.get(f'B{k}', '#999999')
-        risk = "H" if is_high else "L"
-        linewidth = 2.0 if label_prefix == "TN (ref)" else 2.5
-        alpha_fill = 0.05 if label_prefix == "TN (ref)" else 0.15
-
-        ax.plot(angles, z_median, color=color, linewidth=linewidth, linestyle=linestyle,
-                label=f'B{k} [{risk}] ({label_prefix} n={n})')
+        ax.plot(angles, z_median, color=color, linewidth=linewidth,
+                linestyle=linestyle, label=f'B{k} [{risk_label}] ({tag})')
         ax.fill(angles, z_median, color=color, alpha=alpha_fill)
 
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(num_cols, fontsize=7)
+    labels = ax.set_xticklabels(num_cols, fontsize=7)
+    for label, col in zip(labels, num_cols):
+        if directions.get(col) == 'high':
+            label.set_color('#e41a1c')
+        else:
+            label.set_color('#377eb8')
 
     all_vals = []
     for line in ax.get_lines():
@@ -303,9 +324,11 @@ def plot_radar_single(result, onehot_probs, ax, max_features=8, min_tp=3):
     ax.set_ylim(vmin, vmax)
     yticks = [t for t in range(int(vmin), int(vmax) + 1) if vmin <= t <= vmax]
     ax.set_yticks(yticks)
-    ax.set_yticklabels([f'{t:+d}σ' if t != 0 else 'median' for t in yticks], fontsize=6, color='gray')
+    ax.set_yticklabels([f'{t:+d}σ' if t != 0 else 'median' for t in yticks],
+                       fontsize=6, color='gray')
+
     ax.legend(fontsize=6, loc='upper right', bbox_to_anchor=(1.3, 1.1))
-    ax.set_title(f'[{short_name}]', fontsize=9, pad=15)
+    ax.set_title(f'{short_name}', fontsize=10, pad=15)
 
 
 def save_radar_combined(all_results, onehot_probs, sources, save_path):
@@ -327,23 +350,21 @@ def save_radar_individual(all_results, onehot_probs, sources, save_dir):
             continue
         fig, ax = plt.subplots(1, 1, figsize=(8, 8), subplot_kw=dict(polar=True))
         plot_radar_single(all_results[src], onehot_probs, ax)
-        short = src.replace('_Dataset', '').replace('_clinical_records', '')
+        short = src.replace('_Dataset', '').replace('_clinical_records', '').replace('_Health_Dataset', '')
         fig.savefig(os.path.join(save_dir, f'radar_{short}.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
 
 
 # ============================================================
-# Matrix Plots
+# Matrix Plots (soft-based, unchanged)
 # ============================================================
 
 def plot_coordinate_pr(onehot_probs, source_results, sources, ax):
-    """Soft coordinate weighted positive rate heatmap"""
     M = len(onehot_probs)
     n_src = len(sources)
     short_names = [s.replace('_Dataset', '').replace('_Health_Dataset', '')
                      .replace('_clinical_records', '').replace('_', ' ')[:25] for s in sources]
     sorted_idx = np.argsort(onehot_probs)
-
     heatmap_data = np.full((n_src, M), np.nan)
     annot_data = np.full((n_src, M), '', dtype=object)
     for i, src_name in enumerate(sources):
@@ -362,13 +383,11 @@ def plot_coordinate_pr(onehot_probs, source_results, sources, ax):
 
 
 def plot_ratio_pr(onehot_probs, source_results, sources, ax):
-    """Ratio heatmap: basis_pos_rate / source_overall_pos_rate"""
     M = len(onehot_probs)
     n_src = len(sources)
     short_names = [s.replace('_Dataset', '').replace('_Health_Dataset', '')
                      .replace('_clinical_records', '').replace('_', ' ')[:25] for s in sources]
     sorted_idx = np.argsort(onehot_probs)
-
     heatmap_data = np.full((n_src, M), np.nan)
     annot_data = np.full((n_src, M), '', dtype=object)
     for i, src_name in enumerate(sources):
@@ -389,18 +408,15 @@ def plot_ratio_pr(onehot_probs, source_results, sources, ax):
 
 
 def plot_pearson(source_results, sources, ax):
-    """Pearson correlation of per-basis positive rate vectors"""
     M = max(source_results[s]['M'] for s in sources)
     n_src = len(sources)
     short_names = [s.replace('_Dataset', '').replace('_Health_Dataset', '')
                      .replace('_clinical_records', '').replace('_', ' ')[:25] for s in sources]
-
     pos_vectors = np.zeros((n_src, M))
     for i, src_name in enumerate(sources):
         info = source_results[src_name]['basis_info']
         for k in range(M):
             pos_vectors[i, k] = info[k]['pos_rate']
-
     corr_matrix = np.zeros((n_src, n_src))
     p_matrix = np.zeros((n_src, n_src))
     for i in range(n_src):
@@ -408,7 +424,6 @@ def plot_pearson(source_results, sources, ax):
             r, p = pearsonr(pos_vectors[i], pos_vectors[j])
             corr_matrix[i, j] = r
             p_matrix[i, j] = p
-
     annot = np.full((n_src, n_src), '', dtype=object)
     for i in range(n_src):
         for j in range(n_src):
@@ -416,7 +431,6 @@ def plot_pearson(source_results, sources, ax):
             p = p_matrix[i, j]
             sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
             annot[i, j] = f'{r:.3f}{sig}'
-
     sns.heatmap(corr_matrix, annot=annot, fmt='', xticklabels=short_names, yticklabels=short_names,
                 cmap='RdYlBu_r', center=0, vmin=-1, vmax=1, linewidths=0.5, ax=ax, square=True,
                 cbar_kws={'label': 'Pearson r'})
@@ -434,19 +448,14 @@ def save_matrix_combined(onehot_probs, source_results, sources, save_path):
 
 
 def save_matrix_individual(onehot_probs, source_results, sources, save_dir):
-    # 1. Coordinate PR
     fig, ax = plt.subplots(1, 1, figsize=(max(8, len(onehot_probs) * 1.2), 7))
     plot_coordinate_pr(onehot_probs, source_results, sources, ax)
     fig.savefig(os.path.join(save_dir, 'matrix_coordinate_pr.png'), dpi=150, bbox_inches='tight')
     plt.close(fig)
-
-    # 2. Ratio PR
     fig, ax = plt.subplots(1, 1, figsize=(max(8, len(onehot_probs) * 1.2), 7))
     plot_ratio_pr(onehot_probs, source_results, sources, ax)
     fig.savefig(os.path.join(save_dir, 'matrix_ratio_pr.png'), dpi=150, bbox_inches='tight')
     plt.close(fig)
-
-    # 3. Pearson
     fig, ax = plt.subplots(1, 1, figsize=(8, 7))
     plot_pearson(source_results, sources, ax)
     fig.savefig(os.path.join(save_dir, 'matrix_pearson.png'), dpi=150, bbox_inches='tight')
@@ -461,7 +470,6 @@ def find_checkpoints(pre_dir, ckpt_names=('best_joint.pt', 'best.pt')):
     found = []
     for name in ckpt_names:
         found.extend(glob.glob(os.path.join(pre_dir, '**', name), recursive=True))
-    # 같은 폴더에 best_joint.pt 와 best.pt 가 함께 있으면 best_joint.pt 우선
     by_dir = {}
     for p in found:
         d = os.path.dirname(p)
@@ -488,24 +496,20 @@ def main():
         print(f"\n[{idx+1}/{len(ckpts)}] {run_tag}")
         print(f"  Path: {ckpt_path}")
 
-        # Output directory
-        out_dir = os.path.join(args.pre_dir, 'analysis_results', run_tag)
+        out_dir = os.path.join(args.pre_dir, OUTPUT_DIR_NAME, run_tag)
         if os.path.exists(os.path.join(out_dir, 'radar_1xM.png')):
             print(f"  [SKIP] already analyzed")
             continue
         os.makedirs(out_dir, exist_ok=True)
 
         try:
-            # Load model
             model, model_args = load_model(ckpt_path, device)
             sources, loaders = load_source_loaders(model_args)
             print(f"  Sources: {sources}")
 
-            # Compute
             onehot_probs = compute_onehot_basis_risk(model, device)
             soft_results = compute_soft_pr(model, loaders, sources, device)
 
-            # Extract TP/TN for radar
             all_results = {}
             for src in sources:
                 try:
@@ -513,14 +517,12 @@ def main():
                 except Exception as e:
                     print(f"  [WARN] Radar skip {src}: {e}")
 
-            # Save Radar
             if all_results:
                 save_radar_combined(all_results, onehot_probs, sources,
                                     os.path.join(out_dir, 'radar_1xM.png'))
                 save_radar_individual(all_results, onehot_probs, sources, out_dir)
                 print(f"  Radar saved")
 
-            # Save Matrix
             save_matrix_combined(onehot_probs, soft_results, sources,
                                  os.path.join(out_dir, 'matrix_1x3.png'))
             save_matrix_individual(onehot_probs, soft_results, sources, out_dir)
@@ -533,12 +535,11 @@ def main():
             import traceback
             traceback.print_exc()
 
-        # Free memory
         if 'model' in dir():
             del model
         torch.cuda.empty_cache()
 
-    print(f"\nAll done. Results in {os.path.join(args.pre_dir, 'analysis_results')}")
+    print(f"\nAll done. Results in {os.path.join(args.pre_dir, OUTPUT_DIR_NAME)}")
 
 
 if __name__ == '__main__':

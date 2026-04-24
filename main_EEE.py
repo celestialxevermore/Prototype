@@ -62,7 +62,8 @@ def get_args():
                         choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
                                  'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
-                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset'])
+                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset',
+                                 'mimic_mortality','eicu_mortality','hirid_mortality','support_mortality','zigong_mortality','sic_mortality'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -1754,6 +1755,7 @@ def main():
                       experiment_id, mode="Full").to(device)
 
         # ── Pretrain: 모든 source, alpha 적용 ──
+        t_pretrain_start = time.time()
         args.use_lcg = False
         pretrain_and_eval_sources(
             args, model, device, sources=src_list, patience=20,
@@ -1775,6 +1777,9 @@ def main():
             use_exp=True, sampling_alpha=alpha
         )
 
+        pretrain_sec = time.time() - t_pretrain_start
+        logger.info(f"[Case 2][TIME] Multi-source pretrain elapsed: {pretrain_sec:.1f}s ({pretrain_sec/60:.2f}min)")
+
         # pretrained state 저장
         pretrained_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         logger.info(f"[Case 2] Pretrained model saved (alpha={alpha}, all sources)")
@@ -1790,6 +1795,8 @@ def main():
             ft_sources = []
             ft_auc, ft_auprc, ft_acc, ft_f1 = [], [], [], []
             ft_precision, ft_recall, ft_loss = [], [], []
+            ft_sec = []
+            t_ft_total_start = time.time()
 
             for src_name in src_list:
                 pretrain_idx = src_list.index(src_name)
@@ -1805,10 +1812,14 @@ def main():
                     model.set_freeze_target()
                 fix_seed(args.random_seed)
 
+                t_src_start = time.time()
                 ft_pack = pretrain_and_eval_sources(
                     args, model, device, sources=[src_name], patience=20,
                     use_exp=True, sampling_alpha=alpha
                 )
+                src_sec = time.time() - t_src_start
+                ft_sec.append(src_sec)
+                logger.info(f"[Case 2 Fine-tune][TIME] '{src_name}' freeze={do_freeze} elapsed: {src_sec:.1f}s ({src_sec/60:.2f}min)")
 
                 ps_test = ft_pack.get('per_source_test', {})
                 ft_sources.append(src_name)
@@ -1817,6 +1828,9 @@ def main():
                                  ('recall', ft_recall), ('loss', ft_loss)]:
                     vals = ps_test.get(key, [])
                     lst.append(vals[0] if vals else float('nan'))
+
+            ft_total_sec = time.time() - t_ft_total_start
+            logger.info(f"[Case 2 Fine-tune][TIME] All sources total (freeze={do_freeze}): {ft_total_sec:.1f}s ({ft_total_sec/60:.2f}min)")
 
             # 결과 저장
             result_file = os.path.join(
@@ -1829,11 +1843,14 @@ def main():
                 'sources': src_list,
                 'sampling_alpha': alpha,
                 'seed': args.random_seed,
+                'pretrain_sec': pretrain_sec,
+                'finetune_total_sec': ft_total_sec,
                 'per_source_test': {
                     'sources': ft_sources,
                     'auc': ft_auc, 'auprc': ft_auprc, 'acc': ft_acc,
                     'f1': ft_f1, 'precision': ft_precision,
                     'recall': ft_recall, 'loss': ft_loss,
+                    'finetune_sec': ft_sec,
                 },
             }
             with open(result_file, 'w') as f:
@@ -1844,14 +1861,17 @@ def main():
             mean_ft_auc = float(sum(ft_auc) / len(ft_auc)) if ft_auc else 0.0
             mean_ft_auprc = float(sum(ft_auprc) / len(ft_auprc)) if ft_auprc else 0.0
             try:
-                _wandb_log({
-                    f"case2{freeze_tag}/mean_test_auc": mean_ft_auc,
-                    f"case2{freeze_tag}/mean_test_auprc": mean_ft_auprc,
-                })
-                _wandb_summary_set({
-                    f"final/case2{freeze_tag}_mean_auc": mean_ft_auc,
-                    f"final/case2{freeze_tag}_mean_auprc": mean_ft_auprc,
-                })
+                per_src_log = {f"case2{freeze_tag}/{s}_auc": a for s, a in zip(ft_sources, ft_auc)}
+                per_src_log.update({f"case2{freeze_tag}/{s}_auprc": p for s, p in zip(ft_sources, ft_auprc)})
+                per_src_log[f"case2{freeze_tag}/mean_test_auc"] = mean_ft_auc
+                per_src_log[f"case2{freeze_tag}/mean_test_auprc"] = mean_ft_auprc
+                _wandb_log(per_src_log)
+
+                per_src_summary = {f"final/case2{freeze_tag}_{s}_auc": a for s, a in zip(ft_sources, ft_auc)}
+                per_src_summary.update({f"final/case2{freeze_tag}_{s}_auprc": p for s, p in zip(ft_sources, ft_auprc)})
+                per_src_summary[f"final/case2{freeze_tag}_mean_auc"] = mean_ft_auc
+                per_src_summary[f"final/case2{freeze_tag}_mean_auprc"] = mean_ft_auprc
+                _wandb_summary_set(per_src_summary)
             except Exception:
                 pass
 

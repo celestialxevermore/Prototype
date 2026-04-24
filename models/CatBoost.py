@@ -36,6 +36,14 @@ def catboost_benchmark(
 
     cat_features = categorical_columns if categorical_columns else None
 
+    # CatBoost requires categorical NaN → string; real NaN is rejected only in cat cols.
+    if cat_features:
+        X_train = X_train.copy()
+        X_test  = X_test.copy()
+        for col in cat_features:
+            X_train[col] = X_train[col].astype(object).fillna("missing")
+            X_test[col]  = X_test[col].astype(object).fillna("missing")
+
     # ── HP 탐색: support set CV ──────────────────────────────────
     n_splits = min(3, len(y_train))
     use_cv   = (len(y_train) >= 6)

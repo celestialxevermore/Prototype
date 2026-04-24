@@ -95,7 +95,13 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
             "hungarian": ['target_binary', ['no','yes']],
             "switzerland": ['target_binary', ['no','yes']],
             "heart_statlog": ['target_binary', ['no','yes']],
-            "heart": ['target_binary', ['no','yes']]
+            "heart": ['target_binary', ['no','yes']],
+            "mimic_mortality": ['label', [0,1]],
+            "eicu_mortality": ['label', [0,1]],
+            "hirid_mortality" : ['label', [0,1]], 
+            "support_mortality": ['label', [0,1]],
+            "zigong_mortality": ['label',[0,1]],
+            "sic_mortality" : ['label', [0,1]]
         }
     
     # heart 데이터셋들은 새로운 전처리 함수로 처리
@@ -112,11 +118,12 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
     
     X = DATASETS[data_name][0].drop(class_name, axis=1)
     X = X.reset_index()
+    X = X.replace([np.inf, -np.inf], np.nan)  # SimpleImputer는 NaN만 처리 — SUPPORT shock_index div-by-zero 대응
 
     y = DATASETS[data_name][0][class_name]
     y = y.map(class_mapping).astype(int)
     y = y.reset_index(drop=True)
-    
+
     return X, y
 
 '''

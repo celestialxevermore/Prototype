@@ -613,7 +613,7 @@ def prepare_ml_results(args, full_baseline_results, few_baseline_results):
 
     }
     
-    # 선택된 베이스라인 모델에 대해서만 처리
+    # 선택된 베이스라인 모델에 대해서만 처리 (skip_full/skip_few 시 빈 dict 허용)
     for baseline in args.baseline:  # args.baseline이 하나의 모델만 포함해도 동작
         model_prefix = {
             'lr': 'lr',
@@ -622,25 +622,27 @@ def prepare_ml_results(args, full_baseline_results, few_baseline_results):
             'cat': 'cat',
             'rf': 'rf'
         }[baseline]
-        
-        # Best results for full dataset
-        results['Best_results']['full'][baseline] = {
-            f"{baseline}_best_full_auc": full_baseline_results[baseline][f'test_{model_prefix}_auc'],
-            f"{baseline}_best_full_acc": full_baseline_results[baseline][f'test_{model_prefix}_acc'],
-            f"{baseline}_best_full_precision": full_baseline_results[baseline][f'test_{model_prefix}_precision'],
-            f"{baseline}_best_full_recall": full_baseline_results[baseline][f'test_{model_prefix}_recall'],
-            f"{baseline}_best_full_f1": full_baseline_results[baseline][f'test_{model_prefix}_f1']
-        }
-        
-        # Best results for few-shot
-        results['Best_results']['few'][baseline] = {
-            f"{baseline}_best_few_auc": few_baseline_results[baseline][f'test_{model_prefix}_auc'],
-            f"{baseline}_best_few_acc": few_baseline_results[baseline][f'test_{model_prefix}_acc'],
-            f"{baseline}_best_few_precision": few_baseline_results[baseline][f'test_{model_prefix}_precision'],
-            f"{baseline}_best_few_recall": few_baseline_results[baseline][f'test_{model_prefix}_recall'],
-            f"{baseline}_best_few_f1": few_baseline_results[baseline][f'test_{model_prefix}_f1']
-        }
-    
+
+        if baseline in full_baseline_results:
+            results['Best_results']['full'][baseline] = {
+                f"{baseline}_best_full_auc":       full_baseline_results[baseline][f'test_{model_prefix}_auc'],
+                f"{baseline}_best_full_auprc":     full_baseline_results[baseline][f'test_{model_prefix}_auprc'],
+                f"{baseline}_best_full_acc":       full_baseline_results[baseline][f'test_{model_prefix}_acc'],
+                f"{baseline}_best_full_precision": full_baseline_results[baseline][f'test_{model_prefix}_precision'],
+                f"{baseline}_best_full_recall":    full_baseline_results[baseline][f'test_{model_prefix}_recall'],
+                f"{baseline}_best_full_f1":        full_baseline_results[baseline][f'test_{model_prefix}_f1']
+            }
+
+        if baseline in few_baseline_results:
+            results['Best_results']['few'][baseline] = {
+                f"{baseline}_best_few_auc":       few_baseline_results[baseline][f'test_{model_prefix}_auc'],
+                f"{baseline}_best_few_auprc":     few_baseline_results[baseline][f'test_{model_prefix}_auprc'],
+                f"{baseline}_best_few_acc":       few_baseline_results[baseline][f'test_{model_prefix}_acc'],
+                f"{baseline}_best_few_precision": few_baseline_results[baseline][f'test_{model_prefix}_precision'],
+                f"{baseline}_best_few_recall":    few_baseline_results[baseline][f'test_{model_prefix}_recall'],
+                f"{baseline}_best_few_f1":        few_baseline_results[baseline][f'test_{model_prefix}_f1']
+            }
+
     return results
 
 def save_ml_results(args, results):

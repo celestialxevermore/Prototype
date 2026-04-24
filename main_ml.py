@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument('--source_data', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g',
                                 'diabetes','heart','myocardial','cleveland', 
-                                'heart_statlog','hungarian','switzerland'])
+                                'heart_statlog','hungarian','switzerland', 'mimic_mortality','hirid_mortality','sic_mortality','eicu_mortality','support_mortality','zigong_mortality'])
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")
     parser.add_argument('--batch_size', type=int, default=32)
@@ -48,8 +48,11 @@ def get_args():
                        help='List of baselines to use')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--del_feat', nargs='+', default = [], help = 'List  of features to remove from dataset')
-    
+    parser.add_argument('--skip_full', action='store_true', help='Skip full-shot training (few-shot only)')
+    parser.add_argument('--skip_few',  action='store_true', help='Skip few-shot training (full-shot only)')
+
     args = parser.parse_args()
+    assert not (args.skip_full and args.skip_few), "Cannot skip both full and few shot"
     return args
 def main():
     start_time = time.time()
@@ -66,9 +69,13 @@ def main():
     )
     logger.info(f"[Target] Train pool: {len(X_train_full)} | Test: {len(X_test_full)}")
 
-    # ✅ K-shot 샘플링 (train pool에서만)
-    X_train_few, y_train_few = get_few_shot_tabular_samples(X_train_full, y_train_full, args)
-    logger.info(f"[Few-shot] Support set size: {len(X_train_few)}")
+    # ✅ K-shot 샘플링 (train pool에서만) — skip_few면 건너뜀
+    X_train_few, y_train_few = None, None
+    if not args.skip_few:
+        X_train_few, y_train_few = get_few_shot_tabular_samples(X_train_full, y_train_full, args)
+        logger.info(f"[Few-shot] Support set size: {len(X_train_few)}")
+    else:
+        logger.info(f"[Few-shot] skipped (--skip_few)")
 
     is_binary = (len(np.unique(y_train_full)) == 2)
 
@@ -79,93 +86,144 @@ def main():
         logger.info(f"\n>>> Running baseline: {baseline}")
 
         if baseline == "rf":
-            X_train_rf   = X_train_full.copy()
-            X_test_rf    = X_test_full.copy()
-            X_few_rf     = X_train_few.copy()
+            X_train_rf = X_train_full.copy()
+            X_test_rf  = X_test_full.copy()
 
             categorical_columns = X_train_rf.select_dtypes(include=['object', 'category']).columns
+            encoders = {}
             for col in categorical_columns:
                 le = LabelEncoder()
                 all_values = pd.concat([X_train_rf[col], X_test_rf[col]]).unique()
                 le.fit(all_values)
                 X_train_rf[col] = le.transform(X_train_rf[col])
                 X_test_rf[col]  = le.transform(X_test_rf[col])
+                encoders[col] = le
+
+            if not args.skip_full:
+                logger.info(f"--- [{baseline.upper()}] FULL shot training ---")
+                full_baseline_results[baseline] = random_forest_benchmark(
+                    args,
+                    X_train_rf, None, X_test_rf,
+                    y_train_full, None, y_test_full,
+                    is_binary=is_binary
+                )
+            if not args.skip_few:
+                X_few_rf = X_train_few.copy()
                 # few-shot은 unseen value 있을 수 있으니 safe transform
-                X_few_rf[col]   = X_few_rf[col].map(
-                    lambda x: le.transform([x])[0] if x in le.classes_ else -1
+                for col in categorical_columns:
+                    le = encoders[col]
+                    X_few_rf[col] = X_few_rf[col].map(
+                        lambda x: le.transform([x])[0] if x in le.classes_ else -1
+                    )
+                logger.info(f"--- [{baseline.upper()}] FEW shot training ---")
+                few_baseline_results[baseline] = random_forest_benchmark(
+                    args,
+                    X_few_rf, None, X_test_rf,
+                    y_train_few, None, y_test_full,
+                    is_binary=is_binary
                 )
 
-            full_baseline_results[baseline] = random_forest_benchmark(
-                args,
-                X_train_rf, None, X_test_rf,
-                y_train_full, None, y_test_full,
-                is_binary=is_binary
-            )
-            few_baseline_results[baseline] = random_forest_benchmark(
-                args,
-                X_few_rf, None, X_test_rf,
-                y_train_few, None, y_test_full,
-                is_binary=is_binary
-            )
-
         elif baseline == "lr":
-            full_baseline_results[baseline] = logistic_regression_benchmark(
-                args,
-                X_train_full, None, X_test_full,
-                y_train_full, None, y_test_full,
-                is_binary=is_binary,
-            )
-            few_baseline_results[baseline] = logistic_regression_benchmark(
-                args,
-                X_train_few, None, X_test_full,
-                y_train_few, None, y_test_full,
-                is_binary=is_binary,
-            )
+            if not args.skip_full:
+                logger.info(f"--- [{baseline.upper()}] FULL shot training ---")
+                full_baseline_results[baseline] = logistic_regression_benchmark(
+                    args,
+                    X_train_full, None, X_test_full,
+                    y_train_full, None, y_test_full,
+                    is_binary=is_binary,
+                )
+            if not args.skip_few:
+                logger.info(f"--- [{baseline.upper()}] FEW shot training ---")
+                few_baseline_results[baseline] = logistic_regression_benchmark(
+                    args,
+                    X_train_few, None, X_test_full,
+                    y_train_few, None, y_test_full,
+                    is_binary=is_binary,
+                )
 
         elif baseline == "xgb":
-            full_baseline_results[baseline] = xgboost_benchmark(
-                args,
-                X_train_full, None, X_test_full,
-                y_train_full, None, y_test_full,
-                is_binary=is_binary,
-            )
-            few_baseline_results[baseline] = xgboost_benchmark(
-                args,
-                X_train_few, None, X_test_full,
-                y_train_few, None, y_test_full,
-                is_binary=is_binary,
-            )
+            if not args.skip_full:
+                logger.info(f"--- [{baseline.upper()}] FULL shot training ---")
+                full_baseline_results[baseline] = xgboost_benchmark(
+                    args,
+                    X_train_full, None, X_test_full,
+                    y_train_full, None, y_test_full,
+                    is_binary=is_binary,
+                )
+            if not args.skip_few:
+                logger.info(f"--- [{baseline.upper()}] FEW shot training ---")
+                few_baseline_results[baseline] = xgboost_benchmark(
+                    args,
+                    X_train_few, None, X_test_full,
+                    y_train_few, None, y_test_full,
+                    is_binary=is_binary,
+                )
 
         elif baseline == "mlp":
-            full_baseline_results[baseline] = mlp_benchmark(
-                args,
-                X_train_full, None, X_test_full,
-                y_train_full, None, y_test_full,
-                is_binary=is_binary,
-            )
-            few_baseline_results[baseline] = mlp_benchmark(
-                args,
-                X_train_few, None, X_test_full,
-                y_train_few, None, y_test_full,
-                is_binary=is_binary,
-            )
+            if not args.skip_full:
+                logger.info(f"--- [{baseline.upper()}] FULL shot training ---")
+                full_baseline_results[baseline] = mlp_benchmark(
+                    args,
+                    X_train_full, None, X_test_full,
+                    y_train_full, None, y_test_full,
+                    is_binary=is_binary,
+                )
+            if not args.skip_few:
+                logger.info(f"--- [{baseline.upper()}] FEW shot training ---")
+                few_baseline_results[baseline] = mlp_benchmark(
+                    args,
+                    X_train_few, None, X_test_full,
+                    y_train_few, None, y_test_full,
+                    is_binary=is_binary,
+                )
 
         elif baseline == "cat":
-            full_baseline_results[baseline] = catboost_benchmark(
-                args,
-                X_train_full, None, X_test_full,
-                y_train_full, None, y_test_full,
-                is_binary=is_binary,
-            )
-            few_baseline_results[baseline] = catboost_benchmark(
-                args,
-                X_train_few, None, X_test_full,
-                y_train_few, None, y_test_full,
-                is_binary=is_binary,
-            )
+            if not args.skip_full:
+                logger.info(f"--- [{baseline.upper()}] FULL shot training ---")
+                full_baseline_results[baseline] = catboost_benchmark(
+                    args,
+                    X_train_full, None, X_test_full,
+                    y_train_full, None, y_test_full,
+                    is_binary=is_binary,
+                )
+            if not args.skip_few:
+                logger.info(f"--- [{baseline.upper()}] FEW shot training ---")
+                few_baseline_results[baseline] = catboost_benchmark(
+                    args,
+                    X_train_few, None, X_test_full,
+                    y_train_few, None, y_test_full,
+                    is_binary=is_binary,
+                )
 
         else:
             logger.warning(f"Invalid baseline: {baseline}. Skipping.")
+
+    # ── Full vs Few 최종 요약 ──
+    logger.info("=" * 72)
+    logger.info(f"[Summary] dataset={args.source_data} | seed={args.random_seed} | K-shot={args.few_shot}")
+    logger.info("=" * 72)
+    for baseline in args.baseline:
+        if baseline in full_baseline_results:
+            full_r = full_baseline_results[baseline]
+            logger.info(
+                f"[{baseline.upper():>3}] FULL → "
+                f"Loss:{full_r[f'test_{baseline}_loss']:.4f} "
+                f"AUC:{full_r[f'test_{baseline}_auc']:.4f} "
+                f"AUPRC:{full_r[f'test_{baseline}_auprc']:.4f} "
+                f"ACC:{full_r[f'test_{baseline}_acc']:.4f} "
+                f"F1:{full_r[f'test_{baseline}_f1']:.4f}"
+            )
+        if baseline in few_baseline_results:
+            few_r = few_baseline_results[baseline]
+            logger.info(
+                f"[{baseline.upper():>3}] FEW  → "
+                f"Loss:{few_r[f'test_{baseline}_loss']:.4f} "
+                f"AUC:{few_r[f'test_{baseline}_auc']:.4f} "
+                f"AUPRC:{few_r[f'test_{baseline}_auprc']:.4f} "
+                f"ACC:{few_r[f'test_{baseline}_acc']:.4f} "
+                f"F1:{few_r[f'test_{baseline}_f1']:.4f}"
+            )
+    logger.info("=" * 72)
 
     results = prepare_ml_results(args, full_baseline_results, few_baseline_results)
     save_ml_results(args, results)
