@@ -23,6 +23,99 @@ import os, pickle
 import os, pickle
 import random
 import warnings
+import json
+
+
+class MmapEmbeddingDataset(Dataset):
+    """
+    File-backed embedding dataset. Keeps the 349GB of .pkl embeddings out of
+    CPU RAM — each __getitem__ slices a batch row from memmap files and
+    OS page cache handles the rest.
+
+    Expected on-disk layout (produced by convert_embeddings_to_mmap.py):
+        <mmap_dir>/meta.json
+        <mmap_dir>/{tensor_key}.memmap   float32  (N, ...)
+        <mmap_dir>/y.memmap              int64    (N,)
+        <mmap_dir>/s_idx.memmap          int64    (N,)
+    """
+    TENSOR_KEYS = (
+        'label_description_embeddings',
+        'cat_name_embeddings', 'cat_value_embeddings', 'cat_desc_embeddings',
+        'num_prompt_embeddings', 'num_name_embeddings', 'num_desc_embeddings',
+    )
+
+    def __init__(self, mmap_dir, indices):
+        with open(os.path.join(mmap_dir, 'meta.json')) as f:
+            meta = json.load(f)
+        self.mmap_dir = mmap_dir
+        self.N = int(meta['N'])
+        self.num_classes = int(meta['num_classes'])
+        self.feature_names = list(meta.get('feature_names', []))
+        self.cat_desc_texts = list(meta.get('cat_desc_texts', []))
+        self.num_desc_texts = list(meta.get('num_desc_texts', []))
+        self.shapes = {k: tuple(v) for k, v in meta['shapes'].items()}
+        # Datasets with 0 categorical (or 0 numerical) features skip those keys.
+        self.present_keys = list(meta.get('present_keys', list(self.shapes.keys())))
+
+        self._mm = {
+            k: np.memmap(
+                os.path.join(mmap_dir, f"{k}.memmap"),
+                dtype=np.float32, mode='r',
+                shape=(self.N,) + self.shapes[k],
+            )
+            for k in self.present_keys
+        }
+        self._y = np.memmap(os.path.join(mmap_dir, "y.memmap"),
+                            dtype=np.int64, mode='r', shape=(self.N,))
+        self._sidx = np.memmap(os.path.join(mmap_dir, "s_idx.memmap"),
+                               dtype=np.int64, mode='r', shape=(self.N,))
+
+        self.indices = np.asarray(indices, dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        i = int(self.indices[idx])
+        out = {
+            'y': torch.tensor([int(self._y[i])], dtype=torch.long),
+            's_idx': int(self._sidx[i]),
+            'cat_desc_texts': self.cat_desc_texts,
+            'num_desc_texts': self.num_desc_texts,
+        }
+        for k in self.present_keys:
+            # Copy the slice out of the read-only memmap so PyTorch gets a writable tensor.
+            out[k] = torch.from_numpy(np.array(self._mm[k][i], copy=True))
+        # Keys that this dataset doesn't have (e.g. no categorical features):
+        # expose as (0, 768) tensors so downstream shape code stays uniform.
+        for k in self.TENSOR_KEYS:
+            if k not in out:
+                out[k] = torch.zeros(0, 768, dtype=torch.float32)
+        return out
+
+    def labels_for_stratify(self):
+        return np.asarray(self._y, dtype=np.int64).copy()
+
+
+def _load_mmap_meta(args, dataset_name):
+    base_path = "/storage/personal/eungyeop/dataset/embedding"
+    if args.embed_type == "_":
+        sub_dir = f"tabular_embeddings__mmap/{args.llm_model}"
+    else:
+        sub_dir = f"tabular_embeddings_{args.embed_type}_mmap/{args.llm_model}"
+    mmap_dir = os.path.join(base_path, sub_dir, dataset_name)
+    if not os.path.isdir(mmap_dir):
+        raise FileNotFoundError(
+            f"mmap dir not found: {mmap_dir}. Run convert_embeddings_to_mmap.py first."
+        )
+    with open(os.path.join(mmap_dir, 'meta.json')) as f:
+        meta = json.load(f)
+    N = int(meta['N'])
+    y_mm = np.memmap(os.path.join(mmap_dir, "y.memmap"),
+                     dtype=np.int64, mode='r', shape=(N,))
+    labels = y_mm[:].tolist()
+    return mmap_dir, meta, labels
+
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -358,29 +451,38 @@ def prepare_embedding_dataloaders(args, dataset_name, is_source=False):
         torch.cuda.manual_seed(args.random_seed)
         torch.cuda.manual_seed_all(args.random_seed)
     torch.backends.cudnn.benchmark = True
-    # 파일 경로 설정
-    base_path = "/storage/personal/eungyeop/dataset/embedding"
-    if args.embed_type == "_":
-        sub_dir = sub_dir = f"tabular_embeddings_/{args.llm_model}"
+
+    use_mmap = bool(getattr(args, 'use_mmap_embeddings', False))
+    if use_mmap:
+        mmap_dir, meta, labels = _load_mmap_meta(args, dataset_name)
+        print(f"Loading mmap embeddings from: {mmap_dir}")
+        num_classes = int(meta['num_classes'])
+        indices = list(range(int(meta['N'])))
+        embeddings = None  # not used in mmap path
     else:
-        sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
-    emb_name =  f"embedding_{dataset_name}.pkl"
-    file_path = os.path.join(base_path, sub_dir, emb_name)
-    
-    print(f"Loading embeddings from: {file_path}")
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-    
-    # 데이터 로드
-    with open(file_path, 'rb') as f:
-        data = pickle.load(f)
-    
-    embeddings = data['embeddings']
-    labels = [emb['y'].item() for emb in embeddings]
-    num_classes = data['num_classes']
-    
-    # Train/Val/Test Split (60/20/20)
-    indices = list(range(len(embeddings)))
+        # 파일 경로 설정
+        base_path = "/storage/personal/eungyeop/dataset/embedding"
+        if args.embed_type == "_":
+            sub_dir = sub_dir = f"tabular_embeddings_/{args.llm_model}"
+        else:
+            sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
+        emb_name =  f"embedding_{dataset_name}.pkl"
+        file_path = os.path.join(base_path, sub_dir, emb_name)
+
+        print(f"Loading embeddings from: {file_path}")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # 데이터 로드
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+
+        embeddings = data['embeddings']
+        labels = [emb['y'].item() for emb in embeddings]
+        num_classes = data['num_classes']
+
+        # Train/Val/Test Split (60/20/20)
+        indices = list(range(len(embeddings)))
 
     '''
         2025.12.08 수정
@@ -394,27 +496,32 @@ def prepare_embedding_dataloaders(args, dataset_name, is_source=False):
         random.seed(worker_seed)
     print(f">>> [DataLoader] Created isolated generator with seed {args.random_seed}")
 
+    def _make_ds(idx_list):
+        if use_mmap:
+            return MmapEmbeddingDataset(mmap_dir, idx_list)
+        return [embeddings[i] for i in idx_list]
+
     if is_source:
         train_idx, val_idx = train_test_split(
-            indices, test_size=0.15, 
-            stratify=labels, 
+            indices, test_size=0.15,
+            stratify=labels,
             random_state = args.random_seed
         )
-        train_dataset = [embeddings[i] for i in train_idx]
-        val_dataset = [embeddings[i] for i in val_idx]
-        test_dataset = [] 
+        train_dataset = _make_ds(train_idx)
+        val_dataset = _make_ds(val_idx)
+        test_dataset = []
 
         print(f"[Source] Training data size: {len(train_dataset)}")
         print(f"[Source] Validation data size: {len(val_dataset)}")
     else:
         train_idx, test_idx = train_test_split(
-            indices, test_size=0.2, 
-            stratify=labels, 
+            indices, test_size=0.2,
+            stratify=labels,
             random_state = args.random_seed
         )
-        train_dataset = [embeddings[i] for i in train_idx]
-        val_dataset = [] 
-        test_dataset = [embeddings[i] for i in test_idx]
+        train_dataset = _make_ds(train_idx)
+        val_dataset = []
+        test_dataset = _make_ds(test_idx)
         print(f"[Target] Train pool size: {len(train_dataset)}")
         print(f"[Target] Test data size: {len(test_dataset)}")
 
@@ -781,22 +888,30 @@ def prepare_exp_embedding_dataloaders(args, dataset_name, alpha=1.0, mode='multi
             'num_classes': int
             'split_sizes': dict  — {'train': int, 'val': int, 'test': int}
     """
-    # ── embedding 로드 ──
-    base_path = "/storage/personal/eungyeop/dataset/embedding"
-    if args.embed_type == "_":
-        sub_dir = f"tabular_embeddings_/{args.llm_model}"
+    # ── embedding 로드 (pkl or mmap) ──
+    use_mmap = bool(getattr(args, 'use_mmap_embeddings', False))
+    if use_mmap:
+        mmap_dir, meta, labels = _load_mmap_meta(args, dataset_name)
+        num_classes = int(meta['num_classes'])
+        n = int(meta['N'])
+        labels = np.asarray(labels, dtype=np.int64)
+        embeddings = None  # not used
     else:
-        sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
-    emb_file = os.path.join(base_path, sub_dir, f"embedding_{dataset_name}.pkl")
+        base_path = "/storage/personal/eungyeop/dataset/embedding"
+        if args.embed_type == "_":
+            sub_dir = f"tabular_embeddings_/{args.llm_model}"
+        else:
+            sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
+        emb_file = os.path.join(base_path, sub_dir, f"embedding_{dataset_name}.pkl")
 
-    with open(emb_file, 'rb') as f:
-        data = pickle.load(f)
-    embeddings = data['embeddings']
-    num_classes = data['num_classes']
-    n = len(embeddings)
+        with open(emb_file, 'rb') as f:
+            data = pickle.load(f)
+        embeddings = data['embeddings']
+        num_classes = data['num_classes']
+        n = len(embeddings)
+        labels = np.asarray([emb['y'].item() for emb in embeddings], dtype=np.int64)
 
     # ── Step 1: test split (args.random_seed 기준, on-the-fly) ──
-    labels = [emb['y'].item() for emb in embeddings]
     indices = np.arange(n)
     train_pool_idx, test_idx = train_test_split(
         indices, test_size=0.2,
@@ -806,7 +921,7 @@ def prepare_exp_embedding_dataloaders(args, dataset_name, alpha=1.0, mode='multi
 
     # ── Step 2: α sampling (train pool에 적용) ──
     if alpha < 1.0:
-        labels_pool = [embeddings[i]['y'].item() for i in train_pool_idx]
+        labels_pool = labels[train_pool_idx].tolist()
 
         # stratified sampling: 각 클래스 비율 유지
         rng = np.random.RandomState(args.random_seed)
@@ -822,7 +937,7 @@ def prepare_exp_embedding_dataloaders(args, dataset_name, alpha=1.0, mode='multi
         active_pool_idx = train_pool_idx
 
     # ── Step 3: active pool → train / val 분리 (75% / 25%) ──
-    labels_active = [embeddings[i]['y'].item() for i in active_pool_idx]
+    labels_active = labels[active_pool_idx].tolist()
     train_idx, val_idx = train_test_split(
         active_pool_idx, test_size=0.25,
         stratify=labels_active,
@@ -830,9 +945,14 @@ def prepare_exp_embedding_dataloaders(args, dataset_name, alpha=1.0, mode='multi
     )
 
     # ── dataset 구성 ──
-    train_dataset = [embeddings[i] for i in train_idx]
-    val_dataset   = [embeddings[i] for i in val_idx]
-    test_dataset  = [embeddings[i] for i in test_idx]
+    def _make_ds(idx_list):
+        if use_mmap:
+            return MmapEmbeddingDataset(mmap_dir, idx_list)
+        return [embeddings[i] for i in idx_list]
+
+    train_dataset = _make_ds(train_idx)
+    val_dataset   = _make_ds(val_idx)
+    test_dataset  = _make_ds(test_idx)
 
     # ── DataLoader 생성 ──
     loader_generator = torch.Generator()

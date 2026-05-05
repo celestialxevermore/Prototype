@@ -73,13 +73,13 @@ DISPLAY_ORDER = [
 # Dataset abbreviation `CDD` is used for Cardiovascular_Disease_Dataset
 # to avoid collision with the CVD category tag.
 DATASET_SHORT = {
-    'Medicaldataset':                       'MED(CAD)',
-    'Cardiovascular_Disease_Dataset':       'CDD(CAD)',
-    'heart':                                'HD(CAD)',
-    'Heart_disease_statlog':                'STL(CAD)',
-    'cardio_SAheart':                       'SAH(CHD)',
-    'Erbil_Cardiovascular_Health_Dataset':  'ERB(CVD)',
-    'heart_failure_clinical_records':       'HF(MRT)',
+    'Medicaldataset':                       'MED (CAD)',
+    'Cardiovascular_Disease_Dataset':       'CDD (CAD)',
+    'heart':                                'HD (CAD)',
+    'Heart_disease_statlog':                'STL (CAD)',
+    'cardio_SAheart':                       'SAH (CHD)',
+    'Erbil_Cardiovascular_Health_Dataset':  'ERB (CVD)',
+    'heart_failure_clinical_records':       'HF (MRT)',
 }
 
 # Per-panel legend placement.
@@ -519,9 +519,8 @@ def plot_source(ax, src, metric, singles, multis, w_smooth, w_drop, w_rise):
             label='Single (GAT encoder only)', zorder=3)
     ax.fill_between(xs, sg - sg_st, sg + sg_st, color='#FF8A65', alpha=0.10, zorder=1)
 
-    n = DATASET_SIZES.get(src, '?')
     short = DATASET_SHORT.get(src, src)
-    ax.set_title(f"{short} (n={n})", fontsize=14)
+    ax.set_title(f"{short}", fontsize=14)
     ax.set_xlabel('Sampling α', fontsize=13)
     ax.set_ylabel(METRIC_LABEL.get(metric, metric.upper()), fontsize=13)
     ax.set_xlim(0.05, 1.05)

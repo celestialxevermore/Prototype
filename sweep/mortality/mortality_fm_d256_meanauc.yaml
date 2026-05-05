@@ -2,7 +2,7 @@ program: main_EEE.py
 method: bayes
 
 metric:
-  name: final/case2_mimic_mortality_auc
+  name: final/case2_mean_auc
   goal: maximize
 
 parameters:
@@ -39,7 +39,7 @@ command:
   - ${program}
   - ${args}
   - --base_dir
-  - sweep_fm_icu_mortality_20260424
+  - sweep_fm_icu_d256_20260426
   - --source_data
   - mimic_mortality
   - eicu_mortality
@@ -53,5 +53,8 @@ command:
   - "128"
   - --use_amp
   - --llm_model
-  - gpt2_mean
-  - --use_mmap_embeddings
+  - gemma-medical
+  - --embed_type
+  - carte_d256
+  - --input_dim
+  - "256"

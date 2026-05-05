@@ -2,7 +2,7 @@ program: main_EEE.py
 method: bayes
 
 metric:
-  name: final/case2_mimic_mortality_auc
+  name: final/case2_mean_auc
   goal: maximize
 
 parameters:
@@ -39,19 +39,22 @@ command:
   - ${program}
   - ${args}
   - --base_dir
-  - sweep_fm_icu_mortality_20260424
+  - sweep_fm_cardio_d256_20260503
   - --source_data
-  - mimic_mortality
-  - eicu_mortality
-  - hirid_mortality
-  - support_mortality
-  - zigong_mortality
-  - sic_mortality
+  - Medicaldataset
+  - Cardiovascular_Disease_Dataset
+  - heart
+  - Erbil_Cardiovascular_Health_Dataset
+  - cardio_SAheart
+  - heart_failure_clinical_records
   - --basis_type
   - graphormer
   - --batch_size
-  - "128"
+  - "64"
   - --use_amp
   - --llm_model
-  - gpt2_mean
-  - --use_mmap_embeddings
+  - gemma-medical
+  - --embed_type
+  - carte_d256
+  - --input_dim
+  - "256"

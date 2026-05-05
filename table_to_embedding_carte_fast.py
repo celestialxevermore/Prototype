@@ -103,7 +103,8 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
             from sentence_transformers import SentenceTransformer
             self.llm_model = SentenceTransformer(
                 "sentence-transformers/embeddinggemma-300m-medical",
-                device=str(self.device))
+                device=str(self.device),
+                truncate_dim=self.input_dim)
             if self.fp16:
                 # Gemma-3 is bf16-native; fp16 yields all-NaN output.
                 self.llm_model = self.llm_model.to(dtype=torch.bfloat16)

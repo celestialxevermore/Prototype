@@ -11,7 +11,7 @@ import logging
 from models.coordinate import CoordinatorMLP 
 from models.LCG import LatentCompositeGraph, GraphQuantizer 
 from models.LCGGNN import LatentCompositeGNN
-from models.BasisGraphAttention import BasisGATLayer_MUL, BasisGATLayer_IND
+from models.BasisGraphAttention import BasisGATLayer_MUL, BasisGATLayer_IND, BasisScaledDotLayer, BasisGraphormerLayer
 import copy
 logger = logging.getLogger(__name__)
 
@@ -66,8 +66,18 @@ class Model(nn.Module):
                 for _ in range(self.num_basis_layers)
             ])
         elif args.basis_type == 'ind':
-            self.basis_layers = nn.ModuleList([ 
+            self.basis_layers = nn.ModuleList([
                 BasisGATLayer_IND(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = 1, dropout = self.dropout_rate)
+                for _ in range(self.num_basis_layers)
+            ])
+        elif args.basis_type == 'sdpa':
+            self.basis_layers = nn.ModuleList([
+                BasisScaledDotLayer(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = 1, dropout = self.dropout_rate)
+                for _ in range(self.num_basis_layers)
+            ])
+        elif args.basis_type == 'graphormer':
+            self.basis_layers = nn.ModuleList([
+                BasisGraphormerLayer(args, input_dim = self.input_dim, hidden_dim = self.hidden_dim, num_basis_heads = 1, dropout = self.dropout_rate)
                 for _ in range(self.num_basis_layers)
             ])
         self.basis_layer_norms = nn.ModuleList([ 

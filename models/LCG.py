@@ -171,45 +171,50 @@ class GraphQuantizer(nn.Module):
         tgt_str_scaled = tgt_str * scale_ratio
 
         # ====== Logging ======
-        if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
-            with torch.no_grad():
-                self.logger.info(f"\n[COST/RANGE CHECK] Step {int(self.log_step)}")
+        # if self.log_step % self.log_interval == 0 and src_feat.requires_grad:
+        #     with torch.no_grad():
+        #         self.logger.info(f"\n[COST/RANGE CHECK] Step {int(self.log_step)}")
 
-                y = M_cost.detach().float().flatten()
-                qy = torch.quantile(y, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=y.device))
-                self.logger.info(f"  [dist_sq/D] mean={y.mean().item():.4f} std={y.std().item():.4f} max={y.max().item():.4f}")
-                self.logger.info(f"    q00={qy[0].item():.4f} q50={qy[1].item():.4f} q90={qy[2].item():.4f} "
-                                f"q95={qy[3].item():.4f} q99={qy[4].item():.4f} q100={qy[5].item():.4f}")
+        #         y = M_cost.detach().float().flatten()
+        #         qy = torch.quantile(y, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=y.device))
+        #         self.logger.info(f"  [dist_sq/D] mean={y.mean().item():.4f} std={y.std().item():.4f} max={y.max().item():.4f}")
+        #         self.logger.info(f"    q00={qy[0].item():.4f} q50={qy[1].item():.4f} q90={qy[2].item():.4f} "
+        #                         f"q95={qy[3].item():.4f} q99={qy[4].item():.4f} q100={qy[5].item():.4f}")
 
-                # ---- Pre-scaling struct ----
-                cs_pre = src_str.detach().float().flatten()
-                ct_pre = tgt_str.detach().float().flatten()
-                self.logger.info(f"  [PRE-SCALE] src_str mean={cs_pre.mean().item():.4f} | tgt_str mean={ct_pre.mean().item():.4f}")
+        #         # ---- Pre-scaling struct ----
+        #         cs_pre = src_str.detach().float().flatten()
+        #         ct_pre = tgt_str.detach().float().flatten()
+        #         self.logger.info(f"  [PRE-SCALE] src_str mean={cs_pre.mean().item():.4f} | tgt_str mean={ct_pre.mean().item():.4f}")
 
-                # ---- Post-scaling struct ----
-                cs = src_str_scaled.detach().float().flatten()
-                ct = tgt_str_scaled.detach().float().flatten()
-                self.logger.info(f"  [POST-SCALE] src_str mean={cs.mean().item():.4f} | tgt_str mean={ct.mean().item():.4f} | scale_ratio={scale_ratio.item():.4f}")
+        #         # ---- Post-scaling struct ----
+        #         cs = src_str_scaled.detach().float().flatten()
+        #         ct = tgt_str_scaled.detach().float().flatten()
+        #         self.logger.info(f"  [POST-SCALE] src_str mean={cs.mean().item():.4f} | tgt_str mean={ct.mean().item():.4f} | scale_ratio={scale_ratio.item():.4f}")
 
-                qcs = torch.quantile(cs, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=cs.device))
-                self.logger.info(f"  [CS=src_str] mean={cs.mean().item():.4f} std={cs.std().item():.4f} "
-                                f"min={cs.min().item():.4f} max={cs.max().item():.4f}")
-                self.logger.info(f"    q00={qcs[0].item():.4f} q50={qcs[1].item():.4f} q90={qcs[2].item():.4f} "
-                                f"q95={qcs[3].item():.4f} q99={qcs[4].item():.4f} q100={qcs[5].item():.4f}")
+                # qcs = torch.quantile(cs, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=cs.device))
+                # self.logger.info(f"  [CS=src_str] mean={cs.mean().item():.4f} std={cs.std().item():.4f} "
+                #                 f"min={cs.min().item():.4f} max={cs.max().item():.4f}")
+                # self.logger.info(f"    q00={qcs[0].item():.4f} q50={qcs[1].item():.4f} q90={qcs[2].item():.4f} "
+                #                 f"q95={qcs[3].item():.4f} q99={qcs[4].item():.4f} q100={qcs[5].item():.4f}")
 
-                qct = torch.quantile(ct, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=ct.device))
-                self.logger.info(f"  [CT=tgt_str] mean={ct.mean().item():.4f} std={ct.std().item():.4f} "
-                                f"min={ct.min().item():.4f} max={ct.max().item():.4f}")
-                self.logger.info(f"    q00={qct[0].item():.4f} q50={qct[1].item():.4f} q90={qct[2].item():.4f} "
-                                f"q95={qct[3].item():.4f} q99={qct[4].item():.4f} q100={qct[5].item():.4f}")
+                # qct = torch.quantile(ct, torch.tensor([0.0, 0.5, 0.9, 0.95, 0.99, 1.0], device=ct.device))
+                # self.logger.info(f"  [CT=tgt_str] mean={ct.mean().item():.4f} std={ct.std().item():.4f} "
+                #                 f"min={ct.min().item():.4f} max={ct.max().item():.4f}")
+                # self.logger.info(f"    q00={qct[0].item():.4f} q50={qct[1].item():.4f} q90={qct[2].item():.4f} "
+                #                 f"q95={qct[3].item():.4f} q99={qct[4].item():.4f} q100={qct[5].item():.4f}")
 
         a = torch.ones(src_feat.shape[0], src_feat.shape[1], device=src_feat.device) / src_feat.shape[1]
         b = torch.ones(tgt_feat.shape[0], tgt_feat.shape[1], device=tgt_feat.device) / tgt_feat.shape[1]
 
+        # result = solve_gromov_batch(
+        #     src_str_scaled, tgt_str_scaled, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b,
+        #     max_iter=10, tol=1e-3, grad='envelope'
+        # )
         result = solve_gromov_batch(
             src_str_scaled, tgt_str_scaled, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b,
-            max_iter=10, tol=1e-3, grad='envelope'
+            max_iter=5, max_iter_inner= 20, tol=1e-3, grad='envelope'
         )
+
 
         if self.log_step % self.log_interval == 0:
             with torch.no_grad():

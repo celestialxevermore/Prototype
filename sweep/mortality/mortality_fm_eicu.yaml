@@ -25,7 +25,7 @@ parameters:
   hs_reg:
     values: [0.1, 0.3]
   reg:
-    values: [0.01, 0.1, 0.5]
+    values: [0.1, 0.5]
   n_graphs:
     values: [12]
   n_nodes:
@@ -47,3 +47,11 @@ command:
   - support_mortality
   - zigong_mortality
   - sic_mortality
+  - --basis_type
+  - graphormer
+  - --batch_size
+  - "128"
+  - --use_amp
+  - --llm_model
+  - gpt2_mean
+  - --use_mmap_embeddings

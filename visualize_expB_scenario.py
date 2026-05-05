@@ -40,12 +40,12 @@ FM_BG_EDGE = '#F9A825'
 # `CDD` is used for Cardiovascular_Disease_Dataset to avoid collision
 # with the CVD category tag.
 SHORT_NAME = {
-    'Medicaldataset':                       'MED(CAD)',
-    'Cardiovascular_Disease_Dataset':       'CDD(CAD)',
-    'heart':                                'HD(CAD)',
-    'Erbil_Cardiovascular_Health_Dataset':  'ERB(CVD)',
-    'cardio_SAheart':                       'SAH(CHD)',
-    'heart_failure_clinical_records':       'HF(MRT)',
+    'Medicaldataset':                       'MED (CAD)',
+    'Cardiovascular_Disease_Dataset':       'CDD (CAD)',
+    'heart':                                'HD (CAD)',
+    'Erbil_Cardiovascular_Health_Dataset':  'ERB (CVD)',
+    'cardio_SAheart':                       'SAH (CHD)',
+    'heart_failure_clinical_records':       'HF (MRT)',
 }
 DISPLAY_ORDER = [
     'Medicaldataset', 'Cardiovascular_Disease_Dataset', 'heart',
@@ -183,7 +183,7 @@ FM1_SCENARIO_BY_METRIC = {
 # ============================================================
 # Plot
 # ============================================================
-def plot_overlay_subplot(ax, X, fm_baseline, fm1_scenario, metric='AUC'):
+def plot_overlay_subplot(ax, X, fm_baseline, fm1_scenario, metric='AUROC'):
     """
     한 subplot (excluded source = X):
       - x-axis: 6 개 target T (X 포함)

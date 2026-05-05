@@ -20,6 +20,58 @@ from sklearn.metrics import average_precision_score
 from sklearn.preprocessing import label_binarize
 from utils.util import setup_logger, format_time, fix_seed, prepare_results_, save_results_, wrap_up_results_, make_warmup_cosine_epochs, make_warmup_cosine_steps, current_lr, build_epoch_scheduler
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
+from contextlib import nullcontext as _nullctx
+
+def _eee_amp_train(model, train_loader, criterion, optimizer, device,
+                    use_amp=False, amp_dtype=torch.bfloat16, accum_steps=1, scaler=None):
+    """binary_train/multi_train + autocast(bf16/fp16) + gradient accumulation."""
+    model.train()
+    accum_steps = max(1, int(accum_steps))
+    total_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+    last_step = -1
+    for step, batch in enumerate(train_loader):
+        ctx = torch.autocast(device_type='cuda', dtype=amp_dtype) if use_amp else _nullctx()
+        with ctx:
+            loss = model(batch, batch['y'])
+        loss_scaled = loss / accum_steps
+        if scaler is not None:
+            scaler.scale(loss_scaled).backward()
+        else:
+            loss_scaled.backward()
+        if (step + 1) % accum_steps == 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        total_loss += loss.item() * len(batch['y'])
+        last_step = step
+    if last_step >= 0 and (last_step + 1) % accum_steps != 0:
+        if scaler is not None:
+            scaler.step(optimizer); scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+    return total_loss / len(train_loader.dataset)
+
+
+def _eee_make_train_func(args, base_train_fn):
+    """args.use_amp / args.grad_accum_steps 가 모두 비활성이면 원본 train_fn 그대로 반환."""
+    use_amp = bool(getattr(args, 'use_amp', False))
+    accum = max(1, int(getattr(args, 'grad_accum_steps', 1)))
+    if (not use_amp) and accum == 1:
+        return base_train_fn
+    amp_dtype_str = getattr(args, 'amp_dtype', 'bf16')
+    amp_dtype = torch.bfloat16 if amp_dtype_str == 'bf16' else torch.float16
+    scaler = torch.cuda.amp.GradScaler() if (use_amp and amp_dtype == torch.float16) else None
+
+    def _f(model, train_loader, criterion, optimizer, device):
+        return _eee_amp_train(model, train_loader, criterion, optimizer, device,
+                               use_amp=use_amp, amp_dtype=amp_dtype,
+                               accum_steps=accum, scaler=scaler)
+    return _f
 from sklearn.model_selection import StratifiedKFold
 from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders, get_few_shot_embedding_samples_, generate_and_save_split_indices, prepare_exp_embedding_dataloaders
 from models.TabularFLM_S_ import Model
@@ -71,7 +123,7 @@ def get_args():
     parser.add_argument('--source_lr_few', type=float, default=0.0001)
     parser.add_argument('--llm_model', type=str, default='gpt2_mean',
                         choices=['gpt2_mean','gpt2_auto','sentence-bert','bio-bert','bio-clinical-bert','bio-llama',
-                                 'new','LLAMA_mean','LLAMA_auto'])
+                                 'new','LLAMA_mean','LLAMA_auto','gemma-medical'])
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--des', type=str, help='experimental memo')
     parser.add_argument('--base_dir', type=str, required=True)
@@ -123,10 +175,10 @@ def get_args():
     '''
     parser.add_argument('--num_shared_layers', type=int, default=2, help = "Number of SharedGAT layers")
     parser.add_argument('--num_basis_layers', type=int, default=2, help= 'Number of stacked BasisGAT layers.')
-    parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
+    parser.add_argument('--basis_type', type=str, choices=['mul','ind','sdpa','graphormer'], default = 'ind')
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
-    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2'])
+    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2','carte_d256'])
     parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
     # Experiments Resampling
     parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
@@ -149,6 +201,17 @@ def get_args():
                         help='Checkpoint path for Exp B analysis (Case F model)')
     parser.add_argument('--freeze_ft', action='store_true',
                         help='Fine-tuning 시 set_freeze_target() 적용 (basis_layers + ghead2만 trainable)')
+    # ── Mixed precision + gradient accumulation (main_EEE only) ──
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Enable autocast mixed precision (default: bf16). FGW-safe.')
+    parser.add_argument('--amp_dtype', type=str, default='bf16', choices=['bf16', 'fp16'],
+                        help='Autocast dtype. bf16: fp32-equivalent range, no GradScaler needed. fp16: needs GradScaler.')
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps. Effective batch = batch_size * grad_accum_steps.')
+    parser.add_argument('--use_mmap_embeddings', action='store_true',
+                        help='Load per-field .memmap files instead of the monolithic .pkl '
+                             '(keeps ~349GB off of CPU RAM). '
+                             'Requires convert_embeddings_to_mmap.py to have been run for each dataset.')
     args = parser.parse_args()
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args
@@ -625,7 +688,7 @@ def train_and_validate(args, model, train_loader, val_loader,
     train_f1s, val_f1s = [], []
     train_accs, val_accs = [], []
     train_auprcs, val_auprcs = [], []
-    train_func = binary_train if is_binary else multi_train
+    train_func = _eee_make_train_func(args, binary_train if is_binary else multi_train)
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
     best_val_auc = 0.0
@@ -1026,7 +1089,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20,
         logger.info("[Pretrain] Eval-only run. Skipping training.")
 
     eval_fn  = binary_evaluate if is_bin else multi_evaluate
-    train_fn = binary_train    if is_bin else multi_train
+    train_fn = _eee_make_train_func(args, binary_train if is_bin else multi_train)
 
     # [수정 1] Mean AUC 기준을 위한 초기화
     best_mean_auc = -1.0
@@ -1613,6 +1676,8 @@ def main():
             all_loaders_init[s] = tr
         init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
                  strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
         # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
@@ -1676,6 +1741,8 @@ def main():
             all_loaders_init[s] = tr
         init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
                  strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
         # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
@@ -1762,18 +1829,41 @@ def main():
             use_exp=True, sampling_alpha=alpha
         )
 
+        # === Phase 1 (GAT-only) checkpoint 저장 - contingency 대비 ===
+        _src_tag_p1 = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
+        _model_sig_p1 = (
+            f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}"
+            f"_nbasis-{args.num_basis_layers}_basis-{args.basis_type}_attn-{args.attn_type}"
+            f"_struct_hidden_dim-{args.struct_hidden_dim}_fgw_alpha-{args.fgw_alpha}"
+            f"_alpha-{args.alpha}_vq_beta-{args.vq_beta}_kl_gamma-{args.kl_gamma}_tau-{args.tau}"
+            f"_target_data-{args.target_data}_entropic_reg-{args.entropy_reg}_description-{args.des}"
+        )
+        _phase1_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{_src_tag_p1}/Pre/{_model_sig_p1}/{args.random_seed}/{args.run_tag}"
+        os.makedirs(_phase1_dir, exist_ok=True)
+        _phase1_path = os.path.join(_phase1_dir, "phase1_gat.pt")
+        torch.save({
+            'model_state_dict': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+            'phase': 'gat_pretrain_phase1',
+            'sources': src_list,
+            'sampling_alpha': alpha,
+            'seed': args.random_seed,
+        }, _phase1_path)
+        logger.info(f"[Case 2] Phase 1 GAT-only checkpoint saved: {_phase1_path}")
+
         all_loaders_init = {}
         for s in src_list:
             tr, _, _, _ = load_one(args, s, sampling_alpha=alpha, use_exp=True)
             all_loaders_init[s] = tr
         init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
                  strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
         # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
 
         pretrain_and_eval_sources(
-            args, model, device, sources=src_list, patience=30,
+            args, model, device, sources=src_list, patience=20,
             use_exp=True, sampling_alpha=alpha
         )
 
@@ -1784,8 +1874,8 @@ def main():
         pretrained_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         logger.info(f"[Case 2] Pretrained model saved (alpha={alpha}, all sources)")
 
-        # ── Fine-tune: freeze=False → freeze=True 순차 실행 ──
-        for do_freeze in [False, True]:
+        # ── Fine-tune: freeze=False만 실행 (freeze=True 제외) ──
+        for do_freeze in [False]:
             freeze_tag = '_freeze' if do_freeze else ''
             ft_save_dir = f"/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}/case2{freeze_tag}"
             os.makedirs(ft_save_dir, exist_ok=True)
@@ -1814,7 +1904,7 @@ def main():
 
                 t_src_start = time.time()
                 ft_pack = pretrain_and_eval_sources(
-                    args, model, device, sources=[src_name], patience=20,
+                    args, model, device, sources=[src_name], patience=15,
                     use_exp=True, sampling_alpha=alpha
                 )
                 src_sec = time.time() - t_src_start
@@ -1920,6 +2010,8 @@ def main():
             all_loaders_init[s] = tr
         init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
                  strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
         # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
@@ -2129,6 +2221,8 @@ def main():
             all_loaders_init[s] = tr
         init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
                  strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
         # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
@@ -2159,7 +2253,7 @@ def main():
         FEW_SHOT_EPOCHS = 100 if total_shot <= 16 else 240
 
         model_few.set_freeze_target()
-        train_fn_few = binary_train if is_binary_t else multi_train
+        train_fn_few = _eee_make_train_func(args, binary_train if is_binary_t else multi_train)
         eval_fn_few  = binary_evaluate if is_binary_t else multi_evaluate
 
         R = int(getattr(args, 'support_resamples', 1))

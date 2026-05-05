@@ -320,3 +320,175 @@ class BasisGATLayer_IND(nn.Module):
         attn_weights = torch.cat(head_attns, dim=1)
 
         return basis_outputs, attn_weights
+
+
+class BasisScaledDotLayer(nn.Module):
+    """
+    Value-only scaled dot-product attention.
+    desc_embeddings(name) 는 받지만 사용하지 않음 — value(name_value_embeddings) 만으로 Q/K/V 생성.
+    [B, H, N, N, D] qke 텐서를 만들지 않으므로 메모리 폭발이 없음.
+    CLS->Var on, Var->CLS off, Var-Var 구조 마스크는 기존 GAT 레이어와 동일하게 적용.
+    반환:
+        basis_outputs: [B, new_seq, n_heads, head_dim]
+        attn_weights : [B, n_heads, new_seq, new_seq]
+    """
+    def __init__(self, args, input_dim: int, hidden_dim: int, num_basis_heads: int, dropout: float = 0.1):
+        super().__init__()
+        assert input_dim % num_basis_heads == 0, "input_dim must be divisible by n_heads"
+
+        self.args = args
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_basis_heads = num_basis_heads
+        self.head_dim = input_dim // num_basis_heads
+        self.attn_dropout = nn.Dropout(dropout)
+
+        self.q_proj = nn.Linear(input_dim, input_dim)
+        self.k_proj = nn.Linear(input_dim, input_dim)
+        self.v_proj = nn.Linear(input_dim, input_dim)
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn_init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+                if m.bias is not None:
+                    nn_init.zeros_(m.bias)
+
+    @staticmethod
+    def _no_self_interaction(adj: torch.Tensor) -> torch.Tensor:
+        B, S, _ = adj.shape
+        diag = torch.eye(S, device=adj.device).unsqueeze(0)
+        return adj * (1.0 - diag)
+
+    def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor):
+        """
+        desc_embeddings: [B, S, D] — 인터페이스 호환을 위해 받지만 사용하지 않음
+        name_value_embeddings: [B, new_seq, D], new_seq = S + 1 (CLS 포함)
+        """
+        B, new_seq, _ = name_value_embeddings.shape
+        seq_len = new_seq - 1
+
+        # === Adjacency (CLS->Var on / Var->CLS off) ===
+        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
+        if getattr(self.args, "no_self_loop", False):
+            var_adj = self._no_self_interaction(var_adj)
+
+        new_adj = torch.zeros(B, new_seq, new_seq, device=name_value_embeddings.device)
+        new_adj[:, 1:, 1:] = var_adj
+        new_adj[:, 0, 1:] = 1.0
+        new_adj[:, 1:, 0] = 0.0
+        self.new_adjacency = new_adj
+
+        # === Q/K/V (value-only) ===
+        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+
+        # === Scaled dot-product logits: [B, H, new_seq, new_seq] ===
+        logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        # === Structure mask ===
+        mask = (new_adj.unsqueeze(1) == 0).float() * -1e9
+        logits = logits + mask
+
+        attn_weights = F.softmax(logits, dim=-1)
+        attn_dropped = self.attn_dropout(attn_weights)
+
+        context = torch.matmul(attn_dropped, v)
+        basis_outputs = context.transpose(1, 2).contiguous()  # [B, new_seq, H, head_dim]
+        return basis_outputs, attn_weights
+
+
+class BasisGraphormerLayer(nn.Module):
+    """
+    Graphormer-style attention.
+    - Value stream: scaled dot-product on name_value_embeddings 로 Q/K/V
+    - Name stream: desc_embeddings 로 scalar edge bias 생성 (name_q @ name_k^T / sqrt(d_h))
+    - 최종 logits = Q@K^T/sqrt(d_h) + b_edge + mask
+    - 메모리: [B, H, new_seq, new_seq] 만 유지. [B, H, N², D] 나 [B, N², 2D] 안 만듦.
+    - CLS 행은 learnable cls_name 파라미터로 처리 (CLS->Var bias 도 의미 있게 학습됨)
+    반환:
+        basis_outputs: [B, new_seq, n_heads, head_dim]
+        attn_weights : [B, n_heads, new_seq, new_seq]
+    """
+    def __init__(self, args, input_dim: int, hidden_dim: int, num_basis_heads: int, dropout: float = 0.1):
+        super().__init__()
+        assert input_dim % num_basis_heads == 0, "input_dim must be divisible by n_heads"
+
+        self.args = args
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_basis_heads = num_basis_heads
+        self.head_dim = input_dim // num_basis_heads
+        self.attn_dropout = nn.Dropout(dropout)
+
+        # Value stream Q/K/V
+        self.q_proj = nn.Linear(input_dim, input_dim)
+        self.k_proj = nn.Linear(input_dim, input_dim)
+        self.v_proj = nn.Linear(input_dim, input_dim)
+
+        # Name stream Q/K (for additive edge bias)
+        self.name_q_proj = nn.Linear(input_dim, input_dim)
+        self.name_k_proj = nn.Linear(input_dim, input_dim)
+
+        # Learnable CLS name (name side 의 CLS placeholder)
+        self.cls_name = nn.Parameter(Tensor(1, 1, input_dim))
+        nn.init.uniform_(self.cls_name, a=-1 / math.sqrt(input_dim), b=1 / math.sqrt(input_dim))
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn_init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+                if m.bias is not None:
+                    nn_init.zeros_(m.bias)
+
+    @staticmethod
+    def _no_self_interaction(adj: torch.Tensor) -> torch.Tensor:
+        B, S, _ = adj.shape
+        diag = torch.eye(S, device=adj.device).unsqueeze(0)
+        return adj * (1.0 - diag)
+
+    def forward(self, desc_embeddings: torch.Tensor, name_value_embeddings: torch.Tensor):
+        """
+        desc_embeddings: [B, S, D] — feature name embeddings (CLS 제외)
+        name_value_embeddings: [B, new_seq, D], new_seq = S + 1 (CLS 포함)
+        """
+        B, new_seq, _ = name_value_embeddings.shape
+        seq_len = new_seq - 1
+
+        # === Adjacency (CLS->Var on / Var->CLS off) ===
+        var_adj = torch.ones(B, seq_len, seq_len, device=name_value_embeddings.device)
+        if getattr(self.args, "no_self_loop", False):
+            var_adj = self._no_self_interaction(var_adj)
+
+        new_adj = torch.zeros(B, new_seq, new_seq, device=name_value_embeddings.device)
+        new_adj[:, 1:, 1:] = var_adj
+        new_adj[:, 0, 1:] = 1.0
+        new_adj[:, 1:, 0] = 0.0
+        self.new_adjacency = new_adj
+
+        # === Value stream: Q/K/V ===
+        q = self.q_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(name_value_embeddings).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+
+        # Value logits: [B, H, new_seq, new_seq]
+        logits_v = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        # === Name stream: additive edge bias ===
+        cls_name = self.cls_name.expand(B, 1, self.input_dim)
+        name_full = torch.cat([cls_name, desc_embeddings], dim=1)  # [B, new_seq, D]
+
+        name_q = self.name_q_proj(name_full).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        name_k = self.name_k_proj(name_full).view(B, new_seq, self.num_basis_heads, self.head_dim).transpose(1, 2)
+        edge_bias = torch.matmul(name_q, name_k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B, H, new_seq, new_seq]
+
+        # === Combine + structure mask ===
+        logits = logits_v + edge_bias
+        mask = (new_adj.unsqueeze(1) == 0).float() * -1e9
+        logits = logits + mask
+
+        attn_weights = F.softmax(logits, dim=-1)
+        attn_dropped = self.attn_dropout(attn_weights)
+
+        context = torch.matmul(attn_dropped, v)
+        basis_outputs = context.transpose(1, 2).contiguous()  # [B, new_seq, H, head_dim]
+        return basis_outputs, attn_weights
