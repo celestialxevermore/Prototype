@@ -17,11 +17,115 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 from sklearn.metrics import precision_recall_curve
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import average_precision_score
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.preprocessing import label_binarize
+from scipy.stats import pearsonr
+
+def _kf_reg_metrics(y_true, y_pred):
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    if len(yt) == 0:
+        return {'r2': 0.0, 'rmse': 0.0, 'mae': 0.0, 'pearson': 0.0}
+    r2 = float(r2_score(yt, yp)) if np.std(yt) > 0 else 0.0
+    rmse = float(np.sqrt(mean_squared_error(yt, yp)))
+    mae = float(mean_absolute_error(yt, yp))
+    if len(yt) > 1 and np.std(yt) > 0 and np.std(yp) > 0:
+        pearson = float(pearsonr(yt, yp)[0])
+    else:
+        pearson = 0.0
+    return {'r2': r2, 'rmse': rmse, 'mae': mae, 'pearson': pearson}
 from utils.util import setup_logger, format_time, fix_seed, prepare_results_, save_results_, wrap_up_results_, make_warmup_cosine_epochs, make_warmup_cosine_steps, current_lr, build_epoch_scheduler
 from utils.train_test import binary_train, binary_evaluate, multi_train, multi_evaluate
+from contextlib import nullcontext as _nullctx
+
+
+def kf_evaluate(model, loader, criterion, device):
+    """[KF regression] Same output shape as binary_evaluate ((res_g, res_l), each = (loss, y_true, y_pred)),
+    but predictions are returned raw (no sigmoid) and loss is computed against float targets directly."""
+    model.eval()
+    loss_g_sum, loss_l_sum = 0.0, 0.0
+    y_true = []
+    y_pred_g, y_pred_l = [], []
+    has_global = False
+    with torch.no_grad():
+        for batch in loader:
+            preds = model.predict(batch, return_all=True)
+            target = batch['y'].to(device).view(-1, 1).float()
+            if isinstance(preds, tuple) and len(preds) == 2:
+                global_pred, local_pred = preds
+                has_global = True
+                loss_g = criterion(global_pred, target)
+                loss_g_sum += loss_g.item() * len(target)
+                y_pred_g.extend(global_pred.detach().cpu().numpy())
+            else:
+                local_pred = preds
+                has_global = False
+            loss_l = criterion(local_pred, target)
+            loss_l_sum += loss_l.item() * len(target)
+            y_pred_l.extend(local_pred.detach().cpu().numpy())
+            y_true.extend(target.cpu().numpy())
+    dataset_len = len(loader.dataset)
+    loss_l_avg = loss_l_sum / dataset_len
+    res_l = (loss_l_avg, np.array(y_true), np.array(y_pred_l))
+    if has_global:
+        loss_g_avg = loss_g_sum / dataset_len
+        res_g = (loss_g_avg, np.array(y_true), np.array(y_pred_g))
+    else:
+        res_g = res_l
+    return res_g, res_l
+
+def _eee_amp_train(model, train_loader, criterion, optimizer, device,
+                    use_amp=False, amp_dtype=torch.bfloat16, accum_steps=1, scaler=None):
+    """binary_train/multi_train + autocast(bf16/fp16) + gradient accumulation."""
+    model.train()
+    accum_steps = max(1, int(accum_steps))
+    total_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+    last_step = -1
+    for step, batch in enumerate(train_loader):
+        ctx = torch.autocast(device_type='cuda', dtype=amp_dtype) if use_amp else _nullctx()
+        with ctx:
+            loss = model(batch, batch['y'])
+        loss_scaled = loss / accum_steps
+        if scaler is not None:
+            scaler.scale(loss_scaled).backward()
+        else:
+            loss_scaled.backward()
+        if (step + 1) % accum_steps == 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        total_loss += loss.item() * len(batch['y'])
+        last_step = step
+    if last_step >= 0 and (last_step + 1) % accum_steps != 0:
+        if scaler is not None:
+            scaler.step(optimizer); scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+    return total_loss / len(train_loader.dataset)
+
+
+def _eee_make_train_func(args, base_train_fn):
+    """args.use_amp / args.grad_accum_steps 가 모두 비활성이면 원본 train_fn 그대로 반환."""
+    use_amp = bool(getattr(args, 'use_amp', False))
+    accum = max(1, int(getattr(args, 'grad_accum_steps', 1)))
+    if (not use_amp) and accum == 1:
+        return base_train_fn
+    amp_dtype_str = getattr(args, 'amp_dtype', 'bf16')
+    amp_dtype = torch.bfloat16 if amp_dtype_str == 'bf16' else torch.float16
+    scaler = torch.cuda.amp.GradScaler() if (use_amp and amp_dtype == torch.float16) else None
+
+    def _f(model, train_loader, criterion, optimizer, device):
+        return _eee_amp_train(model, train_loader, criterion, optimizer, device,
+                               use_amp=use_amp, amp_dtype=amp_dtype,
+                               accum_steps=accum, scaler=scaler)
+    return _f
 from sklearn.model_selection import StratifiedKFold
-from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders, get_few_shot_embedding_samples_
+from dataset.data_dataloaders import get_few_shot_embedding_samples, prepare_embedding_dataloaders, get_few_shot_embedding_samples_, generate_and_save_split_indices, prepare_exp_embedding_dataloaders, prepare_embedding_dataloaders_kf, prepare_exp_embedding_dataloaders_kf
 from models.TabularFLM_S_ import Model
 #from main_G import final_test_evaluate  # few-shot 학습/테스트 루틴 사용
 import psutil
@@ -41,7 +145,7 @@ experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 p = psutil.Process()
 p.cpu_affinity(range(1, 64))
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-#os.environ["CUDA_VISIBLE_DEVICES"]="2"
+#os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -49,27 +153,27 @@ logger = setup_logger()
 def get_args():
     parser = argparse.ArgumentParser(description='ProtoLLM For Tabular Task')
     parser.add_argument('--random_seed', type=int, default=42, help='random_seed')
-    parser.add_argument('--train_epochs', type=int, default=1000, help='train epochs')
+    parser.add_argument('--train_epochs', type=int, default=150, help='train epochs')
+    parser.add_argument('--pt_patience', type=int, default=15, help='[KF] PT patience for case2 Phase 1/Phase 2')
+    parser.add_argument('--ft_patience', type=int, default=15, help='[KF] FT patience for case2 per-source FT')
+    parser.add_argument('--ft_use_local_loss', action='store_true', default=True,
+                        help='[KF] Add local_loss to FT total_loss (default True for KF: source has full train data, mirrors PT structure).')
     parser.add_argument('--run_tag', type=str, default="", help="Run identifier to avoid checkpoint collisions (e.g., 20251215_132001)")
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size')
-    parser.add_argument('--input_dim', type=int, default=256)
+    parser.add_argument('--input_dim', type=int, default=768)
     parser.add_argument('--hidden_dim', type=int, default=192)
     parser.add_argument('--struct_hidden_dim', type=int, default = 192)
     parser.add_argument('--output_dim', type=int, default=1)
     parser.add_argument('--dropout_rate', type=float, default=0.1)
     parser.add_argument('--source_data', nargs='+',
-                        default=[ 'Medicaldataset','Cardiovascular_Disease_Dataset', 'Heart_disease_statlog','Erbil_Cardiovascular_Health_Dataset', 'cardio_SAheart', 'heart_failure_clinical_records'],
-                        choices=['adult','bank','blood','car','communities','credit-g','diabetes','heart',
-                                 'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
-                                 'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
-                                 'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset',
-                                 'mimic_mortality','eicu_mortality','hirid_mortality','support_mortality','zigong_mortality','sic_mortality'])
-    parser.add_argument('--target_data', type=str, default='heart')
+                        default=['mimic_kf', 'eicu_kf', 'hirid_kf', 'sic_kf', 'zigong_kf'],
+                        choices=['mimic_kf', 'eicu_kf', 'hirid_kf', 'sic_kf', 'zigong_kf'])
+    parser.add_argument('--target_data', type=str, default='mimic_kf')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
-    parser.add_argument('--num_classes', type=int, default=2)
+    parser.add_argument('--num_classes', type=int, default=1)
     parser.add_argument('--source_lr', type=float, default=0.0001)
     parser.add_argument('--source_lr_few', type=float, default=0.0001)
-    parser.add_argument('--llm_model', type=str, default='gemma-medical',
+    parser.add_argument('--llm_model', type=str, default='gpt2_mean',
                         choices=['gpt2_mean','gpt2_auto','sentence-bert','bio-bert','bio-clinical-bert','bio-llama',
                                  'new','LLAMA_mean','LLAMA_auto','gemma-medical'])
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
@@ -118,16 +222,15 @@ def get_args():
     parser.add_argument('--hp_reg', type=float, default=1.0)
     parser.add_argument('--hs_reg', type=float, default=0.1)
     parser.add_argument('--hs_warmup', type=int, default=30)
-    parser.add_argument('--ft_use_local_loss', action='store_true', default=False)
     '''
         Basis GAT Configuration
     '''
     parser.add_argument('--num_shared_layers', type=int, default=2, help = "Number of SharedGAT layers")
     parser.add_argument('--num_basis_layers', type=int, default=2, help= 'Number of stacked BasisGAT layers.')
-    parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
+    parser.add_argument('--basis_type', type=str, choices=['mul','ind','sdpa','graphormer'], default = 'ind')
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
-    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2'])
+    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2','carte_d256'])
     parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
     # Experiments Resampling
     parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')
@@ -135,6 +238,31 @@ def get_args():
                     help='Warmup steps/epochs ratio (0~1)')
     parser.add_argument('--min_lr_mult', type=float, default=0.10,
                         help='Final LR multiplier vs. base LR for cosine annealing (e.g., 0.1 means 10% of base)')
+    # ── Exp A / Exp B (2026.04.02) ──
+    parser.add_argument('--exp_mode', type=str, default='case2',
+                        choices=['case2'],
+                        help='[KF] Only case2 (Phase 1 GAT + init_lcg + Phase 2 LCG joint + per-source FT) is supported')
+    parser.add_argument('--sampling_alpha', type=float, default=1.0,
+                        help='Train set sampling ratio (0.0~1.0) for multi-source scaling')
+    parser.add_argument('--exclude_sources', nargs='*', default=[],
+                        help='Sources to exclude for Exp B retraining')
+    parser.add_argument('--eval_source', type=str, default=None,
+                        help='Single source to evaluate (single_source mode)')
+    parser.add_argument('--ckpt_path', type=str, default=None,
+                        help='Checkpoint path for Exp B analysis (Case F model)')
+    parser.add_argument('--freeze_ft', action='store_true',
+                        help='Fine-tuning 시 set_freeze_target() 적용 (basis_layers + ghead2만 trainable)')
+    # ── Mixed precision + gradient accumulation (main_EEE only) ──
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Enable autocast mixed precision (default: bf16). FGW-safe.')
+    parser.add_argument('--amp_dtype', type=str, default='bf16', choices=['bf16', 'fp16'],
+                        help='Autocast dtype. bf16: fp32-equivalent range, no GradScaler needed. fp16: needs GradScaler.')
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps. Effective batch = batch_size * grad_accum_steps.')
+    parser.add_argument('--use_mmap_embeddings', action='store_true',
+                        help='Load per-field .memmap files instead of the monolithic .pkl '
+                             '(keeps ~349GB off of CPU RAM). '
+                             'Requires convert_embeddings_to_mmap.py to have been run for each dataset.')
     args = parser.parse_args()
     args.table_path = f"/storage/personal/eungyeop/dataset/table/"
     return args
@@ -142,8 +270,7 @@ def get_args():
 WANDB_KEYS = [
     "alpha", "tau", "soft_tau", "vq_beta",
     "source_lr", "source_lr_few", "dropout_rate",
-    "fgw_alpha", "few_shot", "random_seed", "entropy_reg", "hs_reg",
-    "n_graphs", "n_nodes",
+    "fgw_alpha", "few_shot", "random_seed", "entropy_reg"
 ]
 def wandb_make_serializable_config(args):
     """args -> wandb.config에 안전하게 들어가도록 직렬화 가능한 dict로 변환"""
@@ -163,17 +290,12 @@ def wandb_init_and_override_args(args):
     - sweep(agent)로 넘어온 wandb.config 값은 WANDB_KEYS만 args에 덮어쓴다.
     """
     try:
-        # sweep agent가 실행할 때는 WANDB_PROJECT, WANDB_RUN_ID 등을 자동 주입
-        # 환경변수가 없으면 default project 사용
-        init_kwargs = dict(
+        run = wandb.init(
+            project=os.getenv("WANDB_PROJECT", "ProtoLLM-Sweep"),
+            entity=os.getenv("WANDB_ENTITY", None),
             config=vars(args),
+            name=os.getenv("WANDB_RUN_NAME", None),
         )
-        # sweep이 아닌 경우에만 project/entity 명시
-        if os.getenv("WANDB_SWEEP_ID") is None:
-            init_kwargs["project"] = os.getenv("WANDB_PROJECT", "ProtoLLM_entropic20251217")
-            init_kwargs["entity"] = os.getenv("WANDB_ENTITY", None)
-            init_kwargs["name"] = os.getenv("WANDB_RUN_NAME", None)
-        run = wandb.init(**init_kwargs)
     except Exception as e:
         print(f"[wandb] init skipped: {e}")
         return None
@@ -484,10 +606,18 @@ def make_step(loaders, mode='random', seed=42):
 
 
 
-def load_one(args, name):
-    res = prepare_embedding_dataloaders(args, name, is_source=True)
-    train_loader, val_loader, test_loader = res['loaders']
-    num_classes = res['num_classes']
+def load_one(args, name, sampling_alpha=1.0, use_exp=False):
+    # [KF] regression embeddings.
+    #   use_exp=True → Exp-style 60/20/20 (train/val/test) for case2 PT and FT (per-source held-out test).
+    #   use_exp=False → 85/15 (train/val) only (legacy source-only mode, not used by case2).
+    if use_exp:
+        r = prepare_exp_embedding_dataloaders_kf(args, name, alpha=sampling_alpha)
+        train_loader, val_loader, test_loader = r['loaders']
+        num_classes = r['num_classes']
+    else:
+        res = prepare_embedding_dataloaders_kf(args, name, is_source=True)
+        train_loader, val_loader, test_loader = res['loaders']
+        num_classes = res['num_classes']
     return train_loader, val_loader, test_loader, num_classes
 
 
@@ -512,90 +642,47 @@ def compute_auprc(y_true, y_pred) -> float:
 
 def final_test_evaluate(model, test_loader, criterion, device, is_binary, threshold=None, mode="Full", args=None):
     """
-    학습이 끝난 뒤, Test 로더에 대해 최종 성능을 측정.
-    [수정 완료] Phase 2(Joint)와 Phase 3(Adaptation)에서는 Global 결과를 반환.
+    [KF regression] Returns (loss, R², Pearson, -RMSE, -MAE, R², R², y_true, y_pred).
+    Slot semantics (legacy classification slot names retained):
+      test_auc       <- R²       (sweep main metric, higher is better)
+      test_auprc     <- Pearson  (secondary)
+      test_precision <- -RMSE
+      test_recall    <- -MAE
+      test_f1        <- R²       (mirror of test_auc)
+      test_acc       <- R²       (mirror of test_auc)
     """
-    #pdb.set_trace()
     logger = logging.getLogger("my_experiment_logger")
-    from sklearn.metrics import average_precision_score
-    # 1. 함수 매핑 (Dual)
-    evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
-    # 2. 평가 실행 (Binary / Multi-class 공통 구조화)
-    # evaluate_func가 항상 ((loss_g, true, pred_g), (loss_l, true, pred_l)) 형태를 반환한다고 가정
+    evaluate_func = kf_evaluate
     (loss_g, true_g, pred_g), (loss_l, true_l, pred_l) = evaluate_func(model, test_loader, criterion, device)
 
-    # -----------------------------------------------------------
-    # [핵심 수정] Global 선택 기준 로직 통일
-    # -----------------------------------------------------------
-    # 1. Target Adaptation (Few) 이거나
-    # 2. Pretrain 중 Joint Learning (use_lcg=True) 인 경우
-    # -> Global이 메인
-    
     use_lcg_flag = getattr(args, 'use_lcg', False) if args is not None else False
     use_global = (mode == 'Few') or use_lcg_flag
-        
+
     if use_global:
-        # [Global 기준]
         test_loss = loss_g
         y_true_test = true_g
         y_pred_test = pred_g
-        
-        # 참고용 로그
-        if is_binary:
-            auc_l = roc_auc_score(true_l, pred_l)
-            logger.info(f"[Test Check] Mode={mode} (Global Selected). Local AUC: {auc_l:.4f} (Ref)")
-        else:
-            logger.info(f"[Test Check] Mode={mode} (Global Selected). Local results ignored in log.")
-
+        m_l = _kf_reg_metrics(true_l, pred_l)
+        logger.info(f"[Test Check] Mode={mode} (Global Selected). Local R²: {m_l['r2']:.4f} (Ref)")
     else:
-        # [Local 기준] (Phase 1 Vanilla GAT)
         test_loss = loss_l
         y_true_test = true_l
         y_pred_test = pred_l
-        
-        # 참고용 로그
-        if is_binary:
-            auc_g = roc_auc_score(true_g, pred_g)
-            logger.info(f"[Test Check] Mode={mode} (Local Selected). Global AUC: {auc_g:.4f} (Ref)")
-        else:
-            logger.info(f"[Test Check] Mode={mode} (Local Selected). Global results ignored in log.")
-    
-    test_auprc = float('nan')
-    # 3. Metric 계산 (선택된 y_pred_test 사용)
-    if is_binary:
-        test_auc = roc_auc_score(y_true_test, y_pred_test)
-        
-        # Threshold 적용
-        if threshold is None:
-            # Threshold가 안 넘어왔으면 최적 threshold 찾기 (Test set 기준이라 좀 그렇지만, fallback)
-            # 보통은 학습 때 구한 threshold를 넘겨줘야 함.
-            threshold = 0.5 
-        
-        y_pred_test_bin = (y_pred_test > threshold).astype(int)
-        
-        test_precision = precision_score(y_true_test, y_pred_test_bin, zero_division=0)
-        test_recall = recall_score(y_true_test, y_pred_test_bin, zero_division=0)
-        test_f1 = f1_score(y_true_test, y_pred_test_bin, zero_division=0)
-        test_acc = accuracy_score(y_true_test, y_pred_test_bin)
-        test_auprc = average_precision_score(y_true_test, y_pred_test)
+        m_g = _kf_reg_metrics(true_g, pred_g)
+        logger.info(f"[Test Check] Mode={mode} (Local Selected). Global R²: {m_g['r2']:.4f} (Ref)")
 
-    else:
-        # Multi-class Metrics
-        n_classes = y_pred_test.shape[1]
-        y_true_test_bin = label_binarize(y_true_test, classes=range(n_classes))
-        test_auc = roc_auc_score(y_true_test_bin, y_pred_test, multi_class='ovr', average='macro')
-        
-        preds_argmax = y_pred_test.argmax(axis=1)
-        test_precision = precision_score(y_true_test, preds_argmax, average='macro', zero_division=0)
-        test_recall = recall_score(y_true_test, preds_argmax, average='macro', zero_division=0)
-        test_f1 = f1_score(y_true_test, preds_argmax, average='macro', zero_division=0)
-        test_acc = accuracy_score(y_true_test, preds_argmax)
-        test_auprc = average_precision_score(y_true_test_bin, y_pred_test, average='macro')
+    m = _kf_reg_metrics(y_true_test, y_pred_test)
+    test_auc       = m['r2']
+    test_auprc     = m['pearson']
+    test_precision = -m['rmse']
+    test_recall    = -m['mae']
+    test_f1        = m['r2']
+    test_acc       = m['r2']
 
-    logger.info(f"[Test Final] Mode: {mode} | Loss: {test_loss:.4f}, AUC: {test_auc:.4f}, AUPRC: {test_auprc:.4f}, ACC: {test_acc:.4f}, "
-            f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1: {test_f1:.4f}")
-    
+    logger.info(f"[Test Final] Mode: {mode} | Loss: {test_loss:.4f}, R²: {m['r2']:.4f}, "
+                f"Pearson: {m['pearson']:.4f}, RMSE: {m['rmse']:.4f}, MAE: {m['mae']:.4f}")
+
     return test_loss, test_auc, test_auprc, test_precision, test_recall, test_f1, test_acc, y_true_test, y_pred_test
 
 def train_and_validate(args, model, train_loader, val_loader,
@@ -612,7 +699,7 @@ def train_and_validate(args, model, train_loader, val_loader,
     train_f1s, val_f1s = [], []
     train_accs, val_accs = [], []
     train_auprcs, val_auprcs = [], []
-    train_func = binary_train if is_binary else multi_train
+    train_func = _eee_make_train_func(args, binary_train if is_binary else multi_train)
     evaluate_func = binary_evaluate if is_binary else multi_evaluate
 
     best_val_auc = 0.0
@@ -944,16 +1031,16 @@ def train_and_validate(args, model, train_loader, val_loader,
 # -----------------------------
 # 멀티 소스 프리트레인 (per-source patience) + 소스별 테스트 → 평균
 # -----------------------------
-def pretrain_and_eval_sources(args, model, device, sources, patience=20):
+def pretrain_and_eval_sources(args, model, device, sources, patience=20,
+                              use_exp=False, sampling_alpha=1.0):
     import shutil
     logger_name = "my_experiment_logger"
     logger = logging.getLogger(logger_name)
-    #pdb.set_trace()
     name_to_idx = {name: i for i, name in enumerate(sources)}
-    trains, vals, ncs = [], [], []
+    trains, vals, tests, ncs = [], [], [], []
     for name in sources:
-        tr, va, te, nc = load_one(args, name)  # te is None (source has no test)
-        trains.append(tr); vals.append(va); ncs.append(nc)
+        tr, va, te, nc = load_one(args, name, sampling_alpha=sampling_alpha, use_exp=use_exp)
+        trains.append(tr); vals.append(va); tests.append(te); ncs.append(nc)
 
     if len(set(ncs)) != 1:
         raise ValueError(f"num_classes mismatch across sources: {ncs}")
@@ -963,15 +1050,27 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     # 학습은 다중 소스를 섞어서
     tr_step = make_step(trains, mode='random', seed=args.random_seed)
 
-    # 검증/개별-학습 평가용 (test 제거)
+    # 검증/개별-학습 평가용
     val_steps   = [MultiSourceStepLoader([vals[i]],   mode='round', seed=args.random_seed, src_idx=i) for i in range(len(vals))]
     train_steps = [MultiSourceStepLoader([trains[i]], mode='round', seed=args.random_seed, src_idx=i) for i in range(len(trains))]
+    # Exp A/B: test loader가 존재하면 test_steps도 구성
+    if use_exp and any(t is not None for t in tests):
+        test_steps = [MultiSourceStepLoader([tests[i]], mode='round', seed=args.random_seed, src_idx=i)
+                      for i in range(len(tests)) if tests[i] is not None]
+    else:
+        test_steps = None
 
     is_bin = (args.num_classes == 2)
-    crit   = nn.BCEWithLogitsLoss() if is_bin else nn.CrossEntropyLoss()
-    
+    is_reg = (args.num_classes == 1)
+    if is_reg:
+        crit = nn.MSELoss()
+    elif is_bin:
+        crit = nn.BCEWithLogitsLoss()
+    else:
+        crit = nn.CrossEntropyLoss()
 
-    from sklearn.metrics import average_precision_score  
+
+    from sklearn.metrics import average_precision_score
 
     base_params = [
         p for name, p in model.named_parameters()
@@ -982,10 +1081,12 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         if ("latent_graph" in name or "gnn_experts" in name) and p.requires_grad
     ]
     
-    gat_lr = args.source_lr * 0.1 
-    global_lr = args.source_lr    
+    is_ft = (getattr(model, 'mode', 'Full') == 'Few')
+    base_lr = args.source_lr_few if is_ft else args.source_lr
+    gat_lr = base_lr * 0.1
+    global_lr = base_lr
 
-    logger.info(f"--- 🚀 [Phase 2] Applying Differential LR ---")
+    logger.info(f"--- 🚀 [{'FT' if is_ft else 'PT'}] Applying Differential LR (base={base_lr}) ---")
     logger.info(f"   GAT LR: {gat_lr} (Slow)")
     logger.info(f"   Global LR: {global_lr} (Fast)")
     
@@ -1006,11 +1107,15 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         scheduler_ep = None
         logger.info("[Pretrain] Eval-only run. Skipping training.")
 
-    eval_fn  = binary_evaluate if is_bin else multi_evaluate
-    train_fn = binary_train    if is_bin else multi_train
+    if is_reg:
+        eval_fn = kf_evaluate
+        train_fn = _eee_make_train_func(args, binary_train)  # binary_train works for any model.forward returning loss
+    else:
+        eval_fn  = binary_evaluate if is_bin else multi_evaluate
+        train_fn = _eee_make_train_func(args, binary_train if is_bin else multi_train)
 
     # [수정 1] Mean AUC 기준을 위한 초기화
-    best_mean_auc = -1.0 
+    best_mean_auc = -1.0
     best_min_auc = -1.0
     no_improve = 0
     best_state = None
@@ -1099,8 +1204,13 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             res_g, res_l = eval_fn(model, vl, crit, device)
             _, y_true_l, y_pred_l = res_l
             _, y_true_g, y_pred_g = res_g
-            
-            if is_bin:
+
+            if is_reg:
+                m_l = _kf_reg_metrics(y_true_l, y_pred_l)
+                m_g = _kf_reg_metrics(y_true_g, y_pred_g)
+                score_l, ap_l = m_l['r2'], m_l['pearson']
+                score_g, ap_g = m_g['r2'], m_g['pearson']
+            elif is_bin:
                 score_l = roc_auc_score(y_true_l, y_pred_l)
                 score_g = roc_auc_score(y_true_g, y_pred_g)
 
@@ -1131,6 +1241,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         
         current_lcg_status = getattr(args, 'use_lcg', False)
         print(f"\n[DEBUG CHECK][Epoch {epoch+1}] args.use_lcg: {current_lcg_status} -> Watching: {'Global (LCG)' if current_lcg_status else 'Local (GAT)'}")
+
         # 현재 평균 계산
         current_mean_auc = float(np.mean(target_aucs))
         #current_min_auc = float(np.min(target_aucs))
@@ -1149,10 +1260,13 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         mean_auc_l = float(np.mean(aucs_local))
         mean_auc_g = float(np.mean(aucs_global))
         
+        # [main_EEE] fine-tune이면 현재 source 명시
+        cur_src_tag = f"finetune={sources[0]}" if len(sources) == 1 else f"pretrain=ALL({len(sources)})"
+        _metric_label = "R²" if is_reg else "AUC"
         log_msg = (
-            f"[Pre][Epoch {epoch+1}/{total_epochs}]\n"
-            f"   >>> Local (GAT): Mean AUC {mean_auc_l:.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
-            f"   >>> Global(LCG): Mean AUC {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
+            f"[Pre][Epoch {epoch+1}/{total_epochs}] [{cur_src_tag}]\n"
+            f"   >>> Local (GAT): Mean {_metric_label} {mean_auc_l:.4f} | Per-Source: {['%.4f'%x for x in aucs_local]}\n"
+            f"   >>> Global(LCG): Mean {_metric_label} {mean_auc_g:.4f} | Per-Source: {['%.4f'%x for x in aucs_global]}"
         )
         # log_msg = (
         #     f"[Pre][Epoch {epoch+1}/{total_epochs}]\n"
@@ -1164,10 +1278,11 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
 
         mean_auprc_l = float(np.mean(auprcs_local))
         mean_auprc_g = float(np.mean(auprcs_global))
+        _aux_label = "Pearson" if is_reg else "AUPRC"
         log_msg_auprc = (
             f"[Pre][Epoch {epoch+1}/{total_epochs}]\n"
-            f"   >>> Local (GAT): Mean AUPRC {mean_auprc_l:.4f} | Per-Source: {['%.4f'%x for x in auprcs_local]}\n"
-            f"   >>> Global(LCG): Mean AUPRC {mean_auprc_g:.4f} | Per-Source: {['%.4f'%x for x in auprcs_global]}"
+            f"   >>> Local (GAT): Mean {_aux_label} {mean_auprc_l:.4f} | Per-Source: {['%.4f'%x for x in auprcs_local]}\n"
+            f"   >>> Global(LCG): Mean {_aux_label} {mean_auprc_g:.4f} | Per-Source: {['%.4f'%x for x in auprcs_global]}"
         )
         logger.info(log_msg_auprc)
 
@@ -1260,7 +1375,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         model.load_state_dict(best_state)
 
     # -----------------------------
-    # 최종 리포트 (train/val만, source test 제거)
+    # 최종 리포트 (train/val + test if use_exp)
     # -----------------------------
     per_train_loss, per_val_loss = [], []
     per_train_auc,  per_val_auc  = [], []
@@ -1269,20 +1384,33 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     per_train_f1,        per_val_f1        = [], []
     per_train_acc,       per_val_acc       = [], []
     per_train_auprc,     per_val_auprc     = [], []
+    # Exp A/B: per-source test metrics
+    per_test_auc, per_test_auprc, per_test_acc = [], [], []
+    per_test_f1, per_test_precision, per_test_recall = [], [], []
+    per_test_loss = []
 
     for i in range(len(sources)):
-        # <--- [확인] Global 결과 우선 (res_g)
         (val_loss_i, y_true_val_i, y_pred_val_i), _ = eval_fn(model, val_steps[i], crit, device)
-        
-        if is_bin:
+
+        if is_reg:
+            thr_i = None
+        elif is_bin:
             thr_i = find_optimal_threshold(y_true_val_i, y_pred_val_i)
         else:
             thr_i = None
 
         # Train
         (train_loss_i, y_true_tr_i, y_pred_tr_i), _ = eval_fn(model, train_steps[i], crit, device)
-        
-        if is_bin:
+
+        if is_reg:
+            m_tr = _kf_reg_metrics(y_true_tr_i, y_pred_tr_i)
+            train_auc_i = m_tr['r2']
+            train_auprc_i = m_tr['pearson']
+            train_precision_i = -m_tr['rmse']
+            train_recall_i    = -m_tr['mae']
+            train_f1_i        = m_tr['r2']
+            train_acc_i       = m_tr['r2']
+        elif is_bin:
             train_auc_i = roc_auc_score(y_true_tr_i, y_pred_tr_i)
             train_auprc_i = average_precision_score(y_true_tr_i, y_pred_tr_i)
             y_bin_tr = (y_pred_tr_i > thr_i).astype(int)
@@ -1302,7 +1430,15 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             train_acc_i       = accuracy_score(y_true_tr_i, preds_tr)
 
         # Val
-        if is_bin:
+        if is_reg:
+            m_va = _kf_reg_metrics(y_true_val_i, y_pred_val_i)
+            val_auc_i = m_va['r2']
+            val_auprc_i = m_va['pearson']
+            val_precision_i = -m_va['rmse']
+            val_recall_i    = -m_va['mae']
+            val_f1_i        = m_va['r2']
+            val_acc_i       = m_va['r2']
+        elif is_bin:
             val_auc_i = roc_auc_score(y_true_val_i, y_pred_val_i)
             val_auprc_i = average_precision_score(y_true_val_i, y_pred_val_i)
             y_bin_val = (y_pred_val_i > thr_i).astype(int)
@@ -1310,7 +1446,6 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             val_recall_i    = recall_score(y_true_val_i, y_bin_val, zero_division=0)
             val_f1_i        = f1_score(y_true_val_i, y_bin_val, zero_division=0)
             val_acc_i       = accuracy_score(y_true_val_i, y_bin_val)
-            
         else:
             n_cls = y_pred_val_i.shape[1]
             y_bin_val = label_binarize(y_true_val_i, classes=range(n_cls))
@@ -1322,7 +1457,6 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
             val_f1_i        = f1_score(y_true_val_i, preds_val, average='macro', zero_division=0)
             val_acc_i       = accuracy_score(y_true_val_i, preds_val)
 
-        # 누적 (test 제거)
         per_train_loss.append(train_loss_i); per_val_loss.append(val_loss_i)
         per_train_auc.append(train_auc_i);   per_val_auc.append(val_auc_i)
         per_train_precision.append(train_precision_i); per_val_precision.append(val_precision_i)
@@ -1331,7 +1465,45 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         per_train_acc.append(train_acc_i);             per_val_acc.append(val_acc_i)
         per_train_auprc.append(train_auprc_i);         per_val_auprc.append(val_auprc_i)
 
-    # 평균 집계 (test 제거)
+        # Test (Exp A/B only)
+        if test_steps is not None:
+            (test_loss_i, y_true_te_i, y_pred_te_i), _ = eval_fn(model, test_steps[i], crit, device)
+            if is_reg:
+                m_te = _kf_reg_metrics(y_true_te_i, y_pred_te_i)
+                te_auc_i = m_te['r2']
+                te_auprc_i = m_te['pearson']
+                te_prec_i  = -m_te['rmse']
+                te_rec_i   = -m_te['mae']
+                te_f1_i    = m_te['r2']
+                te_acc_i   = m_te['r2']
+            elif is_bin:
+                te_auc_i   = roc_auc_score(y_true_te_i, y_pred_te_i)
+                te_auprc_i = average_precision_score(y_true_te_i, y_pred_te_i)
+                y_bin_te   = (y_pred_te_i > thr_i).astype(int)
+                te_prec_i  = precision_score(y_true_te_i, y_bin_te, zero_division=0)
+                te_rec_i   = recall_score(y_true_te_i, y_bin_te, zero_division=0)
+                te_f1_i    = f1_score(y_true_te_i, y_bin_te, zero_division=0)
+                te_acc_i   = accuracy_score(y_true_te_i, y_bin_te)
+            else:
+                n_cls = y_pred_te_i.shape[1]
+                y_bin_te   = label_binarize(y_true_te_i, classes=range(n_cls))
+                te_auc_i   = roc_auc_score(y_bin_te, y_pred_te_i, multi_class='ovr', average='macro')
+                te_auprc_i = average_precision_score(y_bin_te, y_pred_te_i, average='macro')
+                preds_te   = y_pred_te_i.argmax(axis=1)
+                te_prec_i  = precision_score(y_true_te_i, preds_te, average='macro', zero_division=0)
+                te_rec_i   = recall_score(y_true_te_i, preds_te, average='macro', zero_division=0)
+                te_f1_i    = f1_score(y_true_te_i, preds_te, average='macro', zero_division=0)
+                te_acc_i   = accuracy_score(y_true_te_i, preds_te)
+            per_test_loss.append(test_loss_i)
+            per_test_auc.append(te_auc_i);     per_test_auprc.append(te_auprc_i)
+            per_test_acc.append(te_acc_i);     per_test_f1.append(te_f1_i)
+            per_test_precision.append(te_prec_i); per_test_recall.append(te_rec_i)
+            if is_reg:
+                logger.info(f"   [Test] {sources[i]}: R²={te_auc_i:.4f} Pearson={te_auprc_i:.4f} RMSE={-te_prec_i:.4f} MAE={-te_rec_i:.4f}")
+            else:
+                logger.info(f"   [Test] {sources[i]}: AUC={te_auc_i:.4f} AUPRC={te_auprc_i:.4f} ACC={te_acc_i:.4f}")
+
+    # 평균 집계
     train_losses_full = [float(np.mean(per_train_loss))]
     val_losses_full   = [float(np.mean(per_val_loss))]
     train_aucs_full = [float(np.mean(per_train_auc))]
@@ -1349,7 +1521,7 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
     val_auprcs_full   = [float(np.mean(per_val_auprc))]
 
     # ===========================
-    # ✅ wandb: 최종 요약 로그(선택)
+    # wandb: 최종 요약 로그
     # ===========================
     try:
         wandb_safe_log({
@@ -1381,6 +1553,25 @@ def pretrain_and_eval_sources(args, model, device, sources, patience=20):
         train_auprcs_full=train_auprcs_full,
         val_auprcs_full=val_auprcs_full,
     )
+    # Exp A/B: per-source test 결과 추가
+    if test_steps is not None:
+        full_pack['per_source_test'] = {
+            'sources': list(sources),
+            'auc':   per_test_auc,
+            'auprc': per_test_auprc,
+            'acc':   per_test_acc,
+            'f1':    per_test_f1,
+            'precision': per_test_precision,
+            'recall': per_test_recall,
+            'loss':  per_test_loss,
+        }
+        logger.info(f"[Test Summary] Per-source AUC: {['%.4f'%x for x in per_test_auc]}")
+        if is_reg:
+            logger.info(f"[Test Summary] Mean R²: {np.mean(per_test_auc):.4f}, Mean Pearson: {np.mean(per_test_auprc):.4f}, "
+                        f"Mean RMSE: {-np.mean(per_test_precision):.4f}, Mean MAE: {-np.mean(per_test_recall):.4f}")
+        else:
+            logger.info(f"[Test Summary] Mean AUC: {np.mean(per_test_auc):.4f}, Mean AUPRC: {np.mean(per_test_auprc):.4f}")
+
     return full_pack
 
 def find_pretrain_ckpt(ckpt_dir: str):
@@ -1394,18 +1585,31 @@ def find_pretrain_ckpt(ckpt_dir: str):
     except FileNotFoundError:
         return None
 
+'''
+    2026.04.02
+    ================================================================================
+    main() — Exp A / Exp B 전용 파이프라인
+    ================================================================================
+
+    exp_mode 분기:
+        single_source   — Exp A Step 2: 각 source별 독립 모델 학습 → 자기 test 평가
+        multi_source    — Exp A Step 3/4: α scaling으로 multi-source 학습 → 모든 source test 평가
+        exp_b_analysis  — Exp B Step 1/2: Case F 모델에서 LCG routing π 추출 → relevance 계산
+        exp_b_retrain   — Exp B Step 3: 이질적 source 제외 후 retraining
+'''
+
+
 def main():
     start_time = time.time()
     args = get_args()
     if not getattr(args, "run_tag", ""):
-        from datetime import datetime
         args.run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     wandb_init_and_override_args(args)
     wandb_update_config_minimal(args)
+    import json, copy
 
     def _wandb_log(d, step=None):
         try:
-            import wandb
             if wandb.run is not None:
                 wandb.log(d, step=step)
         except Exception:
@@ -1413,34 +1617,18 @@ def main():
 
     def _wandb_summary_set(d):
         try:
-            import wandb
             if wandb.run is not None:
                 for k, v in d.items():
                     wandb.run.summary[k] = v
         except Exception:
             pass
 
-    try:
-        import wandb
-        if wandb.run is not None:
-            cfg = {}
-            for k, v in vars(args).items():
-                if isinstance(v, (int, float, str, bool)) or v is None:
-                    cfg[k] = v
-                elif isinstance(v, (list, tuple)):
-                    cfg[k] = list(v)
-                else:
-                    cfg[k] = str(v)
-            wandb.config.update(cfg, allow_val_change=True)
-    except Exception:
-        pass
-
     fix_seed(args.random_seed)
-    
-    logger_name = "my_experiment_logger" 
+
+    logger_name = "my_experiment_logger"
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
-    logger.propagate = False 
+    logger.propagate = False
 
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         stream_handler = logging.StreamHandler(sys.stdout)
@@ -1448,9 +1636,11 @@ def main():
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
-        
-    logger.info("--- 💡 Global logger initialized (Console) 💡 ---")
-    logger.info(f"[RUN_TAG] run_tag = {args.run_tag}")
+
+    logger.info(f"--- [main_E] Exp A/B Pipeline ---")
+    logger.info(f"[RUN_TAG] {args.run_tag}  [EXP_MODE] {args.exp_mode}  [SEED] {args.random_seed}")
+    logger.info(f"[sampling_alpha] {args.sampling_alpha}  [exclude_sources] {args.exclude_sources}")
+
     try:
         ncpu = os.cpu_count() or 1
         p.cpu_affinity(range(1, min(ncpu, 64)))
@@ -1458,512 +1648,788 @@ def main():
         logger.warning(f"cpu_affinity not set: {e}")
 
     device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
-    logger.info(f"Starting experiment with Multiple-Source : {args.source_data}")
     logger.info(f"Device: {device}")
-    logger.info("Preparing Tabular datasets...")
 
-    _wandb_log({
-        "env/device": str(device),
-        "env/use_gpu": int(bool(getattr(args, "use_gpu", False))),
-        "data/source_data": "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data),
-        "data/target_data": str(getattr(args, "target_data", "")),
-        "exp/random_seed": int(getattr(args, "random_seed", -1)),
-        "exp/experiment_id": str(experiment_id),
-    })
+    # ── 결과 저장 디렉토리 ──
+    freeze_tag = '_freeze' if getattr(args, 'freeze_ft', False) else ''
+    exp_results_dir = f"/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}/{args.exp_mode}{freeze_tag}"
+    os.makedirs(exp_results_dir, exist_ok=True)
 
-    # 1) 모델 생성
-    model_full = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
-                       args.dropout_rate, args.llm_model,
-                       experiment_id, mode="Full").to(device)
-    model_few  = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
-                       args.dropout_rate, args.llm_model,
-                       experiment_id, mode="Few").to(device)
-
-    # 2) 프리트레인 체크포인트 로드 시도
-    src_tag = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
-    model_sig = (
-        f"ngraphs-{args.n_graphs}"
-        f"_nnodes-{args.n_nodes}"
-        f"_gdim-{args.graph_dim}"
-        f"_nbasis-{args.num_basis_layers}"
-        f"_basis-{args.basis_type}"
-        f"_attn-{args.attn_type}"
-        f"_struct_hidden_dim-{args.struct_hidden_dim}"
-        f"_fgw_alpha-{args.fgw_alpha}"
-        f"_alpha-{args.alpha}"
-        f"_vq_beta-{args.vq_beta}"
-        f"_kl_gamma-{args.kl_gamma}"
-        f"_tau-{args.tau}"
-        f"_target_data-{args.target_data}"
-        f"_entropic_reg-{args.entropy_reg}"
-        f"_description-{args.des}"
-    )
-    ckpt_dir  = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{src_tag}/Pre/{model_sig}/{args.random_seed}/{args.run_tag}"
-    os.makedirs(ckpt_dir, exist_ok = True)
-    ckpt_final = os.path.join(ckpt_dir, "best_joint.pt")
-    ckpt_vanilla = os.path.join(ckpt_dir, "best_vanilla.pt")
-    old_best = os.path.join(ckpt_dir, "best.pt")
-    if os.path.exists(old_best) and not os.path.exists(ckpt_final):
-        shutil.copy(old_best, ckpt_final)
-    loaded_pretrain = False
-    full_metrics = None
-
-    _wandb_log({
-        "ckpt/pre_dir": ckpt_dir,
-        "ckpt/final_exists": int(os.path.exists(ckpt_final)),
-        "ckpt/vanilla_exists": int(os.path.exists(ckpt_vanilla)),
-    })
+    # ── Step 0: Split index 생성 (최초 1회, 모든 모드에서 보장) ──
+    src_list = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
+    generate_and_save_split_indices(args, src_list)
 
     # ==================================================================
-    # [Logic] 2-Stage Pre-training Pipeline
+    # [Mode 1] single_source — Exp A Step 2
     # ==================================================================
-    
-    if os.path.exists(ckpt_final):
-        logger.info(f"✅ [Pretrain] Found Final Checkpoint: {ckpt_final}")
-        ckpt = torch.load(ckpt_final, map_location=device)
-        model_full.load_state_dict(ckpt['model_state_dict'])
-        loaded_pretrain = True
-        _wandb_log({"pretrain/loaded_final_ckpt": 1})
-        
-    else:
-        logger.info(f"🚀 [Pretrain] Starting 2-Stage Training Pipeline...")
-        _wandb_log({"pretrain/loaded_final_ckpt": 0})
+    if args.exp_mode == 'single_source':
+        target_src = args.eval_source
+        if target_src is None:
+            raise ValueError("--eval_source is required for single_source mode")
+        alpha = args.sampling_alpha
+        logger.info(f"\n{'='*60}\n>>> [Exp A] Single-Source Baseline: {target_src}, alpha={alpha}\n{'='*60}")
 
-        all_loaders = {}
-        src_list = args.source_data if isinstance(args.source_data, (list, tuple)) else [args.source_data]
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+
+        # Phase 1: Vanilla GAT (LCG OFF)
+        args.use_lcg = False
+        full_pack = pretrain_and_eval_sources(
+            args, model, device, sources=[target_src], patience=20,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        # LCG Init + Phase 2: Joint (LCG ON)
+        tr, _, _, _ = load_one(args, target_src, sampling_alpha=alpha, use_exp=True)
+        init_lcg(args, model, {target_src: tr}, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        args.use_lcg = True
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
+        fix_seed(args.random_seed)
+
+        full_pack = pretrain_and_eval_sources(
+            args, model, device, sources=[target_src], patience=30,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        # 결과 저장: exp_results_dir / {dataset} / {seed} / json
+        single_save_dir = os.path.join(exp_results_dir, target_src, str(args.random_seed))
+        os.makedirs(single_save_dir, exist_ok=True)
+        result_file = os.path.join(
+            single_save_dir,
+            f"single_alpha{alpha:.2f}_{args.run_tag}.json"
+        )
+        save_data = {
+            'exp_mode': 'single_source',
+            'source': target_src,
+            'sampling_alpha': alpha,
+            'seed': args.random_seed,
+            'per_source_test': full_pack.get('per_source_test', {}),
+            'val_aucs_full': full_pack.get('val_aucs_full', []),
+            'best_epoch': full_pack.get('best_epoch_full', -1),
+        }
+        with open(result_file, 'w') as f:
+            json.dump(save_data, f, indent=2)
+        logger.info(f"[Single-Source] Results saved to {result_file}")
+
+    # ==================================================================
+    # [Mode 2] multi_source — Exp A Step 3/4
+    # ==================================================================
+    elif args.exp_mode == 'multi_source':
+        alpha = args.sampling_alpha
+        logger.info(f"\n{'='*60}\n>>> [Exp A] Multi-Source Scaling: alpha={alpha}\n{'='*60}")
+        logger.info(f"Sources: {src_list}")
+
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+
+        # Phase 1: Vanilla GAT (LCG OFF) — alpha applies to train only
+        args.use_lcg = False
+        full_pack = pretrain_and_eval_sources(
+            args, model, device, sources=src_list, patience=20,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        # LCG Init (alpha=1.0 for init — use full train to get good centroids)
+        all_loaders_init = {}
         for s in src_list:
-            tr, _, _, _ = load_one(args, s)
-            all_loaders[s] = tr
-
-        # --- [Step 1] Phase 1: Vanilla GAT ---
-        if os.path.exists(ckpt_vanilla):
-            logger.info(f"   -> Found Phase 1 Checkpoint. Loading...")
-            ckpt = torch.load(ckpt_vanilla, map_location=device)
-            model_full.load_state_dict(ckpt['model_state_dict'])
-            _wandb_log({"pretrain/phase1_loaded_ckpt": 1})
-        else:
-            logger.info(f"\n{'='*40}\n>>> [Phase 1] Start Vanilla GAT Training (LCG OFF)\n{'='*40}")
-            args.use_lcg = False 
-            _wandb_log({"pretrain/phase": 1, "pretrain/use_lcg": 0})
-            _ = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=20)
-            shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_vanilla)
-            logger.info(f"   -> Phase 1 Saved to {ckpt_vanilla}")
-            _wandb_log({"pretrain/phase1_saved": 1, "ckpt/vanilla_path": ckpt_vanilla})
-
-        # --- [Step 2] Bridge: LCG Init ---
-        logger.info(f"\n{'='*40}\n>>> [Bridge] Initializing LCG from Pre-trained CLS\n{'='*40}")
-        _wandb_log({"pretrain/bridge_init_lcg": 1, "pretrain/lcg_strategy": str(getattr(args, "lcg_strategy", ""))})
-
-        init_lcg(
-            args, model_full, all_loaders, device, save_dir = ckpt_dir,
-            strategy=args.lcg_strategy, injection_scale=0.1
-        )
+            tr, _, _, _ = load_one(args, s, sampling_alpha=alpha, use_exp=True)
+            all_loaders_init[s] = tr
+        init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
-        model_full.eval()
-        with torch.no_grad():
-            for src_name, loader in all_loaders.items():
-                batch = next(iter(loader))
-                batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
-                _ = model_full.predict(batch, return_all=True)
-                pi = model_full.graph_quantizer.last_pi
-                logger.info(f"[INIT CHECK] {src_name}: mean pi={pi.mean(0).cpu().numpy().round(4)}")
-                logger.info(f"[INIT CHECK] {src_name}: argmax counts={torch.bincount(pi.argmax(1).cpu(), minlength=pi.shape[1]).numpy()}")                
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
 
-        # --- [Step 3] Phase 2: Joint Training ---
-        logger.info(f"\n{'='*40}\n>>> [Phase 2] Start Joint Training (Global ON)\n{'='*40}")
-        args.use_lcg = True 
-        _wandb_log({"pretrain/phase": 2, "pretrain/use_lcg": 1})
-        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=30)
-        shutil.copy(os.path.join(ckpt_dir, "best.pt"), ckpt_final)
-        logger.info(f"   -> Phase 2 Saved to {ckpt_final}")
-        loaded_pretrain = True
-        _wandb_log({"pretrain/phase2_saved": 1, "ckpt/final_path": ckpt_final})
+        # Phase 2: Joint Training (LCG ON)
+        full_pack = pretrain_and_eval_sources(
+            args, model, device, sources=src_list, patience=30,
+            use_exp=True, sampling_alpha=alpha
+        )
 
-    # 3) (옵션) Pretrain 모델로 소스 리포트 재평가 (eval-only)
-    #    [변경] source test 제거됨 → val 기준으로만 리포트
-    if loaded_pretrain and (args.few_shot == 4 or args.few_shot == 0):
-        logger.info("[Full] Using loaded pretrain for source metrics report (eval only).")
-        _bak = args.train_epochs
-        args.train_epochs = 0
+        # 결과 저장 (원래 flat 형식)
+        result_file = os.path.join(
+            exp_results_dir,
+            f"multi_alpha{alpha:.2f}_seed{args.random_seed}_{args.run_tag}.json"
+        )
+        save_data = {
+            'exp_mode': 'multi_source',
+            'sources': src_list,
+            'sampling_alpha': alpha,
+            'seed': args.random_seed,
+            'per_source_test': full_pack.get('per_source_test', {}),
+            'val_aucs_full': full_pack.get('val_aucs_full', []),
+            'best_epoch': full_pack.get('best_epoch_full', -1),
+        }
+        with open(result_file, 'w') as f:
+            json.dump(save_data, f, indent=2)
+        logger.info(f"[Multi-Source] Results saved to {result_file}")
+
+        # alpha=1.0이면 Case F 체크포인트도 저장
+        if alpha >= 1.0:
+            case_f_path = os.path.join(exp_results_dir, f"case_f_seed{args.random_seed}_{args.run_tag}.pt")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'args': args,
+                'per_source_test': full_pack.get('per_source_test', {}),
+            }, case_f_path)
+            logger.info(f"[Case F] Checkpoint saved to {case_f_path}")
+
+    # ==================================================================
+    # [Mode 3] case1 — Pretrain ALL (alpha=1.0) → Fine-tune per-source (alpha varies)
+    #   Pretrain은 전체 데이터로 한 번, fine-tune에서 alpha로 데이터 양 조절
+    # ==================================================================
+    elif args.exp_mode == 'case1':
+        alpha = args.sampling_alpha
+        logger.info(f"\n{'='*60}\n>>> [Case 1] Pretrain ALL → Fine-tune per-source (alpha={alpha})\n{'='*60}")
+
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+
+        # ── Pretrain: 모든 source, alpha=1.0 ──
+        args.use_lcg = False
+        pretrain_and_eval_sources(
+            args, model, device, sources=src_list, patience=20,
+            use_exp=True, sampling_alpha=1.0
+        )
+
+        all_loaders_init = {}
+        for s in src_list:
+            tr, _, _, _ = load_one(args, s, sampling_alpha=1.0, use_exp=True)
+            all_loaders_init[s] = tr
+        init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
         args.use_lcg = True
-        _wandb_log({"pretrain/eval_only_report": 1, "pretrain/eval_only_few_shot": int(args.few_shot)})
-
-        full_metrics = pretrain_and_eval_sources(args, model_full, device, args.source_data, patience=0)
-        args.train_epochs = _bak
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
         fix_seed(args.random_seed)
 
-        # [변경] source test 없으므로 val 기준으로 summary
-        try:
-            if full_metrics is not None:
-                _wandb_summary_set({
-                    "source_report/val_auc_full": float(full_metrics.get("val_aucs_full", [0.0])[0]),
-                })
-        except Exception:
-            pass
-
-    # 4) Target 적응 준비 공통 로직
-    args.use_target_head = True
-    args.use_lcg = True 
-    model_few.args.use_lcg = True
-    model_few.load_state_dict(model_full.state_dict(), strict=False)
-    
-    fix_seed(args.random_seed)
-
-    # [변경] Target Data Load — is_source=False → 50/50 (train pool/test), val 없음
-    logger.info(f"[Target] target = {args.target_data}")
-    # main에서 target 로드 직전에
-    r_t = prepare_embedding_dataloaders(args, args.target_data, is_source=False)
-
-
-    train_loader_t, val_loader_t, test_loader_t = r_t['loaders']
-    # val_loader_t is None (target has no val)
-    num_classes_t = r_t['num_classes']
-    args.num_classes = num_classes_t
-    args.output_dim  = num_classes_t if num_classes_t > 2 else 1
-    
-    is_binary_t = (args.num_classes == 2)
-    crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
-
-    _wandb_log({
-        "target/num_classes": int(args.num_classes),
-        "target/is_binary": int(is_binary_t),
-        "target/few_shot": int(args.few_shot),
-        "target/support_resamples": int(getattr(args, "support_resamples", 1)),
-    })
-
-    # =========================================================
-    # [분기 1] Zero-shot 평가 (학습 X, 평가 O, 종료)
-    # [변경] val 없음 → train pool에서 threshold 결정
-    # =========================================================
-    if args.few_shot == 0:
-        logger.info("\n>>> [Zero-shot] Evaluating pretrained model directly on target test set...")
-        
-        evaluate_func = binary_evaluate if is_binary_t else multi_evaluate
-        model_full.eval()
-
-        # [변경] val 대신 train pool에서 threshold 결정
-        res_tr = evaluate_func(model_full, train_loader_t, crit_t, device)
-        
-        if isinstance(res_tr, tuple) and len(res_tr) == 2:
-            res_g_tr, res_l_tr = res_tr
-            _, y_true_tr, y_pred_tr = res_g_tr
-        else:
-            _, y_true_tr, y_pred_tr = res_tr
-        
-        if is_binary_t:
-            best_threshold_zero = find_optimal_threshold(y_true_tr, y_pred_tr)
-        else:
-            best_threshold_zero = None
-
-        (test_loss_zero, test_auc_zero, test_auprc_zero, test_precision_zero, test_recall_zero, 
-         test_f1_zero, test_acc_zero, all_y_true_zero, all_y_pred_zero
-        ) = final_test_evaluate(
-            model_full, test_loader_t, crit_t, device, is_binary_t, 
-            threshold=best_threshold_zero, mode='Full', args=args
-        )
-        
-        logger.info(f"[Zero-shot] Test Results: "
-           f"AUC={test_auc_zero:.4f} AUPRC={test_auprc_zero:.4f} ACC={test_acc_zero:.4f} "
-           f"Prec={test_precision_zero:.4f} Rec={test_recall_zero:.4f} F1={test_f1_zero:.4f}")
-
-        _wandb_log({
-            "zero_shot/test_loss": float(test_loss_zero),
-            "zero_shot/test_auc": float(test_auc_zero),
-            "zero_shot/test_auprc":float(test_auprc_zero),
-            "zero_shot/test_acc": float(test_acc_zero),
-            "zero_shot/test_precision": float(test_precision_zero),
-            "zero_shot/test_recall": float(test_recall_zero),
-            "zero_shot/test_f1": float(test_f1_zero),
-            "zero_shot/threshold": float(best_threshold_zero) if best_threshold_zero is not None else None,
-        })
-        _wandb_summary_set({
-            "final/zero_shot_test_auc": float(test_auc_zero),
-            "final/zero_shot_test_auprc":float(test_auprc_zero),
-            "final/zero_shot_test_acc": float(test_acc_zero),
-        })
-        
-        # [변경] full_ours_results: source test 없으므로 None
-        full_ours_results = None
-        
-        zero_shot_results = wrap_up_results_(
-            train_losses=[], val_losses=[], test_losses=[],
-            train_aucs=[], val_aucs=[], test_aucs=[test_auc_zero],
-            train_precisions=[], val_precisions=[], test_precisions=[test_precision_zero],
-            train_recalls=[], val_recalls=[], test_recalls=[test_recall_zero],
-            train_f1s=[], val_f1s=[], test_f1s=[test_f1_zero],
-            all_y_true=[all_y_true_zero], all_y_pred=[all_y_pred_zero],
-            best_epoch=0, best_ours_auc=test_auc_zero, best_ours_acc=test_acc_zero,
-            best_ours_precision=test_precision_zero, best_ours_recall=test_recall_zero,
-            best_ours_f1=test_f1_zero,
-            train_accs=[], val_accs=[], test_accs=[test_acc_zero], 
-            test_auprcs = [test_auprc_zero],
-            best_ours_auprc = test_auprc_zero 
-        )
-        
-        results = prepare_results_(full_ours_results, zero_shot_results)
-        
-        logger.info("Saving Zero-shot results...")
-        import copy
-        args_for_save = copy.deepcopy(args)
-        if isinstance(args_for_save.source_data, (list, tuple)):
-            args_for_save.source_data = "+".join(map(str, args_for_save.source_data))
-        else:
-            args_for_save.source_data = str(args_for_save.source_data)
-
-        save_results_(args_for_save, results)
-        logger.info("Results saved")
-
-        try:
-            import wandb
-            if wandb.run is not None:
-                wandb.finish()
-        except Exception:
-            pass
-
-        return 
-
-    # =========================================================
-    # [분기 2] Few-shot 학습 (Target Adaptation)
-    # [변경] val 없음, fixed epoch, no early stopping
-    # =========================================================
-    
-    #FEW_SHOT_EPOCHS = 60  # UniPredict, TabLLM 따름
-    
-    total_shot = args.few_shot * args.num_classes
-
-    FEW_SHOT_EPOCHS = 100 if total_shot <= 16 else 240
-
-    lr_scale = 1 if total_shot <= 16 else 1
-
-    gat_lr_few = args.source_lr_few * lr_scale
-    lcg_lr_few = args.source_lr_few * lr_scale
-    head_lr_few = args.source_lr_few 
-
-
-    model_few.set_freeze_target()
-    #model_few.ghead2.load_state_dict(model_few.ghead.state_dict())  # ghead → ghead2 복사
-
-    trainables = [n for n, p in model_few.named_parameters() if p.requires_grad]
-    logger.info("Few-shot trainable params:\n" + "\n".join(trainables))
-
-    R = int(getattr(args, 'support_resamples', 1))
-    logger.info(f"[Few-shot] support resamples R = {R}")
-    logger.info(f"[Few-shot] fixed epochs = {FEW_SHOT_EPOCHS} (no validation, no early stopping)")
-
-    base_state_cpu = {k: v.cpu() for k, v in model_few.state_dict().items()}
-
-    ep_test_metrics = [] 
-    y_true_last, y_pred_last = None, None
-
-    import numpy as _np
-
-    train_fn_few = binary_train if is_binary_t else multi_train
-    eval_fn_few  = binary_evaluate if is_binary_t else multi_evaluate
-
-    for r in range(R):
-        current_seed = args.random_seed + (r + 1)
-        fix_seed(current_seed) 
-        
-        model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
-        model_few.set_freeze_target() 
-
-        gat_params_few = []
-        lcg_params_few = []
-        head_params_few = []
-        
-        for name, p in model_few.named_parameters():
-            if not p.requires_grad: continue
-            if 'basis' in name: 
-                gat_params_few.append(p)
-            elif 'latent_graph' in name:
-                lcg_params_few.append(p)
-            else:
-                head_params_few.append(p)
-        
-        # gat_lr_few = args.source_lr_few #* 0.1 
-        # lcg_lr_few = args.source_lr_few #* 0.1
-        # head_lr_few = args.source_lr_few
-        logger.info(f"[r={r}] head_params count: {len(head_params_few)}")
-        logger.info(f"[r={r}] gat_params count: {len(gat_params_few)}")
-        logger.info(f"[r={r}] lcg_params count: {len(lcg_params_few)}")
-        logger.info(f"[Few-shot][Ep {r+1}/{R}] GAT LR: {gat_lr_few} | LCG LR: {lcg_lr_few} | Head LR: {head_lr_few}")
-
-        _wandb_log({
-            "few/episode": int(r + 1),
-            "few/episode_seed": int(current_seed),
-            "few/gat_lr": float(gat_lr_few),
-            "few/lcg_lr": float(lcg_lr_few),
-            "few/head_lr": float(head_lr_few),
-        })
-
-        optimizer_few = optim.Adam(
-            [
-                {'params': gat_params_few,  'lr': gat_lr_few},
-                {'params': lcg_params_few,  'lr': lcg_lr_few},
-                {'params': head_params_few, 'lr': head_lr_few}
-            ],
-            weight_decay=3e-5
+        pretrain_and_eval_sources(
+            args, model, device, sources=src_list, patience=30,
+            use_exp=True, sampling_alpha=1.0
         )
 
-        # Linear decay scheduler
-        def linear_lr_lambda(epoch):
-            return max(0.0, 1.0 - epoch / float(FEW_SHOT_EPOCHS))
-        scheduler_few = LambdaLR(optimizer_few, linear_lr_lambda)
-        logger.info(f"[Few-shot][Ep {r+1}/{R}] LR schedule: linear decay, total={FEW_SHOT_EPOCHS}")
+        # pretrained state 저장
+        pretrained_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        logger.info(f"[Case 1] Pretrained model saved (alpha=1.0, all sources)")
 
-        # K-shot 샘플링 (val 없음)
-        #train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
-        train_loader_epi = get_few_shot_embedding_samples_(train_loader_t, args, seed=current_seed)
+        # ── Fine-tune: 각 source별로, alpha 적용 ──
+        ft_sources = []
+        ft_auc, ft_auprc, ft_acc, ft_f1 = [], [], [], []
+        ft_precision, ft_recall, ft_loss = [], [], []
 
-        before = model_few.ghead2[0].weight.data.clone()
+        for src_name in src_list:
+            pretrain_idx = src_list.index(src_name)
+            logger.info(f"\n{'='*60}")
+            logger.info(f"[Case 1 Fine-tune] dataset='{src_name}' (pretrain_src_idx={pretrain_idx})")
+            logger.info(f"   alpha={alpha}, freeze={args.freeze_ft}, mode→Few (ghead→ghead2 copy)")
+            logger.info(f"{'='*60}")
+            model.load_state_dict({k: v.to(device) for k, v in pretrained_state.items()})
+            # [main_EEE] fine-tune은 target adaptation처럼: ghead → ghead2 복사 후 mode='Few'
+            model.ghead2.load_state_dict(model.ghead.state_dict())
+            model.mode = 'Few'
+            if args.freeze_ft:
+                model.set_freeze_target()
+            fix_seed(args.random_seed)
 
-        # --- epoch별 trajectory 로깅 ---
-        for epoch in range(FEW_SHOT_EPOCHS):
-            model_few.train()
-            train_loss_ep = train_fn_few(model_few, train_loader_epi, crit_t, optimizer_few, device)
-            if scheduler_few is not None:
-                scheduler_few.step()
-
-            # 매 epoch test eval
-            model_few.eval()
-            res_train_ep = eval_fn_few(model_few, train_loader_epi, crit_t, device)
-            if isinstance(res_train_ep, tuple) and len(res_train_ep) == 2:
-                res_g_tr_ep, _ = res_train_ep
-                _, y_true_tr_ep, y_pred_tr_ep = res_g_tr_ep
-            else:
-                _, y_true_tr_ep, y_pred_tr_ep = res_train_ep
-
-            if is_binary_t:
-                thr_ep = find_optimal_threshold(y_true_tr_ep, y_pred_tr_ep)
-            else:
-                thr_ep = None
-
-            (tl_ep, tauc_ep, tauprc_ep, tprec_ep, trec_ep, tf1_ep,
-             tacc_ep, _, _) = final_test_evaluate(
-                model_few, test_loader_t, crit_t, device, is_binary_t, threshold=thr_ep,
-                mode='Few', args=args
+            ft_pack = pretrain_and_eval_sources(
+                args, model, device, sources=[src_name], patience=20,
+                use_exp=True, sampling_alpha=alpha
             )
 
-            logger.info(f"[Few-shot][r={r}][epoch={epoch}/{FEW_SHOT_EPOCHS}] "
-                        f"AUC={tauc_ep:.4f} AUPRC={tauprc_ep:.4f} ACC={tacc_ep:.4f}")
+            ps_test = ft_pack.get('per_source_test', {})
+            ft_sources.append(src_name)
+            for key, lst in [('auc', ft_auc), ('auprc', ft_auprc), ('acc', ft_acc),
+                             ('f1', ft_f1), ('precision', ft_precision),
+                             ('recall', ft_recall), ('loss', ft_loss)]:
+                vals = ps_test.get(key, [])
+                lst.append(vals[0] if vals else float('nan'))
 
-            _wandb_log({
-                "few_traj/epoch": epoch,
-                "few_traj/episode": int(r + 1),
-                "few_traj/test_auc": float(tauc_ep),
-                "few_traj/test_auprc": float(tauprc_ep),
-                "few_traj/test_acc": float(tacc_ep),
-                "few_traj/test_precision": float(tprec_ep),
-                "few_traj/test_recall": float(trec_ep),
-                "few_traj/test_f1": float(tf1_ep),
-                "few_traj/train_loss": float(train_loss_ep) if train_loss_ep is not None else None,
-            })
+        # 결과 저장
+        result_file = os.path.join(
+            exp_results_dir,
+            f"case1{'_freeze' if args.freeze_ft else ''}_alpha{alpha:.2f}_seed{args.random_seed}_{args.run_tag}.json"
+        )
+        save_data = {
+            'exp_mode': 'case1',
+            'sources': src_list,
+            'sampling_alpha': alpha,
+            'seed': args.random_seed,
+            'per_source_test': {
+                'sources': ft_sources,
+                'auc': ft_auc, 'auprc': ft_auprc, 'acc': ft_acc,
+                'f1': ft_f1, 'precision': ft_precision,
+                'recall': ft_recall, 'loss': ft_loss,
+            },
+        }
+        with open(result_file, 'w') as f:
+            json.dump(save_data, f, indent=2)
+        logger.info(f"[Case 1] Results saved to {result_file}")
 
-        after = model_few.ghead2[0].weight.data
-        weight_change = (after - before).abs().mean().item()
-        logger.info(f"[r={r}] Weight change: {weight_change:.6f}")
+    # ==================================================================
+    # [Mode 4] case2 — Pretrain with alpha → Fine-tune per-source
+    #   Pretrain에서 alpha로 데이터 양 조절, 그 위에 per-source fine-tuning 추가
+    # ==================================================================
+    elif args.exp_mode == 'case2':
+        alpha = args.sampling_alpha
+        logger.info(f"\n{'='*60}\n>>> [Case 2] Pretrain alpha={alpha} → Fine-tune per-source\n{'='*60}")
 
-        # 최종 epoch 결과를 기존 변수에 할당 (하위 코드 호환)
-        model_few.eval()
-        res_train = eval_fn_few(model_few, train_loader_epi, crit_t, device)
-        if isinstance(res_train, tuple) and len(res_train) == 2:
-            res_g_tr, _ = res_train
-            _, y_true_tr_few, y_pred_tr_few = res_g_tr
-        else:
-            _, y_true_tr_few, y_pred_tr_few = res_train
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
 
-        if is_binary_t:
-            best_threshold_few = find_optimal_threshold(y_true_tr_few, y_pred_tr_few)
-        else:
-            best_threshold_few = None
-
-        (test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few,
-         test_acc_few, all_y_true_few, all_y_pred_few) = final_test_evaluate(
-            model_few, test_loader_t, crit_t, device, is_binary_t, threshold=best_threshold_few,
-            mode='Few', args = args
+        # ── Pretrain: 모든 source, alpha 적용 ──
+        t_pretrain_start = time.time()
+        args.use_lcg = False
+        pretrain_and_eval_sources(
+            args, model, device, sources=src_list, patience=int(getattr(args, 'pt_patience', 15)),
+            use_exp=True, sampling_alpha=alpha
         )
 
-        logger.info(f"[Few-shot][Ep {r+1}/{R}] AUC={test_auc_few:.4f} AUPRC={test_auprc_few:.4f} ACC={test_acc_few:.4f} "
-            f"Prec={test_precision_few:.4f} Rec={test_recall_few:.4f} F1={test_f1_few:.4f}")
+        # === Phase 1 (GAT-only) checkpoint 저장 - contingency 대비 ===
+        _src_tag_p1 = "+".join(args.source_data) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
+        _model_sig_p1 = (
+            f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}"
+            f"_nbasis-{args.num_basis_layers}_basis-{args.basis_type}_attn-{args.attn_type}"
+            f"_struct_hidden_dim-{args.struct_hidden_dim}_fgw_alpha-{args.fgw_alpha}"
+            f"_alpha-{args.alpha}_vq_beta-{args.vq_beta}_kl_gamma-{args.kl_gamma}_tau-{args.tau}"
+            f"_target_data-{args.target_data}_entropic_reg-{args.entropy_reg}_description-{args.des}"
+        )
+        _phase1_dir = f"/storage/personal/eungyeop/experiments/checkpoints/{args.llm_model}/{_src_tag_p1}/Pre/{_model_sig_p1}/{args.random_seed}/{args.run_tag}"
+        os.makedirs(_phase1_dir, exist_ok=True)
+        _phase1_path = os.path.join(_phase1_dir, "phase1_gat.pt")
+        torch.save({
+            'model_state_dict': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+            'phase': 'gat_pretrain_phase1',
+            'sources': src_list,
+            'sampling_alpha': alpha,
+            'seed': args.random_seed,
+        }, _phase1_path)
+        logger.info(f"[Case 2] Phase 1 GAT-only checkpoint saved: {_phase1_path}")
 
-        _wandb_log({
-            "few_ep/test_loss": float(test_loss_few),
-            "few_ep/test_auc": float(test_auc_few),
-            "few_ep/test_auprc": float(test_auprc_few),  
-            "few_ep/test_acc": float(test_acc_few),
-            "few_ep/test_precision": float(test_precision_few),
-            "few_ep/test_recall": float(test_recall_few),
-            "few_ep/test_f1": float(test_f1_few),
-            "few_ep/threshold": float(best_threshold_few) if best_threshold_few is not None else None,
-            "few_ep/episode": int(r + 1),
-        })
+        all_loaders_init = {}
+        for s in src_list:
+            tr, _, _, _ = load_one(args, s, sampling_alpha=alpha, use_exp=True)
+            all_loaders_init[s] = tr
+        init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
+        args.use_lcg = True
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
+        fix_seed(args.random_seed)
 
-        ep_test_metrics.append((test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few, test_acc_few))
-        y_true_last, y_pred_last = all_y_true_few, all_y_pred_few 
+        pretrain_and_eval_sources(
+            args, model, device, sources=src_list, patience=int(getattr(args, 'pt_patience', 15)),
+            use_exp=True, sampling_alpha=alpha
+        )
 
-    # Episode 평균 집계
-    ep_arr = _np.asarray(ep_test_metrics, dtype=_np.float32)
-    mean_test_loss, mean_test_auc, mean_test_auprc, mean_test_prec, mean_test_rec, mean_test_f1, mean_test_acc = ep_arr.mean(axis=0).tolist()
-    std_test_auc = float(ep_arr[:, 1].std())
-    std_test_auprc = float(ep_arr[:, 2].std())
+        pretrain_sec = time.time() - t_pretrain_start
+        logger.info(f"[Case 2][TIME] Multi-source pretrain elapsed: {pretrain_sec:.1f}s ({pretrain_sec/60:.2f}min)")
 
-    logger.info(f"[Few-shot][Summary] AUC={mean_test_auc:.4f}±{std_test_auc:.4f} AUPRC={mean_test_auprc:.4f}±{std_test_auprc:.4f}")
+        # pretrained state 저장
+        pretrained_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        logger.info(f"[Case 2] Pretrained model saved (alpha={alpha}, all sources)")
 
-    _wandb_log({
-        "few_mean/test_loss": float(mean_test_loss),
-        "few_mean/test_auc": float(mean_test_auc),
-        "few_mean/test_auc_std": std_test_auc,
-        "few_mean/test_auprc": float(mean_test_auprc),
-        "few_mean/test_auprc_std": std_test_auprc,
-        "few_mean/test_acc": float(mean_test_acc),
-        "few_mean/test_precision": float(mean_test_prec),
-        "few_mean/test_recall": float(mean_test_rec),
-        "few_mean/test_f1": float(mean_test_f1),
-        "few_mean/fixed_epochs": FEW_SHOT_EPOCHS,
-    })
-    _wandb_summary_set({
-        "final/few_shot_test_auc_mean": float(mean_test_auc),
-        "final/few_shot_test_auc_std": std_test_auc,
-        "final/few_shot_test_auprc_mean": float(mean_test_auprc),
-        "final/few_shot_test_acc_mean": float(mean_test_acc),
-    })
+        # ── Fine-tune: freeze=False만 실행 (freeze=True 제외) ──
+        for do_freeze in [False]:
+            freeze_tag = '_freeze' if do_freeze else ''
+            ft_save_dir = f"/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}/case2{freeze_tag}"
+            os.makedirs(ft_save_dir, exist_ok=True)
 
-    # [변경] full_ours_results: source test 없으므로 None
-    full_ours_results = None
+            logger.info(f"\n{'='*40}\n>>> [Case 2] Fine-tune (freeze={do_freeze})\n{'='*40}")
 
-    few_ours_results = wrap_up_results_(
-        [], [], [],                          # train_losses, val_losses, test_losses
-        [], [], [mean_test_auc],             # train_aucs, val_aucs, test_aucs
-        [], [], [mean_test_prec],            # train_precisions, val_precisions, test_precisions
-        [], [], [mean_test_rec],             # train_recalls, val_recalls, test_recalls
-        [], [], [mean_test_f1],              # train_f1s, val_f1s, test_f1s
-        [y_true_last], [y_pred_last],        # all_y_true, all_y_pred
-        FEW_SHOT_EPOCHS, mean_test_auc, mean_test_acc,  # best_epoch, best_ours_auc, best_ours_acc
-        mean_test_prec, mean_test_rec, mean_test_f1,     # best_ours_precision, recall, f1
-        [], [], [mean_test_acc],             # train_accs, val_accs, test_accs
-        test_auprcs=[mean_test_auprc],
-        best_ours_auprc=mean_test_auprc
-        )   
+            ft_sources = []
+            ft_auc, ft_auprc, ft_acc, ft_f1 = [], [], [], []
+            ft_precision, ft_recall, ft_loss = [], [], []
+            ft_sec = []
+            t_ft_total_start = time.time()
 
-    results = prepare_results_(full_ours_results, few_ours_results)
+            for src_name in src_list:
+                pretrain_idx = src_list.index(src_name)
+                logger.info(f"\n{'='*60}")
+                logger.info(f"[Case 2 Fine-tune] dataset='{src_name}' (pretrain_src_idx={pretrain_idx})")
+                logger.info(f"   alpha={alpha}, freeze={do_freeze}, mode→Few (ghead→ghead2 copy)")
+                logger.info(f"{'='*60}")
+                model.load_state_dict({k: v.to(device) for k, v in pretrained_state.items()})
+                # [main_EEE] fine-tune은 target adaptation처럼: ghead → ghead2 복사 후 mode='Few'
+                model.ghead2.load_state_dict(model.ghead.state_dict())
+                model.mode = 'Few'
+                if do_freeze:
+                    model.set_freeze_target()
+                fix_seed(args.random_seed)
 
-    # 저장
-    logger.info("Saving results...")
-    import copy
-    args_for_save = copy.deepcopy(args)
-    if isinstance(args_for_save.source_data, (list, tuple)):
-        args_for_save.source_data = "+".join(map(str, args_for_save.source_data))
+                t_src_start = time.time()
+                ft_pack = pretrain_and_eval_sources(
+                    args, model, device, sources=[src_name], patience=int(getattr(args, 'ft_patience', 15)),
+                    use_exp=True, sampling_alpha=alpha
+                )
+                src_sec = time.time() - t_src_start
+                ft_sec.append(src_sec)
+                logger.info(f"[Case 2 Fine-tune][TIME] '{src_name}' freeze={do_freeze} elapsed: {src_sec:.1f}s ({src_sec/60:.2f}min)")
+
+                ps_test = ft_pack.get('per_source_test', {})
+                ft_sources.append(src_name)
+                for key, lst in [('auc', ft_auc), ('auprc', ft_auprc), ('acc', ft_acc),
+                                 ('f1', ft_f1), ('precision', ft_precision),
+                                 ('recall', ft_recall), ('loss', ft_loss)]:
+                    vals = ps_test.get(key, [])
+                    lst.append(vals[0] if vals else float('nan'))
+
+            ft_total_sec = time.time() - t_ft_total_start
+            logger.info(f"[Case 2 Fine-tune][TIME] All sources total (freeze={do_freeze}): {ft_total_sec:.1f}s ({ft_total_sec/60:.2f}min)")
+
+            # 결과 저장
+            result_file = os.path.join(
+                ft_save_dir,
+                f"case2{freeze_tag}_alpha{alpha:.2f}_seed{args.random_seed}_{args.run_tag}.json"
+            )
+            save_data = {
+                'exp_mode': 'case2',
+                'freeze_ft': do_freeze,
+                'sources': src_list,
+                'sampling_alpha': alpha,
+                'seed': args.random_seed,
+                'pretrain_sec': pretrain_sec,
+                'finetune_total_sec': ft_total_sec,
+                'per_source_test': {
+                    'sources': ft_sources,
+                    'auc': ft_auc, 'auprc': ft_auprc, 'acc': ft_acc,
+                    'f1': ft_f1, 'precision': ft_precision,
+                    'recall': ft_recall, 'loss': ft_loss,
+                    'finetune_sec': ft_sec,
+                },
+            }
+            with open(result_file, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            logger.info(f"[Case 2] Results saved to {result_file}")
+
+            # wandb sweep metric
+            # [KF] ft_auc holds R², ft_auprc holds Pearson; expose under both legacy + regression keys
+            mean_ft_auc = float(sum(ft_auc) / len(ft_auc)) if ft_auc else 0.0
+            mean_ft_auprc = float(sum(ft_auprc) / len(ft_auprc)) if ft_auprc else 0.0
+            mean_ft_rmse = float(-sum(ft_precision) / len(ft_precision)) if ft_precision else 0.0
+            mean_ft_mae  = float(-sum(ft_recall) / len(ft_recall)) if ft_recall else 0.0
+            try:
+                per_src_log = {f"case2{freeze_tag}/{s}_r2": a for s, a in zip(ft_sources, ft_auc)}
+                per_src_log.update({f"case2{freeze_tag}/{s}_pearson": p for s, p in zip(ft_sources, ft_auprc)})
+                per_src_log.update({f"case2{freeze_tag}/{s}_rmse": -v for s, v in zip(ft_sources, ft_precision)})
+                per_src_log.update({f"case2{freeze_tag}/{s}_mae":  -v for s, v in zip(ft_sources, ft_recall)})
+                per_src_log[f"case2{freeze_tag}/mean_test_r2"] = mean_ft_auc
+                per_src_log[f"case2{freeze_tag}/mean_test_pearson"] = mean_ft_auprc
+                per_src_log[f"case2{freeze_tag}/mean_test_rmse"] = mean_ft_rmse
+                per_src_log[f"case2{freeze_tag}/mean_test_mae"]  = mean_ft_mae
+                # legacy aliases (kept so existing dashboards do not break)
+                per_src_log[f"case2{freeze_tag}/mean_test_auc"] = mean_ft_auc
+                per_src_log[f"case2{freeze_tag}/mean_test_auprc"] = mean_ft_auprc
+                _wandb_log(per_src_log)
+
+                per_src_summary = {f"final/case2{freeze_tag}_{s}_r2": a for s, a in zip(ft_sources, ft_auc)}
+                per_src_summary.update({f"final/case2{freeze_tag}_{s}_pearson": p for s, p in zip(ft_sources, ft_auprc)})
+                per_src_summary.update({f"final/case2{freeze_tag}_{s}_rmse": -v for s, v in zip(ft_sources, ft_precision)})
+                per_src_summary.update({f"final/case2{freeze_tag}_{s}_mae":  -v for s, v in zip(ft_sources, ft_recall)})
+                per_src_summary[f"final/case2{freeze_tag}_mean_r2"] = mean_ft_auc
+                per_src_summary[f"final/case2{freeze_tag}_mean_pearson"] = mean_ft_auprc
+                per_src_summary[f"final/case2{freeze_tag}_mean_rmse"] = mean_ft_rmse
+                per_src_summary[f"final/case2{freeze_tag}_mean_mae"]  = mean_ft_mae
+                # legacy aliases for sweep metric compatibility
+                per_src_summary[f"final/case2{freeze_tag}_mean_auc"] = mean_ft_auc
+                per_src_summary[f"final/case2{freeze_tag}_mean_auprc"] = mean_ft_auprc
+                _wandb_summary_set(per_src_summary)
+            except Exception:
+                pass
+
+        # sweep metric용: freeze=False 기준 mean R² (legacy key alias kept)
+        try:
+            _wandb_log({"final/few_shot_test_r2_mean": mean_ft_auc})
+            _wandb_summary_set({"final/few_shot_test_r2_mean": mean_ft_auc})
+            _wandb_log({"final/few_shot_test_auc_mean": mean_ft_auc})
+            _wandb_summary_set({"final/few_shot_test_auc_mean": mean_ft_auc})
+        except Exception:
+            pass
+
+    # ==================================================================
+    # [Mode 4b] case2_exclude — Exp B Step 3: F(M-1) source exclusion
+    #   특정 source 1개 제외 → 나머지 M-1개로 pretrain → M-1개 fine-tune (freeze 여부 둘 다)
+    #   Alpha=1.0 고정
+    # ==================================================================
+    elif args.exp_mode == 'case2_exclude':
+        if not args.exclude_sources:
+            raise ValueError("--exclude_sources is required for case2_exclude (at least 1 source)")
+        excluded = args.exclude_sources
+        if isinstance(excluded, str):
+            excluded = [excluded]
+        remaining = [s for s in src_list if s not in excluded]
+        if not remaining:
+            raise ValueError("No sources remaining after exclusion!")
+
+        excluded_tag = "+".join(excluded)
+        logger.info(f"\n{'='*60}\n>>> [Case 2 Exclude] excluded={excluded_tag}\n"
+                    f"    remaining={remaining}\n{'='*60}")
+
+        alpha = 1.0  # 고정
+
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+
+        # ── Pretrain: remaining source, alpha=1.0 ──
+        args.use_lcg = False
+        pretrain_and_eval_sources(
+            args, model, device, sources=remaining, patience=20,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        all_loaders_init = {}
+        for s in remaining:
+            tr, _, _, _ = load_one(args, s, sampling_alpha=alpha, use_exp=True)
+            all_loaders_init[s] = tr
+        init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
+        args.use_lcg = True
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
+        fix_seed(args.random_seed)
+
+        pretrain_and_eval_sources(
+            args, model, device, sources=remaining, patience=30,
+            use_exp=True, sampling_alpha=alpha
+        )
+
+        # pretrained state 저장
+        pretrained_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        logger.info(f"[Case 2 Exclude] Pretrained model saved (excluded={excluded_tag})")
+
+        # ── Fine-tune: remaining source 각각에 freeze=False → freeze=True 순차 ──
+        for do_freeze in [False, True]:
+            freeze_tag = '_freeze' if do_freeze else ''
+            ft_save_dir = f"/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}/case2_exclude{freeze_tag}"
+            os.makedirs(ft_save_dir, exist_ok=True)
+
+            logger.info(f"\n{'='*40}\n>>> [Case 2 Exclude] Fine-tune (freeze={do_freeze})\n{'='*40}")
+
+            ft_sources = []
+            ft_auc, ft_auprc, ft_acc, ft_f1 = [], [], [], []
+            ft_precision, ft_recall, ft_loss = [], [], []
+
+            for src_name in remaining:
+                logger.info(f"\n{'='*60}")
+                logger.info(f"[Case 2 Exclude Fine-tune] dataset='{src_name}' "
+                            f"(excluded={excluded_tag})")
+                logger.info(f"   alpha={alpha}, freeze={do_freeze}, mode→Few (ghead→ghead2 copy)")
+                logger.info(f"{'='*60}")
+                model.load_state_dict({k: v.to(device) for k, v in pretrained_state.items()})
+                model.ghead2.load_state_dict(model.ghead.state_dict())
+                model.mode = 'Few'
+                if do_freeze:
+                    model.set_freeze_target()
+                fix_seed(args.random_seed)
+
+                ft_pack = pretrain_and_eval_sources(
+                    args, model, device, sources=[src_name], patience=20,
+                    use_exp=True, sampling_alpha=alpha
+                )
+
+                ps_test = ft_pack.get('per_source_test', {})
+                ft_sources.append(src_name)
+                for key, lst in [('auc', ft_auc), ('auprc', ft_auprc), ('acc', ft_acc),
+                                 ('f1', ft_f1), ('precision', ft_precision),
+                                 ('recall', ft_recall), ('loss', ft_loss)]:
+                    vals = ps_test.get(key, [])
+                    lst.append(vals[0] if vals else float('nan'))
+
+            # 결과 저장
+            result_file = os.path.join(
+                ft_save_dir,
+                f"case2_exclude{freeze_tag}_excl-{excluded_tag}_seed{args.random_seed}_{args.run_tag}.json"
+            )
+            save_data = {
+                'exp_mode': 'case2_exclude',
+                'freeze_ft': do_freeze,
+                'excluded_sources': excluded,
+                'remaining_sources': remaining,
+                'sampling_alpha': alpha,
+                'seed': args.random_seed,
+                'per_source_test': {
+                    'sources': ft_sources,
+                    'auc': ft_auc, 'auprc': ft_auprc, 'acc': ft_acc,
+                    'f1': ft_f1, 'precision': ft_precision,
+                    'recall': ft_recall, 'loss': ft_loss,
+                },
+            }
+            with open(result_file, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            logger.info(f"[Case 2 Exclude] Results saved to {result_file}")
+
+            # wandb: mean test AUC 로그 (sweep metric용)
+            mean_ft_auc = float(np.mean(ft_auc)) if ft_auc else 0.0
+            mean_ft_auprc = float(np.mean(ft_auprc)) if ft_auprc else 0.0
+            try:
+                _wandb_log({
+                    f"case2_exclude{freeze_tag}/mean_test_auc": mean_ft_auc,
+                    f"case2_exclude{freeze_tag}/mean_test_auprc": mean_ft_auprc,
+                    f"case2_exclude{freeze_tag}/excluded": excluded_tag,
+                })
+                _wandb_summary_set({
+                    f"final/case2_exclude{freeze_tag}_mean_auc": mean_ft_auc,
+                    f"final/case2_exclude{freeze_tag}_mean_auprc": mean_ft_auprc,
+                })
+            except Exception:
+                pass
+
+        # sweep metric용: freeze=False 기준 mean AUC를 'final/few_shot_test_auc_mean'에 기록
+        try:
+            _wandb_log({"final/few_shot_test_auc_mean": mean_ft_auc})
+            _wandb_summary_set({"final/few_shot_test_auc_mean": mean_ft_auc})
+        except Exception:
+            pass
+
+    # ==================================================================
+    # [Mode 5] exp_b_analysis — Exp B Step 1/2: LCG routing analysis
+    # ==================================================================
+    elif args.exp_mode == 'exp_b_analysis':
+        if args.ckpt_path is None:
+            raise ValueError("--ckpt_path is required for exp_b_analysis (Case F checkpoint)")
+
+        logger.info(f"\n{'='*60}\n>>> [Exp B] LCG Routing Analysis\n{'='*60}")
+        logger.info(f"Loading Case F model from: {args.ckpt_path}")
+
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+        ckpt = torch.load(args.ckpt_path, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        args.use_lcg = True
+        model.eval()
+
+        # Source별 routing coefficient 수집
+        pi_per_source = {}
+        for src_name in src_list:
+            r_src = prepare_exp_embedding_dataloaders(args, src_name, alpha=1.0)
+            test_loader_src = r_src['loaders'][2]  # test loader
+            all_pi = []
+            with torch.no_grad():
+                for batch in test_loader_src:
+                    batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+                    _ = model.predict(batch, return_all=True)
+                    pi = model.graph_quantizer.last_pi  # (B, M)
+                    all_pi.append(pi.cpu())
+            pi_cat = torch.cat(all_pi, dim=0)
+            pi_mean = pi_cat.mean(dim=0).numpy()
+            pi_per_source[src_name] = pi_mean
+            logger.info(f"[Routing] {src_name}: mean pi = {pi_mean.round(4)}")
+
+        # Target routing coefficient
+        r_t = prepare_embedding_dataloaders(args, args.target_data, is_source=False)
+        target_loader = r_t['loaders'][0]  # train pool (전체 target)
+        all_pi_t = []
+        with torch.no_grad():
+            for batch in target_loader:
+                batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+                _ = model.predict(batch, return_all=True)
+                pi = model.graph_quantizer.last_pi
+                all_pi_t.append(pi.cpu())
+        pi_target = torch.cat(all_pi_t, dim=0).mean(dim=0).numpy()
+        logger.info(f"[Routing] Target ({args.target_data}): mean pi = {pi_target.round(4)}")
+
+        # Relevance 계산: dot product
+        relevance = {}
+        for src_name, pi_src in pi_per_source.items():
+            rel = float(np.dot(pi_target, pi_src))
+            relevance[src_name] = rel
+            logger.info(f"[Relevance] {src_name}: {rel:.4f}")
+
+        # 결과 저장
+        result_file = os.path.join(
+            exp_results_dir,
+            f"exp_b_routing_seed{args.random_seed}_{args.run_tag}.json"
+        )
+        save_data = {
+            'exp_mode': 'exp_b_analysis',
+            'sources': src_list,
+            'target': args.target_data,
+            'seed': args.random_seed,
+            'pi_per_source': {k: v.tolist() for k, v in pi_per_source.items()},
+            'pi_target': pi_target.tolist(),
+            'relevance': relevance,
+        }
+        with open(result_file, 'w') as f:
+            json.dump(save_data, f, indent=2)
+        logger.info(f"[Exp B Analysis] Results saved to {result_file}")
+
+        # 정렬된 relevance 출력
+        sorted_rel = sorted(relevance.items(), key=lambda x: x[1], reverse=True)
+        logger.info(f"\n[Relevance Ranking]")
+        for rank, (name, rel) in enumerate(sorted_rel, 1):
+            logger.info(f"  {rank}. {name}: {rel:.4f}")
+
+    # ==================================================================
+    # [Mode 4] exp_b_retrain — Exp B Step 3: source exclusion retraining
+    # ==================================================================
+    elif args.exp_mode == 'exp_b_retrain':
+        excluded = args.exclude_sources
+        if not excluded:
+            raise ValueError("--exclude_sources is required for exp_b_retrain")
+
+        remaining = [s for s in src_list if s not in excluded]
+        logger.info(f"\n{'='*60}\n>>> [Exp B] Retraining without: {excluded}\n{'='*60}")
+        logger.info(f"Remaining sources: {remaining}")
+
+        if not remaining:
+            raise ValueError("No sources remaining after exclusion!")
+
+        model = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                      args.dropout_rate, args.llm_model,
+                      experiment_id, mode="Full").to(device)
+
+        # Phase 1: Vanilla GAT (remaining sources only)
+        args.use_lcg = False
+        _ = pretrain_and_eval_sources(
+            args, model, device, sources=remaining, patience=20,
+            use_exp=True, sampling_alpha=1.0
+        )
+
+        # LCG Init
+        all_loaders_init = {}
+        for s in remaining:
+            tr, _, _, _ = load_one(args, s, sampling_alpha=1.0, use_exp=True)
+            all_loaders_init[s] = tr
+        init_lcg(args, model, all_loaders_init, device, save_dir=exp_results_dir,
+                 strategy=args.lcg_strategy, injection_scale=0.1)
+        del all_loaders_init
+        import gc; gc.collect()
+        args.use_lcg = True
+        # [main_EEE] Phase 2: mode='Full' 유지 (local_loss + ghead)
+        fix_seed(args.random_seed)
+
+        # Phase 2: Joint Training
+        full_pack = pretrain_and_eval_sources(
+            args, model, device, sources=remaining, patience=30,
+            use_exp=True, sampling_alpha=1.0
+        )
+
+        # Target adaptation (few-shot) — main_SS.py 로직 재사용
+        args.use_target_head = True
+        model_few = Model(args, args.input_dim, args.hidden_dim, args.output_dim,
+                          args.dropout_rate, args.llm_model,
+                          experiment_id, mode="Few").to(device)
+        model_few.args.use_lcg = True
+        model_few.load_state_dict(model.state_dict(), strict=False)
+        fix_seed(args.random_seed)
+
+        r_t = prepare_embedding_dataloaders(args, args.target_data, is_source=False)
+        train_loader_t, _, test_loader_t = r_t['loaders']
+        args.num_classes = r_t['num_classes']
+        args.output_dim = args.num_classes if args.num_classes > 2 else 1
+        is_binary_t = (args.num_classes == 2)
+        crit_t = nn.BCEWithLogitsLoss() if is_binary_t else nn.CrossEntropyLoss()
+
+        total_shot = args.few_shot * args.num_classes
+        FEW_SHOT_EPOCHS = 100 if total_shot <= 16 else 240
+
+        model_few.set_freeze_target()
+        train_fn_few = _eee_make_train_func(args, binary_train if is_binary_t else multi_train)
+        eval_fn_few  = binary_evaluate if is_binary_t else multi_evaluate
+
+        R = int(getattr(args, 'support_resamples', 1))
+        base_state_cpu = {k: v.cpu() for k, v in model_few.state_dict().items()}
+        ep_test_metrics = []
+
+        for r in range(R):
+            current_seed = args.random_seed + (r + 1)
+            fix_seed(current_seed)
+            model_few.load_state_dict({k: v.to(device) for k, v in base_state_cpu.items()}, strict=False)
+            model_few.set_freeze_target()
+
+            gat_params_few, lcg_params_few, head_params_few = [], [], []
+            for name, p_param in model_few.named_parameters():
+                if not p_param.requires_grad: continue
+                if 'basis' in name:
+                    gat_params_few.append(p_param)
+                elif 'latent_graph' in name:
+                    lcg_params_few.append(p_param)
+                else:
+                    head_params_few.append(p_param)
+
+            optimizer_few = optim.Adam([
+                {'params': gat_params_few,  'lr': args.source_lr_few},
+                {'params': lcg_params_few,  'lr': args.source_lr_few},
+                {'params': head_params_few, 'lr': args.source_lr_few}
+            ], weight_decay=3e-5)
+
+            def linear_lr_lambda(epoch, _tot=FEW_SHOT_EPOCHS):
+                return max(0.0, 1.0 - epoch / float(_tot))
+            scheduler_few = LambdaLR(optimizer_few, linear_lr_lambda)
+
+            train_loader_epi = get_few_shot_embedding_samples_(train_loader_t, args, seed=current_seed)
+
+            for epoch in range(FEW_SHOT_EPOCHS):
+                model_few.train()
+                train_fn_few(model_few, train_loader_epi, crit_t, optimizer_few, device)
+                scheduler_few.step()
+
+            # 최종 평가
+            model_few.eval()
+            res_train = eval_fn_few(model_few, train_loader_epi, crit_t, device)
+            if isinstance(res_train, tuple) and len(res_train) == 2:
+                res_g_tr, _ = res_train
+                _, y_true_tr_few, y_pred_tr_few = res_g_tr
+            else:
+                _, y_true_tr_few, y_pred_tr_few = res_train
+            thr_few = find_optimal_threshold(y_true_tr_few, y_pred_tr_few) if is_binary_t else None
+
+            (_, tauc, tauprc, tprec, trec, tf1, tacc, _, _) = final_test_evaluate(
+                model_few, test_loader_t, crit_t, device, is_binary_t,
+                threshold=thr_few, mode='Few', args=args
+            )
+            ep_test_metrics.append((tauc, tauprc, tprec, trec, tf1, tacc))
+            logger.info(f"[Retrain][r={r}] AUC={tauc:.4f} AUPRC={tauprc:.4f} ACC={tacc:.4f}")
+
+        ep_arr = np.asarray(ep_test_metrics, dtype=np.float32)
+        mean_metrics = ep_arr.mean(axis=0).tolist()
+        std_metrics  = ep_arr.std(axis=0).tolist()
+
+        logger.info(f"[Retrain Summary] AUC={mean_metrics[0]:.4f}+-{std_metrics[0]:.4f} "
+                    f"AUPRC={mean_metrics[1]:.4f}+-{std_metrics[1]:.4f}")
+
+        # 결과 저장
+        excluded_tag = "+".join(excluded)
+        result_file = os.path.join(
+            exp_results_dir,
+            f"retrain_excl-{excluded_tag}_seed{args.random_seed}_{args.run_tag}.json"
+        )
+        save_data = {
+            'exp_mode': 'exp_b_retrain',
+            'excluded': excluded,
+            'remaining': remaining,
+            'seed': args.random_seed,
+            'few_shot': args.few_shot,
+            'target': args.target_data,
+            'per_source_test': full_pack.get('per_source_test', {}),
+            'target_adaptation': {
+                'mean_auc': mean_metrics[0], 'std_auc': std_metrics[0],
+                'mean_auprc': mean_metrics[1], 'std_auprc': std_metrics[1],
+                'mean_acc': mean_metrics[5], 'std_acc': std_metrics[5],
+                'mean_f1': mean_metrics[4], 'std_f1': std_metrics[4],
+            },
+        }
+        with open(result_file, 'w') as f:
+            json.dump(save_data, f, indent=2)
+        logger.info(f"[Exp B Retrain] Results saved to {result_file}")
+
     else:
-        args_for_save.source_data = str(args_for_save.source_data)
+        raise ValueError(f"Unknown exp_mode: {args.exp_mode}")
 
-    save_results_(args_for_save, results)
-    logger.info("Results saved")
     logger.info(f"Total experiment time: {format_time(time.time() - start_time)}")
-
     _wandb_log({"exp/total_time_sec": float(time.time() - start_time)})
     try:
-        import wandb
         if wandb.run is not None:
             wandb.finish()
     except Exception:

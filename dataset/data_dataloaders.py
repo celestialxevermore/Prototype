@@ -561,6 +561,138 @@ def prepare_embedding_dataloaders(args, dataset_name, is_source=False):
     }
 
 
+def prepare_embedding_dataloaders_kf(args, dataset_name, is_source=False):
+    """KF (Kidney Function) regression embedding loader.
+
+    Same on-disk layout as classification (`embedding_{dataset}.pkl`) but:
+      - y is float (creatinine median in mg/dL, winsorized to [0.1, 15.0])
+      - num_classes=1, task_type='regression'
+      - stratification uses y quartile (pd.qcut) instead of class label
+
+    Splits match baselines_kf/common_data_kf protocol:
+      Source mode: 85/15 train/val
+      Target mode: 80/20 train pool / test
+    """
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
+    random.seed(args.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.random_seed)
+        torch.cuda.manual_seed_all(args.random_seed)
+    torch.backends.cudnn.benchmark = True
+
+    base_path = "/storage/personal/eungyeop/dataset/embedding"
+    if args.embed_type == "_":
+        sub_dir = f"tabular_embeddings_/{args.llm_model}"
+    else:
+        sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
+    emb_name = f"embedding_{dataset_name}.pkl"
+    file_path = os.path.join(base_path, sub_dir, emb_name)
+    print(f"[KF] Loading regression embeddings from: {file_path}")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    with open(file_path, 'rb') as f:
+        data = pickle.load(f)
+
+    if data.get('task_type') != 'regression':
+        raise ValueError(
+            f"{dataset_name}: task_type must be 'regression' (got {data.get('task_type')!r})"
+        )
+
+    embeddings = data['embeddings']
+    labels = np.asarray([float(emb['y'].item()) for emb in embeddings], dtype=np.float64)
+    num_classes = int(data['num_classes'])
+    indices = list(range(len(embeddings)))
+
+    try:
+        strata = pd.qcut(labels, q=4, labels=False, duplicates="drop")
+    except Exception:
+        strata = None
+
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.random_seed)
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+    print(f">>> [KF DataLoader] generator seed={args.random_seed}")
+
+    if is_source:
+        train_idx, val_idx = train_test_split(
+            indices, test_size=0.15, stratify=strata,
+            random_state=args.random_seed,
+        )
+        train_dataset = [embeddings[i] for i in train_idx]
+        val_dataset = [embeddings[i] for i in val_idx]
+        test_dataset = []
+        print(f"[KF Source {dataset_name}] Train={len(train_dataset)} Val={len(val_dataset)}")
+    else:
+        train_idx, test_idx = train_test_split(
+            indices, test_size=0.20, stratify=strata,
+            random_state=args.random_seed,
+        )
+        train_dataset = [embeddings[i] for i in train_idx]
+        val_dataset = []
+        test_dataset = [embeddings[i] for i in test_idx]
+        print(f"[KF Target {dataset_name}] Train_pool={len(train_dataset)} Test={len(test_dataset)}")
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        generator=loader_generator, worker_init_fn=seed_worker, num_workers=0,
+    ) if len(train_dataset) > 0 else None
+
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        generator=loader_generator, worker_init_fn=seed_worker, num_workers=0,
+    ) if len(val_dataset) > 0 else None
+
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False,
+        generator=loader_generator, worker_init_fn=seed_worker, num_workers=0,
+    ) if len(test_dataset) > 0 else None
+
+    return {
+        'loaders': (train_loader, val_loader, test_loader),
+        'num_classes': num_classes,
+        'task_type': 'regression',
+        'train_dataset': train_dataset,
+        'val_dataset': val_dataset,
+        'test_dataset': test_dataset,
+        'y_min': data.get('y_min'), 'y_max': data.get('y_max'),
+        'y_mean': data.get('y_mean'), 'y_std': data.get('y_std'),
+    }
+
+
+def split_kf_train_pool(train_pool, args, val_ratio=0.15):
+    """Split target train pool into ft_train/ft_val (matches baselines_kf 85/15)."""
+    labels = np.asarray([float(emb['y'].item()) for emb in train_pool], dtype=np.float64)
+    try:
+        strata = pd.qcut(labels, q=4, labels=False, duplicates="drop")
+    except Exception:
+        strata = None
+    idx = list(range(len(train_pool)))
+    tr_idx, va_idx = train_test_split(
+        idx, test_size=val_ratio, stratify=strata,
+        random_state=args.random_seed,
+    )
+    ft_train = [train_pool[i] for i in tr_idx]
+    ft_val   = [train_pool[i] for i in va_idx]
+
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.random_seed)
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    train_loader = DataLoader(ft_train, batch_size=args.batch_size, shuffle=True,
+                              generator=loader_generator, worker_init_fn=seed_worker, num_workers=0)
+    val_loader = DataLoader(ft_val, batch_size=args.batch_size, shuffle=False,
+                            generator=loader_generator, worker_init_fn=seed_worker, num_workers=0)
+    return train_loader, val_loader, ft_train, ft_val
+
+
 # def get_few_shot_embedding_samples(train_loader, args):
 #     """train_loader에서 embedding data의 few-shot 샘플링을 수행"""
 #     np.random.seed(args.random_seed)
@@ -989,5 +1121,102 @@ def prepare_exp_embedding_dataloaders(args, dataset_name, alpha=1.0, mode='multi
     return {
         'loaders': (train_loader, val_loader, test_loader),
         'num_classes': num_classes,
+        'split_sizes': split_sizes,
+    }
+
+
+def prepare_exp_embedding_dataloaders_kf(args, dataset_name, alpha=1.0, mode='multi'):
+    """[KF] Exp-style 60/20/20 (train/val/test) loader for regression.
+
+    Mirrors prepare_exp_embedding_dataloaders but:
+      - y is float (creatinine median, mg/dL)
+      - stratify uses pd.qcut quartile (instead of class label)
+      - α sampling samples by quartile bin (instead of class)
+      - returned num_classes=1, task_type='regression'
+    """
+    base_path = "/storage/personal/eungyeop/dataset/embedding"
+    if args.embed_type == "_":
+        sub_dir = f"tabular_embeddings_/{args.llm_model}"
+    else:
+        sub_dir = f"tabular_embeddings_{args.embed_type}/{args.llm_model}"
+    emb_file = os.path.join(base_path, sub_dir, f"embedding_{dataset_name}.pkl")
+    print(f"[KF ExpLoader] Loading regression embeddings from: {emb_file}")
+    if not os.path.exists(emb_file):
+        raise FileNotFoundError(f"File not found: {emb_file}")
+
+    with open(emb_file, 'rb') as f:
+        data = pickle.load(f)
+    if data.get('task_type') != 'regression':
+        raise ValueError(
+            f"{dataset_name}: task_type must be 'regression' (got {data.get('task_type')!r})"
+        )
+    embeddings = data['embeddings']
+    n = len(embeddings)
+    labels = np.asarray([float(emb['y'].item()) for emb in embeddings], dtype=np.float64)
+    num_classes = int(data['num_classes'])
+
+    try:
+        strata = pd.qcut(labels, q=4, labels=False, duplicates='drop')
+    except Exception:
+        strata = None
+
+    indices = np.arange(n)
+    train_pool_idx, test_idx = train_test_split(
+        indices, test_size=0.2, stratify=strata,
+        random_state=args.random_seed,
+    )
+
+    if alpha < 1.0 and strata is not None:
+        rng = np.random.RandomState(args.random_seed)
+        strata_pool = np.asarray(strata)[train_pool_idx]
+        unique_bins = sorted(set(strata_pool.tolist()))
+        sampled_positions = []
+        for b in unique_bins:
+            cls_positions = np.where(strata_pool == b)[0]
+            cls_n = max(1, int(len(cls_positions) * alpha))
+            chosen = rng.choice(cls_positions, size=cls_n, replace=False)
+            sampled_positions.extend(chosen.tolist())
+        active_pool_idx = train_pool_idx[sampled_positions]
+    else:
+        active_pool_idx = train_pool_idx
+
+    if strata is not None:
+        strata_active = np.asarray(strata)[active_pool_idx]
+    else:
+        strata_active = None
+    train_idx, val_idx = train_test_split(
+        active_pool_idx, test_size=0.25,
+        stratify=strata_active,
+        random_state=args.random_seed,
+    )
+
+    train_dataset = [embeddings[i] for i in train_idx]
+    val_dataset   = [embeddings[i] for i in val_idx]
+    test_dataset  = [embeddings[i] for i in test_idx]
+
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.random_seed)
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                              generator=loader_generator, worker_init_fn=seed_worker, num_workers=0
+                              ) if len(train_dataset) > 0 else None
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                            generator=loader_generator, worker_init_fn=seed_worker, num_workers=0
+                            ) if len(val_dataset) > 0 else None
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
+                             generator=loader_generator, worker_init_fn=seed_worker, num_workers=0
+                             ) if len(test_dataset) > 0 else None
+
+    split_sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
+    print(f"[KF ExpLoader] {dataset_name} (α={alpha}, mode={mode}, seed={args.random_seed}): "
+          f"train={split_sizes['train']}, val={split_sizes['val']}, test={split_sizes['test']}")
+    return {
+        'loaders': (train_loader, val_loader, test_loader),
+        'num_classes': num_classes,
+        'task_type': 'regression',
         'split_sizes': split_sizes,
     }

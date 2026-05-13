@@ -119,8 +119,13 @@ class Model(nn.Module):
             nn.Dropout(self.dropout_rate),
             nn.Linear(hid, self.output_dim),
         )
-        # Loss
-        self.criterion = nn.BCEWithLogitsLoss() if self.num_classes == 2 else nn.CrossEntropyLoss()
+        # Loss (num_classes==1: regression, ==2: binary, >2: multiclass)
+        if self.num_classes == 1:
+            self.criterion = nn.MSELoss()
+        elif self.num_classes == 2:
+            self.criterion = nn.BCEWithLogitsLoss()
+        else:
+            self.criterion = nn.CrossEntropyLoss()
         self._init_weights()
 
     def _init_weights(self):
@@ -141,7 +146,7 @@ class Model(nn.Module):
     def forward(self, batch, y):
         total_loss = 0.0 
         target = y.to(self.device)
-        if self.num_classes == 2:
+        if self.num_classes <= 2:
             target = target.view(-1, 1).float()
         else:
             target = target.squeeze().long()
@@ -159,10 +164,11 @@ class Model(nn.Module):
             reg_loss = self.reg_loss 
             current_mode = getattr(self, 'mode', 'Full')
             if current_mode == 'Few':
-                #global logger
-                #logger.info(f"[Few-shot] global_loss={global_loss.item():.4f} reg_loss={reg_loss.item():.4f} weighted_reg={self.args.fgw_alpha * reg_loss.item():.4f}")
-                total_loss = global_loss + (self.args.fgw_alpha * reg_loss)
-            else: 
+                if getattr(self.args, 'ft_use_local_loss', False):
+                    total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
+                else:
+                    total_loss = global_loss + (self.args.fgw_alpha * reg_loss)
+            else:
                 total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
             
             if hasattr(self, '_log_step_count'):

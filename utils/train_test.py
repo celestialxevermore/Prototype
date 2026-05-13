@@ -128,6 +128,60 @@ def multi_evaluate(model, loader, criterion, device):
     test_loss /= len(loader.dataset)
     return test_loss, np.array(y_true), np.array(y_pred)
 
+def regression_train(model, train_loader, criterion, optimizer, device):
+    """KF regression train step. Mirrors binary_train; loss comes from model.forward (MSELoss inside)."""
+    model.train()
+    total_loss = 0
+    for step, batch in enumerate(train_loader):
+        optimizer.zero_grad()
+        loss = model(batch, batch['y'])
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * len(batch['y'])
+    return total_loss / len(train_loader.dataset)
+
+
+def regression_evaluate(model, loader, criterion, device):
+    """KF regression eval. Returns (res_g, res_l) tuple matching binary_evaluate signature.
+    Each res is (loss, y_true, y_pred) — y_pred is raw model output (no sigmoid/softmax).
+    """
+    model.eval()
+    loss_g_sum, loss_l_sum = 0.0, 0.0
+    y_true = []
+    y_pred_g, y_pred_l = [], []
+    has_global = False
+
+    with torch.no_grad():
+        for batch in loader:
+            preds = model.predict(batch, return_all=True)
+            target = batch['y'].to(device).view(-1, 1).float()
+
+            if isinstance(preds, tuple) and len(preds) == 2:
+                global_pred, local_pred = preds
+                has_global = True
+                loss_g = criterion(global_pred, target)
+                loss_g_sum += loss_g.item() * len(target)
+                y_pred_g.extend(global_pred.detach().cpu().numpy())
+            else:
+                local_pred = preds
+                has_global = False
+
+            loss_l = criterion(local_pred, target)
+            loss_l_sum += loss_l.item() * len(target)
+            y_pred_l.extend(local_pred.detach().cpu().numpy())
+            y_true.extend(target.cpu().numpy())
+
+    dataset_len = len(loader.dataset)
+    loss_l_avg = loss_l_sum / dataset_len
+    res_l = (loss_l_avg, np.array(y_true), np.array(y_pred_l))
+    if has_global:
+        loss_g_avg = loss_g_sum / dataset_len
+        res_g = (loss_g_avg, np.array(y_true), np.array(y_pred_g))
+    else:
+        res_g = res_l
+    return res_g, res_l
+
+
 def _binary_log_loss(y_true, y_prob, eps=1e-7):
     p = np.clip(np.asarray(y_prob), eps, 1 - eps)
     y = np.asarray(y_true).astype(np.float32)

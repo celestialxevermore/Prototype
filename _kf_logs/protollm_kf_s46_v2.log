@@ -1,0 +1,172 @@
+[KF-ProtoLLM] targets=['mimic_kf', 'eicu_kf', 'hirid_kf', 'sic_kf', 'zigong_kf'] seed=46 sources=['mimic_kf', 'eicu_kf', 'hirid_kf', 'sic_kf', 'zigong_kf']
+[KF-ProtoLLM] device=cuda use_lcg=False input_dim=256 basis=graphormerx2
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_mimic_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Source mimic_kf] Train=32733 Val=5777
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_eicu_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Source eicu_kf] Train=53226 Val=9393
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_hirid_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Source hirid_kf] Train=6573 Val=1160
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_sic_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Source sic_kf] Train=8783 Val=1551
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_zigong_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Source zigong_kf] Train=925 Val=164
+[KF-ProtoLLM] === PT start (epochs=30 patience=5) ===
+[PT ep=01] tr_loss=0.7293 val_rmse=0.9113 val_r2=0.0375 t=46.7s
+[PT ep=02] tr_loss=0.5947 val_rmse=0.9038 val_r2=0.0502 t=56.8s
+[PT ep=03] tr_loss=0.5588 val_rmse=0.7597 val_r2=0.3260 t=64.2s
+[PT ep=04] tr_loss=0.5149 val_rmse=0.7308 val_r2=0.3721 t=60.5s
+[PT ep=05] tr_loss=0.4929 val_rmse=0.7146 val_r2=0.4024 t=59.9s
+[PT ep=06] tr_loss=0.4839 val_rmse=0.6840 val_r2=0.4514 t=57.5s
+[PT ep=07] tr_loss=0.4806 val_rmse=0.7082 val_r2=0.4128 t=57.6s
+[PT ep=08] tr_loss=0.4718 val_rmse=0.7208 val_r2=0.3943 t=58.1s
+[PT ep=09] tr_loss=0.4684 val_rmse=0.6929 val_r2=0.4375 t=55.6s
+[PT ep=10] tr_loss=0.4638 val_rmse=0.6945 val_r2=0.4368 t=58.1s
+[PT ep=11] tr_loss=0.4599 val_rmse=0.7194 val_r2=0.3879 t=59.1s
+[PT] early stop at ep=11
+[KF-ProtoLLM] PT done — best avg source val rmse=0.6840
+
+[KF-ProtoLLM] === FT start on target=mimic_kf (1/5) ===
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_mimic_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Target mimic_kf] Train_pool=30808 Test=7702
+[FT] ft_train=26186 ft_val=4622 test=7702
+[FT mimic_kf ep=01] tr_loss=0.7593 val_rmse=0.7495 val_r2=0.4982 t=16.0s
+[FT mimic_kf ep=02] tr_loss=0.5615 val_rmse=0.7155 val_r2=0.5426 t=19.3s
+[FT mimic_kf ep=03] tr_loss=0.5489 val_rmse=0.7304 val_r2=0.5234 t=13.4s
+[FT mimic_kf ep=04] tr_loss=0.5463 val_rmse=0.7150 val_r2=0.5433 t=11.3s
+[FT mimic_kf ep=05] tr_loss=0.5315 val_rmse=0.7165 val_r2=0.5414 t=16.2s
+[FT mimic_kf ep=06] tr_loss=0.5297 val_rmse=0.7412 val_r2=0.5092 t=17.2s
+[FT mimic_kf ep=07] tr_loss=0.5205 val_rmse=0.7087 val_r2=0.5513 t=14.9s
+[FT mimic_kf ep=08] tr_loss=0.5159 val_rmse=0.6966 val_r2=0.5665 t=11.2s
+[FT mimic_kf ep=09] tr_loss=0.5181 val_rmse=0.6990 val_r2=0.5635 t=13.1s
+[FT mimic_kf ep=10] tr_loss=0.5055 val_rmse=0.7075 val_r2=0.5529 t=14.5s
+[FT mimic_kf ep=11] tr_loss=0.5117 val_rmse=0.7020 val_r2=0.5597 t=11.8s
+[FT mimic_kf ep=12] tr_loss=0.4959 val_rmse=0.7095 val_r2=0.5503 t=11.2s
+[FT mimic_kf ep=13] tr_loss=0.4943 val_rmse=0.6933 val_r2=0.5706 t=12.7s
+[FT mimic_kf ep=14] tr_loss=0.5009 val_rmse=0.6969 val_r2=0.5662 t=15.0s
+[FT mimic_kf ep=15] tr_loss=0.4931 val_rmse=0.6974 val_r2=0.5655 t=13.1s
+[FT mimic_kf ep=16] tr_loss=0.4860 val_rmse=0.7037 val_r2=0.5576 t=11.3s
+[FT mimic_kf ep=17] tr_loss=0.4904 val_rmse=0.7032 val_r2=0.5582 t=13.3s
+[FT mimic_kf ep=18] tr_loss=0.4791 val_rmse=0.7031 val_r2=0.5583 t=15.8s
+[FT mimic_kf] early stop at ep=18
+[KF-ProtoLLM] TEST mimic_kf: rmse=0.6593 mae=0.3817 r2=0.5656 pearson=0.7526
+[KF-ProtoLLM] saved -> /storage/personal/eungyeop/experiments/experiments/kf_protollm_v2_20260506/mimic_kf/args_seed:46/protollm/scenario3_20260506T124957.json
+
+[KF-ProtoLLM] === FT start on target=eicu_kf (2/5) ===
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_eicu_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Target eicu_kf] Train_pool=50095 Test=12524
+[FT] ft_train=42580 ft_val=7515 test=12524
+[FT eicu_kf ep=01] tr_loss=0.5076 val_rmse=0.6870 val_r2=0.3775 t=21.4s
+[FT eicu_kf ep=02] tr_loss=0.4593 val_rmse=0.6857 val_r2=0.3798 t=18.5s
+[FT eicu_kf ep=03] tr_loss=0.4545 val_rmse=0.6808 val_r2=0.3885 t=15.1s
+[FT eicu_kf ep=04] tr_loss=0.4536 val_rmse=0.6837 val_r2=0.3833 t=19.6s
+[FT eicu_kf ep=05] tr_loss=0.4488 val_rmse=0.6798 val_r2=0.3904 t=16.8s
+[FT eicu_kf ep=06] tr_loss=0.4493 val_rmse=0.6795 val_r2=0.3910 t=17.1s
+[FT eicu_kf ep=07] tr_loss=0.4454 val_rmse=0.6796 val_r2=0.3908 t=18.6s
+[FT eicu_kf ep=08] tr_loss=0.4448 val_rmse=0.6807 val_r2=0.3888 t=22.9s
+[FT eicu_kf ep=09] tr_loss=0.4435 val_rmse=0.6773 val_r2=0.3948 t=16.5s
+[FT eicu_kf ep=10] tr_loss=0.4401 val_rmse=0.6736 val_r2=0.4015 t=16.4s
+[FT eicu_kf ep=11] tr_loss=0.4391 val_rmse=0.6729 val_r2=0.4027 t=16.2s
+[FT eicu_kf ep=12] tr_loss=0.4384 val_rmse=0.6735 val_r2=0.4017 t=17.9s
+[FT eicu_kf ep=13] tr_loss=0.4342 val_rmse=0.6837 val_r2=0.3834 t=15.9s
+[FT eicu_kf ep=14] tr_loss=0.4337 val_rmse=0.6750 val_r2=0.3990 t=15.1s
+[FT eicu_kf ep=15] tr_loss=0.4336 val_rmse=0.6720 val_r2=0.4043 t=13.9s
+[FT eicu_kf ep=16] tr_loss=0.4313 val_rmse=0.6730 val_r2=0.4026 t=15.5s
+[FT eicu_kf ep=17] tr_loss=0.4297 val_rmse=0.6766 val_r2=0.3961 t=14.9s
+[FT eicu_kf ep=18] tr_loss=0.4303 val_rmse=0.6712 val_r2=0.4057 t=13.3s
+[FT eicu_kf ep=19] tr_loss=0.4277 val_rmse=0.6743 val_r2=0.4003 t=14.1s
+[FT eicu_kf ep=20] tr_loss=0.4251 val_rmse=0.6728 val_r2=0.4029 t=14.1s
+[FT eicu_kf ep=21] tr_loss=0.4231 val_rmse=0.6786 val_r2=0.3925 t=14.9s
+[FT eicu_kf ep=22] tr_loss=0.4235 val_rmse=0.6734 val_r2=0.4019 t=16.8s
+[FT eicu_kf ep=23] tr_loss=0.4222 val_rmse=0.6770 val_r2=0.3954 t=14.5s
+[FT eicu_kf] early stop at ep=23
+[KF-ProtoLLM] TEST eicu_kf: rmse=0.6568 mae=0.4036 r2=0.4087 pearson=0.6408
+[KF-ProtoLLM] saved -> /storage/personal/eungyeop/experiments/experiments/kf_protollm_v2_20260506/eicu_kf/args_seed:46/protollm/scenario3_20260506T125737.json
+
+[KF-ProtoLLM] === FT start on target=hirid_kf (3/5) ===
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_hirid_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Target hirid_kf] Train_pool=6186 Test=1547
+[FT] ft_train=5258 ft_val=928 test=1547
+[FT hirid_kf ep=01] tr_loss=0.8269 val_rmse=0.7158 val_r2=0.3996 t=3.4s
+[FT hirid_kf ep=02] tr_loss=0.5038 val_rmse=0.6947 val_r2=0.4344 t=2.4s
+[FT hirid_kf ep=03] tr_loss=0.5037 val_rmse=0.6608 val_r2=0.4883 t=2.4s
+[FT hirid_kf ep=04] tr_loss=0.4637 val_rmse=0.6521 val_r2=0.5017 t=2.8s
+[FT hirid_kf ep=05] tr_loss=0.4530 val_rmse=0.6366 val_r2=0.5251 t=2.7s
+[FT hirid_kf ep=06] tr_loss=0.4568 val_rmse=0.6346 val_r2=0.5280 t=2.7s
+[FT hirid_kf ep=07] tr_loss=0.4324 val_rmse=0.6227 val_r2=0.5456 t=2.7s
+[FT hirid_kf ep=08] tr_loss=0.4269 val_rmse=0.6534 val_r2=0.4996 t=2.7s
+[FT hirid_kf ep=09] tr_loss=0.4292 val_rmse=0.6162 val_r2=0.5550 t=2.6s
+[FT hirid_kf ep=10] tr_loss=0.4197 val_rmse=0.6144 val_r2=0.5575 t=2.5s
+[FT hirid_kf ep=11] tr_loss=0.4161 val_rmse=0.6138 val_r2=0.5584 t=2.4s
+[FT hirid_kf ep=12] tr_loss=0.4119 val_rmse=0.6063 val_r2=0.5692 t=2.3s
+[FT hirid_kf ep=13] tr_loss=0.3980 val_rmse=0.6074 val_r2=0.5677 t=2.5s
+[FT hirid_kf ep=14] tr_loss=0.4057 val_rmse=0.6023 val_r2=0.5748 t=2.4s
+[FT hirid_kf ep=15] tr_loss=0.4036 val_rmse=0.6271 val_r2=0.5391 t=2.6s
+[FT hirid_kf ep=16] tr_loss=0.4087 val_rmse=0.6077 val_r2=0.5672 t=2.4s
+[FT hirid_kf ep=17] tr_loss=0.3779 val_rmse=0.6080 val_r2=0.5668 t=2.5s
+[FT hirid_kf ep=18] tr_loss=0.3783 val_rmse=0.5997 val_r2=0.5785 t=2.5s
+[FT hirid_kf ep=19] tr_loss=0.3788 val_rmse=0.6007 val_r2=0.5771 t=2.5s
+[FT hirid_kf ep=20] tr_loss=0.3755 val_rmse=0.6194 val_r2=0.5503 t=2.3s
+[FT hirid_kf ep=21] tr_loss=0.3672 val_rmse=0.6101 val_r2=0.5638 t=2.3s
+[FT hirid_kf ep=22] tr_loss=0.3584 val_rmse=0.6384 val_r2=0.5223 t=2.3s
+[FT hirid_kf ep=23] tr_loss=0.3883 val_rmse=0.6193 val_r2=0.5504 t=2.5s
+[FT hirid_kf] early stop at ep=23
+[KF-ProtoLLM] TEST hirid_kf: rmse=0.6635 mae=0.4018 r2=0.5549 pearson=0.7492
+[KF-ProtoLLM] saved -> /storage/personal/eungyeop/experiments/experiments/kf_protollm_v2_20260506/hirid_kf/args_seed:46/protollm/scenario3_20260506T125849.json
+
+[KF-ProtoLLM] === FT start on target=sic_kf (4/5) ===
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_sic_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Target sic_kf] Train_pool=8267 Test=2067
+[FT] ft_train=7026 ft_val=1241 test=2067
+[FT sic_kf ep=01] tr_loss=0.5049 val_rmse=0.6141 val_r2=0.3589 t=4.5s
+[FT sic_kf ep=02] tr_loss=0.3222 val_rmse=0.5917 val_r2=0.4049 t=3.5s
+[FT sic_kf ep=03] tr_loss=0.2995 val_rmse=0.5883 val_r2=0.4117 t=3.7s
+[FT sic_kf ep=04] tr_loss=0.2973 val_rmse=0.5881 val_r2=0.4120 t=3.6s
+[FT sic_kf ep=05] tr_loss=0.2903 val_rmse=0.5825 val_r2=0.4233 t=3.4s
+[FT sic_kf ep=06] tr_loss=0.2888 val_rmse=0.5851 val_r2=0.4180 t=3.0s
+[FT sic_kf ep=07] tr_loss=0.2846 val_rmse=0.5784 val_r2=0.4313 t=3.4s
+[FT sic_kf ep=08] tr_loss=0.2808 val_rmse=0.5870 val_r2=0.4143 t=3.3s
+[FT sic_kf ep=09] tr_loss=0.2848 val_rmse=0.5788 val_r2=0.4306 t=3.4s
+[FT sic_kf ep=10] tr_loss=0.2720 val_rmse=0.5846 val_r2=0.4191 t=3.3s
+[FT sic_kf ep=11] tr_loss=0.2780 val_rmse=0.5741 val_r2=0.4398 t=3.5s
+[FT sic_kf ep=12] tr_loss=0.2705 val_rmse=0.5777 val_r2=0.4328 t=3.6s
+[FT sic_kf ep=13] tr_loss=0.2695 val_rmse=0.5896 val_r2=0.4090 t=3.3s
+[FT sic_kf ep=14] tr_loss=0.2683 val_rmse=0.5866 val_r2=0.4151 t=3.5s
+[FT sic_kf ep=15] tr_loss=0.2646 val_rmse=0.5791 val_r2=0.4298 t=3.7s
+[FT sic_kf ep=16] tr_loss=0.2643 val_rmse=0.5787 val_r2=0.4308 t=3.8s
+[FT sic_kf] early stop at ep=16
+[KF-ProtoLLM] TEST sic_kf: rmse=0.5112 mae=0.3334 r2=0.5040 pearson=0.7154
+[KF-ProtoLLM] saved -> /storage/personal/eungyeop/experiments/experiments/kf_protollm_v2_20260506/sic_kf/args_seed:46/protollm/scenario3_20260506T130002.json
+
+[KF-ProtoLLM] === FT start on target=zigong_kf (5/5) ===
+[KF] Loading regression embeddings from: /storage/personal/eungyeop/dataset/embedding/tabular_embeddings_carte_d256/gemma-medical/embedding_zigong_kf.pkl
+>>> [KF DataLoader] generator seed=46
+[KF Target zigong_kf] Train_pool=871 Test=218
+[FT] ft_train=740 ft_val=131 test=218
+[FT zigong_kf ep=01] tr_loss=2.9730 val_rmse=1.1863 val_r2=-0.1632 t=0.4s
+[FT zigong_kf ep=02] tr_loss=1.7498 val_rmse=1.0538 val_r2=0.0821 t=0.4s
+[FT zigong_kf ep=03] tr_loss=1.5158 val_rmse=1.0296 val_r2=0.1238 t=0.4s
+[FT zigong_kf ep=04] tr_loss=1.3376 val_rmse=0.9840 val_r2=0.1998 t=0.4s
+[FT zigong_kf ep=05] tr_loss=1.1824 val_rmse=0.9853 val_r2=0.1976 t=0.4s
+[FT zigong_kf ep=06] tr_loss=1.0790 val_rmse=0.9971 val_r2=0.1783 t=0.4s
+[FT zigong_kf ep=07] tr_loss=1.0646 val_rmse=0.9963 val_r2=0.1796 t=0.3s
+[FT zigong_kf ep=08] tr_loss=1.0127 val_rmse=0.9905 val_r2=0.1891 t=0.4s
+[FT zigong_kf ep=09] tr_loss=0.9402 val_rmse=1.0034 val_r2=0.1679 t=0.4s
+[FT zigong_kf] early stop at ep=9
+[KF-ProtoLLM] TEST zigong_kf: rmse=0.8698 mae=0.5871 r2=0.3448 pearson=0.6300
+[KF-ProtoLLM] saved -> /storage/personal/eungyeop/experiments/experiments/kf_protollm_v2_20260506/zigong_kf/args_seed:46/protollm/scenario3_20260506T130008.json
+
+[KF-ProtoLLM] === ALL DONE seed=46 ===
+  mimic_kf: rmse=0.6593 r2=0.5656 mae=0.3817 pearson=0.7526
+  eicu_kf: rmse=0.6568 r2=0.4087 mae=0.4036 pearson=0.6408
+  hirid_kf: rmse=0.6635 r2=0.5549 mae=0.4018 pearson=0.7492
+  sic_kf: rmse=0.5112 r2=0.5040 mae=0.3334 pearson=0.7154
+  zigong_kf: rmse=0.8698 r2=0.3448 mae=0.5871 pearson=0.6300
