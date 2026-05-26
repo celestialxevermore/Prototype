@@ -134,62 +134,56 @@ class Model(nn.Module):
                 nn_init.kaiming_uniform_(m.weight, a=math.sqrt(5))
                 if m.bias is not None:
                     nn_init.zeros_(m.bias)
-
     def set_freeze_target(self):
-        for p in self.parameters(): p.requires_grad = False
-        #for p in self.gnn_experts.parameters(): p.requires_grad = True
-        for p in self.basis_layers.parameters(): p.requires_grad = True 
-        for p in self.basis_layer_norms.parameters(): p.requires_grad = True
-        #for p in self.latent_graph.parameters(): p.requires_grad = True
-        for p in self.ghead2.parameters(): p.requires_grad = True
-    # ---- training ----
+            for p in self.parameters(): p.requires_grad = False
+            for p in self.basis_layers.parameters(): p.requires_grad = True
+            for p in self.basis_layer_norms.parameters(): p.requires_grad = True
+            for p in self.thead.parameters(): p.requires_grad = True
+            for p in self.ghead.parameters(): p.requires_grad = True
     def forward(self, batch, y):
-        total_loss = 0.0 
+        total_loss = 0.0
         target = y.to(self.device)
         if self.num_classes <= 2:
             target = target.view(-1, 1).float()
         else:
             target = target.squeeze().long()
-        # ----
-        # [Phase 1] Vanilla GAT 
-        # ---- 
+
         if not getattr(self.args, 'use_lcg', False):
             local_pred = self.predict(batch)
-            return self.criterion(local_pred, target)
+            loss = self.criterion(local_pred, target)
+            return loss
         else:
-            global_pred, local_pred = self.predict(batch, return_all = True) 
-            local_loss = self.criterion(local_pred, target)
-            global_loss = self.criterion(global_pred, target)
-
-            reg_loss = self.reg_loss 
             current_mode = getattr(self, 'mode', 'Full')
+
             if current_mode == 'Few':
-                if getattr(self.args, 'ft_use_local_loss', False):
-                    total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
-                else:
-                    total_loss = global_loss + (self.args.fgw_alpha * reg_loss)
+                global_pred, local_pred = self.predict(batch, return_all=True)
+                local_loss = self.criterion(local_pred, target)
+                global_loss = self.criterion(global_pred, target)
+                total_loss = local_loss #+ global_loss
+                
+                self._last_local_loss = float(local_loss.detach().item())
+                self._last_global_loss = 0.0
+                self._last_reg_loss = 0.0
+                self._last_total_loss = float(local_loss.detach().item())
             else:
-                total_loss = local_loss + global_loss + (self.args.fgw_alpha * reg_loss)
-            
-            if hasattr(self, '_log_step_count'):
-                self._log_step_count += 1
-            else:
-                self._log_step_count = 1
-            if self._log_step_count % 50 == 0:
-                import logging
-                logger = logging.getLogger("my_experiment_logger")
-                logger.info(
-                    f"[LOSS] Step {self._log_step_count} | mode={current_mode} | "
-                    f"local={local_loss.item():.4f} | global={global_loss.item():.4f} | "
-                    f"reg={reg_loss.item():.4f} | weighted_reg={self.args.fgw_alpha * reg_loss.item():.4f} | "
-                    f"total={total_loss.item():.4f}"
-                )
-            
+                global_pred, local_pred = self.predict(batch, return_all=True)
+                local_loss = self.criterion(local_pred, target)
+                global_loss = self.criterion(global_pred, target)
+                reg_loss = self.reg_loss
+
+                _ablate_reg = getattr(self.args, 'ablate_reg_loss', False)
+                _reg_term = 0.0 if _ablate_reg else (self.args.fgw_alpha * reg_loss)
+                total_loss = local_loss + global_loss + _reg_term
+
+                self._last_local_loss = float(local_loss.detach().item())
+                self._last_global_loss = float(global_loss.detach().item())
+                self._last_reg_loss = float(reg_loss.detach().item() if torch.is_tensor(reg_loss) else float(reg_loss))
+                self._last_total_loss = float(total_loss.detach().item())
+
             return total_loss
 
-    # ---- inference ----
-    def predict(self, batch, return_all = False):
-        # gather
+    def predict(self, batch, return_all=False):
+        # gather embeddings
         desc_embeddings, name_embeddings, value_embeddings = [], [], []
         if all(k in batch for k in ['cat_name_embeddings', 'cat_value_embeddings', 'cat_desc_embeddings']):
             desc_embeddings.append(batch['cat_desc_embeddings'].to(self.device))
@@ -202,11 +196,11 @@ class Model(nn.Module):
 
         if not desc_embeddings or not name_embeddings or not value_embeddings:
             raise ValueError("No categorical or numerical features found in batch")
-        name   = torch.cat(name_embeddings, dim = 1)
-        value = torch.cat(value_embeddings, dim = 1)
+        name = torch.cat(name_embeddings, dim=1)
+        value = torch.cat(value_embeddings, dim=1)
 
-        # (3) basis GAT stack ---- 
-        x_basis  = torch.cat([self.basis_cls.expand(value.size(0), 1, self.input_dim), value], dim=1)
+        # === GAT encoder ===
+        x_basis = torch.cat([self.basis_cls.expand(value.size(0), 1, self.input_dim), value], dim=1)
         last_att = None
         for l in range(self.num_basis_layers):
             norm_x = self.basis_layer_norms[l](x_basis)
@@ -216,54 +210,56 @@ class Model(nn.Module):
         self.x_basis = x_basis
         self.basis_outputs_for_viz = basis_outputs
 
+        # === Local prediction (CLS → head) ===
         local_output = x_basis[:, 0, :]
-        if 'src_idx' in batch: 
+        if 'src_idx' in batch:
             local_pred = self.sheads[int(batch['src_idx'])](local_output)
-        elif getattr(self.args, 'use_target_head', False):
-            local_pred = self.thead(local_output)
         else:
             local_pred = self.thead(local_output)
-        self._last_local_pred = local_pred 
+        self._last_local_pred = local_pred
 
-        # ==== 
-        # [Bridge]
-        # ==== 
-        # [Phase 1] Vanilla GAT 
+        # === Phase 1: no LCG ===
         if not getattr(self.args, 'use_lcg', False):
-            return local_pred 
-        else:
-            if last_att is not None:
-                self._last_P_basis = 1.0 - last_att[:, 0, 1:, 1:]
-                attn = last_att[:, 0, 1:, 1:]
-                log_attn = -torch.log(attn.clamp_min(1e-8))
-                with torch.no_grad():
-                    q90 = torch.quantile(log_attn.flatten(), 0.9).clamp_min(1e-8)
-                self._last_P_basis = (log_attn / q90).clamp_max(1.0)
+            return local_pred
 
-            else:
-                B, N = value.shape[:2]
-                self._last_P_basis = torch.zeros(B, N, N, device = self.device)
-            lcg_feat, lcg_struct = self.latent_graph() 
-
-            q_lcg_feat, q_lcg_struct, coordinates, reg_loss = self.graph_quantizer( 
-            source_struct = self._last_P_basis, 
-            source_feat = self.x_basis[:, 1:, :], 
-            lcg_struct = lcg_struct, 
-            lcg_feat = lcg_feat, 
-            batch = batch,
-            )
-        self.reg_loss = reg_loss
-
-        expert_outputs = self.gnn_experts(q_lcg_feat, q_lcg_struct) 
-
-        expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs).sum(dim=1)
+        # === Few-shot training: local만 쓰므로 global path 스킵 ===
         current_mode = getattr(self, 'mode', 'Full')
+        # if current_mode == 'Few' and self.training:
+        #     return local_pred, global_pred
+
+        # === Global path: FGW → coordinates → experts → ghead ===
+        if last_att is not None:
+            attn = last_att[:, 0, 1:, 1:]  # (B, N, N)
+            log_attn = -torch.log(attn.clamp_min(1e-8))
+            with torch.no_grad():
+                B = log_attn.shape[0]
+                flat = log_attn.view(B, -1)
+                lo = torch.quantile(flat, 0.05, dim=1).view(B, 1, 1)
+                hi = torch.quantile(flat, 0.95, dim=1).view(B, 1, 1)
+                span = (hi - lo).clamp_min(1e-8)
+            self._last_P_basis = ((log_attn - lo) / span).clamp(0.0, 1.0)
+
+        lcg_feat, lcg_struct = self.latent_graph()
+        q_lcg_feat, q_lcg_struct, coordinates, reg_loss = self.graph_quantizer(
+            source_struct=self._last_P_basis,
+            source_feat=self.x_basis[:, 1:, :],
+            lcg_struct=lcg_struct,
+            lcg_feat=lcg_feat,
+            batch=batch,
+        )
+        self.reg_loss = reg_loss
+        self._last_coordinates = coordinates
         
-        if current_mode == 'Few':
-            global_pred = self.ghead2(expert_outputs)
-        else:
-            global_pred = self.ghead(expert_outputs)
-        if self.training or return_all:
-            return global_pred, local_pred 
+        expert_outputs_per = self.gnn_experts(q_lcg_feat, q_lcg_struct)
+        self._last_expert_outputs_per = expert_outputs_per
+
+        expert_outputs = (coordinates.unsqueeze(-1) * expert_outputs_per).sum(dim=1)
+        self._last_expert_combined = expert_outputs
+
+        global_pred = self.ghead(expert_outputs)
+
+        if return_all:
+            return global_pred, local_pred
         else:
             return global_pred
+    

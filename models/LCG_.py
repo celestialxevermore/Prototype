@@ -56,12 +56,24 @@ class LatentCompositeGraph(nn.Module):
             node_embeddings = self.node_embeddings
             
         if self.struct_mode == "projection":
-            Q = self.q_proj(node_embeddings)
-            K = self.k_proj(node_embeddings)
-            scale_factor = math.sqrt(self.struct_dim)
-            scores = torch.matmul(Q, K.transpose(-2, -1)) / scale_factor
-            attn = torch.softmax(scores, dim = -1)
-            return 1.0 - attn 
+            if node_embeddings is None:
+                node_embeddings = self.node_embeddings  # (M, K, D)
+            
+            structures = []
+            for m in range(self.M):
+                Q = self.q_projs[m](node_embeddings[m])  # (K, struct_dim)
+                K = self.k_projs[m](node_embeddings[m])  # (K, struct_dim)
+                scale = math.sqrt(self.struct_dim)
+                scores = torch.matmul(Q, K.transpose(-2, -1)) / scale
+                attn = torch.softmax(scores, dim=-1)
+                structures.append(1.0 - attn)
+            
+            structure = torch.stack(structures, dim=0)  # (M, K, K)
+            
+            if node_embeddings.dim() == 4:
+                B = node_embeddings.shape[0]
+                structure = structure.unsqueeze(0).expand(B, -1, -1, -1)
+            return structure
         elif self.struct_mode == 'static':
             adj = torch.sigmoid(self.adj_param)
             structure = 1.0 - adj

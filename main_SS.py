@@ -119,6 +119,7 @@ def get_args():
     parser.add_argument('--hs_reg', type=float, default=0.1)
     parser.add_argument('--hs_warmup', type=int, default=30)
     parser.add_argument('--ft_use_local_loss', action='store_true', default=False)
+    parser.add_argument('--ablate_reg_loss', action='store_true', default=False, help='Drop fgw_alpha*reg_loss term (Stage 4-1)')
     '''
         Basis GAT Configuration
     '''
@@ -303,49 +304,6 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
             final_centroids[m] = km_local.cluster_centers_
         
         final_centroids = torch.tensor(final_centroids, dtype=torch.float32)
-
-    elif strategy == 'robust_hierarchical':
-        logger.info(f">> [Robust Hierarchical] Trying 20 KMeans runs, selecting most diverse centroids")
-        
-        best_score = -1
-        best_km = None
-        
-        for trial in range(20):
-            km = KMeans(n_clusters=M, n_init=10, random_state=args.random_seed + trial).fit(data_pool)
-            
-            # centroid 간 cosine similarity로 diversity 측정
-            centers = km.cluster_centers_
-            norms = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-8)
-            gram = norms @ norms.T
-            off_diag = gram[~np.eye(M, dtype=bool)]
-            diversity = -off_diag.mean()
-            
-            # 클러스터 크기 균형
-            counts = np.bincount(km.labels_, minlength=M)
-            balance = counts.min() / (counts.max() + 1e-8)
-            
-            score = diversity + 0.3 * balance
-            logger.info(f"   Trial {trial}: diversity={-diversity:.4f}, balance={balance:.3f}, score={score:.4f}, sizes={counts.tolist()}")
-            
-            if score > best_score:
-                best_score = score
-                best_km = km
-        
-        km_global = best_km
-        counts_final = np.bincount(km_global.labels_, minlength=M)
-        logger.info(f">> [Robust] Selected best trial: score={best_score:.4f}, sizes={counts_final.tolist()}")
-        
-        final_centroids = np.zeros((M, K, D))
-        for m in range(M):
-            group = data_pool[km_global.labels_ == m]
-            logger.info(f"   LCG {m}: {len(group)} samples in global cluster")
-            if len(group) < K:
-                supp = data_pool[np.random.choice(len(data_pool), K - len(group))]
-                group = np.concatenate([group, supp], axis=0)
-            km_local = KMeans(n_clusters=K, n_init=10, random_state=args.random_seed).fit(group)
-            final_centroids[m] = km_local.cluster_centers_
-        
-        final_centroids = torch.tensor(final_centroids, dtype=torch.float32)
         
     elif strategy == 'round_robin':
         kmeans = KMeans(n_clusters=M * K, n_init=10, random_state=args.random_seed).fit(data_pool)
@@ -370,9 +328,8 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
         with torch.no_grad():
             node_emb = model.latent_graph.node_embeddings.data
             dist = torch.cdist(node_emb, node_emb, p=2) ** 2
-            for m in range(M):
-                q90 = torch.quantile(dist[m].flatten(), 0.9).clamp_min(1e-8)
-                dist[m] = (dist[m] / q90).clamp_max(1.0)
+            q90 = torch.quantile(dist.flatten(), 0.9).clamp_min(1e-8)
+            dist = (dist / q90).clamp_max(1.0)
             
             target = (1.0 - dist).clamp(0.01, 0.99)
             adj_init = torch.log(target / (1.0 - target))
@@ -384,19 +341,6 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
             for m in range(M):
                 logger.info(f"   LCG {m}: CT mean={ct[m].mean():.4f}, std={ct[m].std():.4f}")
 
-    # # =========================================================================
-    # # Save initial state for dead code reset
-    # # =========================================================================
-    # model.latent_graph.register_buffer(
-    #     'init_node_embeddings', 
-    #     model.latent_graph.node_embeddings.data.clone()
-    # )
-    # if model.latent_graph.struct_mode == 'static':
-    #     model.latent_graph.register_buffer(
-    #         'init_adj_param',
-    #         model.latent_graph.adj_param.data.clone()
-    #     )
-    # logger.info(f">> ✅ Initial LCG state saved for dead code reset")
 
 class _DummySet:
     def __init__(self, n): self.n = n
@@ -540,10 +484,14 @@ def final_test_evaluate(model, test_loader, criterion, device, is_binary, thresh
         test_loss = loss_g
         y_true_test = true_g
         y_pred_test = pred_g
-        
+
         # 참고용 로그
         if is_binary:
             auc_l = roc_auc_score(true_l, pred_l)
+            try:
+                model._last_local_test_auc = float(auc_l)
+            except Exception:
+                pass
             logger.info(f"[Test Check] Mode={mode} (Global Selected). Local AUC: {auc_l:.4f} (Ref)")
         else:
             logger.info(f"[Test Check] Mode={mode} (Global Selected). Local results ignored in log.")
@@ -1753,10 +1701,30 @@ def main():
 
     base_state_cpu = {k: v.cpu() for k, v in model_few.state_dict().items()}
 
-    ep_test_metrics = [] 
+    ep_test_metrics = []
     y_true_last, y_pred_last = None, None
 
     import numpy as _np
+    import json as _json
+    _dump_tag = f"few_dump_fs{args.few_shot}_ablate{int(getattr(args, 'ablate_reg_loss', False))}"
+    ep_dump_root = os.path.join(ckpt_dir, _dump_tag)
+    os.makedirs(ep_dump_root, exist_ok=True)
+    logger.info(f"[Few-shot][Dump] episode dump root: {ep_dump_root}")
+    logger.info(f"[Few-shot][Dump] ablate_reg_loss = {getattr(args, 'ablate_reg_loss', False)}")
+
+    # save_results_ 와 동일한 path formula 로 result-JSON dir 미리 계산 (figure colocate 용)
+    # run_tag 아래에 experiment_id (module-level timestamp) 서브디렉토리 → 동일 run_tag 재실행 시 figure 덮어쓰기 방지
+    _src_str = "+".join(map(str, args.source_data)) if isinstance(args.source_data, (list, tuple)) else str(args.source_data)
+    _results_exp_dir = os.path.join(
+        f'/storage/personal/eungyeop/experiments/experiments/source_to_source_{args.base_dir}',
+        _src_str,
+        f"args_seed:{args.random_seed}",
+        f"ngraphs-{args.n_graphs}_nnodes-{args.n_nodes}_gdim-{args.graph_dim}_nbasis-{args.num_basis_layers}_{args.basis_type}_{args.attn_type}_struct_hidden_dim_{args.struct_hidden_dim}_source_lr_{args.source_lr}_source_lr_few_{args.source_lr_few}_fgw_alpha_{args.fgw_alpha}_vqbeta_{args.vq_beta}_alpha_{args.alpha}_tau_{args.tau}_entropic_reg_{args.entropy_reg}_soft_tau{args.soft_tau}_des_{args.des}",
+        str(args.run_tag) if getattr(args, 'run_tag', '') else 'run_notag',
+        experiment_id,
+    )
+    os.makedirs(_results_exp_dir, exist_ok=True)
+    logger.info(f"[Few-shot][Figure] dir = {_results_exp_dir}")
 
     train_fn_few = binary_train if is_binary_t else multi_train
     eval_fn_few  = binary_evaluate if is_binary_t else multi_evaluate
@@ -1815,9 +1783,20 @@ def main():
         # K-shot 샘플링 (val 없음)
         #train_loader_epi = get_few_shot_embedding_samples(train_loader_t, args)
         train_loader_epi = get_few_shot_embedding_samples_(train_loader_t, args, seed=current_seed)
+        # support indices 회수: get_few_shot_embedding_samples_ 가 원본 dataset 의 dict 객체를
+        # random.sample/choices 로 그대로 넘기므로 id() 매칭으로 원본 인덱스 회수 가능.
+        try:
+            _orig_ds = train_loader_t.dataset
+            _id_to_idx = {id(_d): _i for _i, _d in enumerate(_orig_ds)}
+            _ds_epi = train_loader_epi.dataset
+            support_indices = [int(_id_to_idx[id(_d)]) for _d in _ds_epi if id(_d) in _id_to_idx]
+        except Exception as _e:
+            logger.info(f"[Few-shot][r={r}] support_indices recovery FAILED: {_e}")
+            support_indices = []
 
-        before = model_few.ghead2[0].weight.data.clone()
-
+        #before = model_few.ghead2[0].weight.data.clone()
+        before_basis = {n: p.data.clone() for n, p in model_few.basis_layers.named_parameters()}
+        epoch_traj = []
         # --- epoch별 trajectory 로깅 ---
         for epoch in range(FEW_SHOT_EPOCHS):
             model_few.train()
@@ -1848,6 +1827,31 @@ def main():
             logger.info(f"[Few-shot][r={r}][epoch={epoch}/{FEW_SHOT_EPOCHS}] "
                         f"AUC={tauc_ep:.4f} AUPRC={tauprc_ep:.4f} ACC={tacc_ep:.4f}")
 
+            # loss component capture (Stage 4-1/4-3)
+            _ll = float(getattr(model_few, '_last_local_loss', float('nan')))
+            _gl = float(getattr(model_few, '_last_global_loss', float('nan')))
+            _rl = float(getattr(model_few, '_last_reg_loss', float('nan')))
+            _tl = float(getattr(model_few, '_last_total_loss', float('nan')))
+            try:
+                _tauc_tr = float(roc_auc_score(y_true_tr_ep, y_pred_tr_ep)) if is_binary_t else float('nan')
+            except Exception:
+                _tauc_tr = float('nan')
+            _tauc_local_te = float(getattr(model_few, '_last_local_test_auc', float('nan')))
+            epoch_traj.append({
+                'epoch': int(epoch),
+                'train_loss': float(train_loss_ep) if train_loss_ep is not None else None,
+                'train_auc': _tauc_tr,
+                'test_loss': float(tl_ep),
+                'test_auc': float(tauc_ep),
+                'test_auc_local': _tauc_local_te,
+                'test_auprc': float(tauprc_ep),
+                'test_acc': float(tacc_ep),
+                'last_local_loss': _ll,
+                'last_global_loss': _gl,
+                'last_reg_loss': _rl,
+                'last_total_loss': _tl,
+            })
+
             _wandb_log({
                 "few_traj/epoch": epoch,
                 "few_traj/episode": int(r + 1),
@@ -1858,12 +1862,23 @@ def main():
                 "few_traj/test_recall": float(trec_ep),
                 "few_traj/test_f1": float(tf1_ep),
                 "few_traj/train_loss": float(train_loss_ep) if train_loss_ep is not None else None,
+                "few_traj/local_loss": _ll,
+                "few_traj/global_loss": _gl,
+                "few_traj/reg_loss": _rl,
+                "few_traj/total_loss": _tl,
             })
 
-        after = model_few.ghead2[0].weight.data
-        weight_change = (after - before).abs().mean().item()
-        logger.info(f"[r={r}] Weight change: {weight_change:.6f}")
-
+        # after = model_few.ghead2[0].weight.data
+        # weight_change = (after - before).abs().mean().item()
+        # logger.info(f"[r={r}] Weight change: {weight_change:.6f}")
+        total_change = 0.0
+        count = 0
+        for n, p in model_few.basis_layers.named_parameters():
+            diff = (p.data - before_basis[n]).abs().mean().item()
+            total_change += diff
+            count += 1
+        weight_change = total_change / max(count, 1)
+        logger.info(f"[r={r}] Basis layers avg weight change: {weight_change:.8f}")
         # 최종 epoch 결과를 기존 변수에 할당 (하위 코드 호환)
         model_few.eval()
         res_train = eval_fn_few(model_few, train_loader_epi, crit_t, device)
@@ -1900,15 +1915,140 @@ def main():
         })
 
         ep_test_metrics.append((test_loss_few, test_auc_few, test_auprc_few, test_precision_few, test_recall_few, test_f1_few, test_acc_few))
-        y_true_last, y_pred_last = all_y_true_few, all_y_pred_few 
+        y_true_last, y_pred_last = all_y_true_few, all_y_pred_few
+
+        # ---- Episode-level dump (REBASE_debug_checklist Stage 0-2/0-3/0-4/0-5/2-x/3-x/1-x) ----
+        try:
+            _ep_dir = os.path.join(ep_dump_root, f"r{r}")
+            os.makedirs(_ep_dir, exist_ok=True)
+            _np.save(os.path.join(_ep_dir, "y_true_test.npy"), _np.asarray(all_y_true_few, dtype=_np.float32))
+            _np.save(os.path.join(_ep_dir, "y_pred_test.npy"), _np.asarray(all_y_pred_few, dtype=_np.float32))
+            with open(os.path.join(_ep_dir, "epoch_trajectory.json"), "w") as _f:
+                _json.dump(epoch_traj, _f, indent=2)
+            with open(os.path.join(_ep_dir, "support_indices.json"), "w") as _f:
+                _json.dump({
+                    'r': int(r),
+                    'support_indices': [int(x) for x in support_indices],
+                    'effective_seed': int(current_seed),
+                    'threshold': float(best_threshold_few) if best_threshold_few is not None else None,
+                    'final_test_auc': float(test_auc_few),
+                    'ablate_reg_loss': bool(getattr(args, 'ablate_reg_loss', False)),
+                    'fgw_alpha': float(getattr(args, 'fgw_alpha', 0.0)),
+                    'few_shot': int(getattr(args, 'few_shot', 0)),
+                }, _f, indent=2)
+
+            # ---- capture coord/expert/cls on test set via predict() ----
+            model_few.eval()
+            _coords_t, _exp_per_t, _exp_comb_t, _cls_t, _y_cap_t = [], [], [], [], []
+            with torch.no_grad():
+                for _batch in test_loader_t:
+                    _ = model_few.predict(_batch, return_all=True)
+                    if hasattr(model_few, '_last_coordinates'):
+                        _coords_t.append(model_few._last_coordinates.detach().cpu().numpy())
+                    if hasattr(model_few, '_last_expert_outputs_per'):
+                        _exp_per_t.append(model_few._last_expert_outputs_per.detach().cpu().numpy())
+                    if hasattr(model_few, '_last_expert_combined'):
+                        _exp_comb_t.append(model_few._last_expert_combined.detach().cpu().numpy())
+                    if hasattr(model_few, 'x_basis'):
+                        _cls_t.append(model_few.x_basis[:, 0, :].detach().cpu().numpy())
+                    if 'y' in _batch:
+                        _y_cap_t.append(_batch['y'].detach().cpu().numpy())
+            if _coords_t:    _np.save(os.path.join(_ep_dir, "coordinates_test.npy"),    _np.concatenate(_coords_t, axis=0))
+            if _exp_per_t:   _np.save(os.path.join(_ep_dir, "expert_outputs_per_test.npy"), _np.concatenate(_exp_per_t, axis=0))
+            if _exp_comb_t:  _np.save(os.path.join(_ep_dir, "expert_combined_test.npy"),    _np.concatenate(_exp_comb_t, axis=0))
+            if _cls_t:       _np.save(os.path.join(_ep_dir, "cls_test.npy"),                _np.concatenate(_cls_t, axis=0))
+            if _y_cap_t:     _np.save(os.path.join(_ep_dir, "y_capture_test.npy"),          _np.concatenate(_y_cap_t, axis=0))
+
+            # ---- capture on support set ----
+            _coords_s, _cls_s, _y_cap_s = [], [], []
+            with torch.no_grad():
+                for _batch in train_loader_epi:
+                    _ = model_few.predict(_batch, return_all=True)
+                    if hasattr(model_few, '_last_coordinates'):
+                        _coords_s.append(model_few._last_coordinates.detach().cpu().numpy())
+                    if hasattr(model_few, 'x_basis'):
+                        _cls_s.append(model_few.x_basis[:, 0, :].detach().cpu().numpy())
+                    if 'y' in _batch:
+                        _y_cap_s.append(_batch['y'].detach().cpu().numpy())
+            if _coords_s: _np.save(os.path.join(_ep_dir, "coordinates_support.npy"), _np.concatenate(_coords_s, axis=0))
+            if _cls_s:    _np.save(os.path.join(_ep_dir, "cls_support.npy"),         _np.concatenate(_cls_s, axis=0))
+            if _y_cap_s:  _np.save(os.path.join(_ep_dir, "y_support.npy"),           _np.concatenate(_y_cap_s, axis=0))
+
+            logger.info(f"[Few-shot][Dump][r={r}] saved to {_ep_dir}")
+        except Exception as _e:
+            import traceback as _tb
+            logger.info(f"[Few-shot][Dump][r={r}] FAILED: {_e}\n{_tb.format_exc()}")
+
+        # ---- per-r figure: Local AUC | Global AUC | Loss curves ----
+        try:
+            _epochs_x   = [_e['epoch']            for _e in epoch_traj]
+            _auc_local  = [_e.get('test_auc_local', float('nan')) for _e in epoch_traj]
+            _auc_global = [_e['test_auc']         for _e in epoch_traj]
+            _loss_local  = [_e['last_local_loss']  for _e in epoch_traj]
+            _loss_global = [_e['last_global_loss'] for _e in epoch_traj]
+            _loss_reg    = [_e['last_reg_loss']    for _e in epoch_traj]
+            _loss_total  = [_e['last_total_loss']  for _e in epoch_traj]
+
+            _fig, _axes = plt.subplots(1, 3, figsize=(18, 4.5))
+
+            _axes[0].plot(_epochs_x, _auc_local, marker='o', ms=3, lw=1.2, color='C1', label='Local AUC')
+            _axes[0].axhline(0.5, color='gray', linestyle='--', linewidth=0.8, alpha=0.6, label='AUC=0.5')
+            _axes[0].set_xlabel('Epoch'); _axes[0].set_ylabel('Test AUC')
+            _axes[0].set_ylim(0.0, 1.0); _axes[0].set_title('Local (GAT) AUC')
+            _axes[0].grid(True, alpha=0.3); _axes[0].legend(loc='lower right', fontsize=8)
+
+            _axes[1].plot(_epochs_x, _auc_global, marker='o', ms=3, lw=1.2, color='C0', label='Global AUC')
+            _axes[1].axhline(0.5, color='gray', linestyle='--', linewidth=0.8, alpha=0.6, label='AUC=0.5')
+            _axes[1].set_xlabel('Epoch'); _axes[1].set_ylabel('Test AUC')
+            _axes[1].set_ylim(0.0, 1.0); _axes[1].set_title('Global (LCG) AUC')
+            _axes[1].grid(True, alpha=0.3); _axes[1].legend(loc='lower right', fontsize=8)
+
+            _axes[2].plot(_epochs_x, _loss_local,  lw=1.2, label='local')
+            _axes[2].plot(_epochs_x, _loss_global, lw=1.2, label='global')
+            _axes[2].plot(_epochs_x, _loss_reg,    lw=1.2, label='reg')
+            _axes[2].plot(_epochs_x, _loss_total,  lw=1.2, label='total', color='black', linestyle='--')
+            _axes[2].set_xlabel('Epoch'); _axes[2].set_ylabel('Loss')
+            _axes[2].set_title('Training Losses'); _axes[2].grid(True, alpha=0.3)
+            _axes[2].legend(loc='upper right', fontsize=8)
+
+            _idx_str = ",".join(str(int(_x)) for _x in support_indices)
+            _idx_display = _idx_str if len(_idx_str) <= 90 else _idx_str[:87] + '...'
+            _fig.suptitle(
+                f"r={r}  seed={current_seed}  fs={args.few_shot}  "
+                f"final_global_AUC={float(test_auc_few):.4f}\n"
+                f"support_idx=[{_idx_display}]  (n={len(support_indices)})",
+                fontsize=10,
+            )
+            _fig.tight_layout(rect=[0, 0, 1, 0.93])
+            _fig_path = os.path.join(
+                _results_exp_dir,
+                f"epochAUC_r{r}_seed{current_seed}_fs{args.few_shot}.png"
+            )
+            _fig.savefig(_fig_path, dpi=150)
+            plt.close(_fig)
+            logger.info(f"[Few-shot][Figure][r={r}] saved {_fig_path}")
+        except Exception as _e:
+            import traceback as _tb
+            logger.info(f"[Few-shot][Figure][r={r}] FAILED: {_e}\n{_tb.format_exc()}")
 
     # Episode 평균 집계
-    ep_arr = _np.asarray(ep_test_metrics, dtype=_np.float32)
+    ep_arr = _np.asarray(ep_test_metrics, dtype=_np.float32)  # [R, 7] = loss/auc/auprc/prec/rec/f1/acc
     mean_test_loss, mean_test_auc, mean_test_auprc, mean_test_prec, mean_test_rec, mean_test_f1, mean_test_acc = ep_arr.mean(axis=0).tolist()
-    std_test_auc = float(ep_arr[:, 1].std())
-    std_test_auprc = float(ep_arr[:, 2].std())
+    std_test_loss, std_test_auc, std_test_auprc, std_test_prec, std_test_rec, std_test_f1, std_test_acc       = ep_arr.std(axis=0).tolist()
 
-    logger.info(f"[Few-shot][Summary] AUC={mean_test_auc:.4f}±{std_test_auc:.4f} AUPRC={mean_test_auprc:.4f}±{std_test_auprc:.4f}")
+    # ---- Resample summary (mean ± std) + per-resample AUC list ----
+    logger.info(f"[Few-shot][Summary] R={R} resamples | "
+                f"AUC={mean_test_auc:.4f}±{std_test_auc:.4f} "
+                f"AUPRC={mean_test_auprc:.4f}±{std_test_auprc:.4f} "
+                f"ACC={mean_test_acc:.4f}±{std_test_acc:.4f} "
+                f"Prec={mean_test_prec:.4f}±{std_test_prec:.4f} "
+                f"Rec={mean_test_rec:.4f}±{std_test_rec:.4f} "
+                f"F1={mean_test_f1:.4f}±{std_test_f1:.4f} "
+                f"Loss={mean_test_loss:.4f}±{std_test_loss:.4f}")
+    logger.info(f"[Few-shot][Summary] Per-resample AUCs   = "
+                + ", ".join(f"r{i}={float(ep_arr[i, 1]):.4f}" for i in range(int(ep_arr.shape[0]))))
+    logger.info(f"[Few-shot][Summary] Per-resample AUPRCs = "
+                + ", ".join(f"r{i}={float(ep_arr[i, 2]):.4f}" for i in range(int(ep_arr.shape[0]))))
 
     _wandb_log({
         "few_mean/test_loss": float(mean_test_loss),
