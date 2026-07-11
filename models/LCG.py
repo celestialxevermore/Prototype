@@ -205,13 +205,22 @@ class GraphQuantizer(nn.Module):
 
         a = torch.ones(src_feat.shape[0], src_feat.shape[1], device=src_feat.device) / src_feat.shape[1]
         b = torch.ones(tgt_feat.shape[0], tgt_feat.shape[1], device=tgt_feat.device) / tgt_feat.shape[1]
-
+        T_init = None
+        if self.last_plan is not None:
+            saved = self.last_plan
+            B_cur = src_feat.shape[0]
+            N_cur = src_feat.shape[1]
+            K_cur = tgt_feat.shape[1]
+            if (saved.shape[0] * saved.shape[1] == B_cur
+                and saved.shape[2] == N_cur
+                and saved.shape[3] == K_cur):
+                T_init = saved.reshape(B_cur, N_cur, K_cur).to(src_feat.device)
         # result = solve_gromov_batch(
         #     src_str_scaled, tgt_str_scaled, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b,
         #     max_iter=10, tol=1e-3, grad='envelope'
         # )
         result = solve_gromov_batch(
-            src_str_scaled, tgt_str_scaled, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b,
+            src_str_scaled, tgt_str_scaled, M=M_cost, alpha=self.alpha, reg=self.reg, a=a, b=b,T_init=T_init,
             max_iter=5, max_iter_inner= 20, tol=1e-3, grad='envelope'
         )
 

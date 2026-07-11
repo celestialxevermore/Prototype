@@ -1,0 +1,7 @@
+source	TRTR	TSTR_Single	TSTR_Multi	dTSTR	gap_Single	gap_Multi
+cardio_SAheart	0.7227	0.5596	0.6821	0.1225	-0.1631	-0.0406
+heart_failure_clinical_records	0.8670	0.8096	0.8788	0.0692	-0.0575	0.0118
+heart	0.9097	0.8973	0.8991	0.0018	-0.0124	-0.0106
+Erbil_Cardiovascular_Health_Dataset	0.9898	0.9161	0.9730	0.0569	-0.0738	-0.0169
+Medicaldataset	0.9541	0.9690	0.9346	-0.0343	0.0148	-0.0195
+Cardiovascular_Disease_Dataset	0.9943	0.9790	0.9834	0.0044	-0.0153	-0.0109

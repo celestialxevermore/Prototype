@@ -159,8 +159,8 @@ class Model(nn.Module):
                 global_pred, local_pred = self.predict(batch, return_all=True)
                 local_loss = self.criterion(local_pred, target)
                 global_loss = self.criterion(global_pred, target)
-                total_loss = local_loss #+ global_loss
-                
+                total_loss = local_loss + global_loss
+                #total_loss = global_loss
                 self._last_local_loss = float(local_loss.detach().item())
                 self._last_global_loss = 0.0
                 self._last_reg_loss = 0.0

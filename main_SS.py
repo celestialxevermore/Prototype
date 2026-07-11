@@ -1650,7 +1650,9 @@ def main():
         )
         
         results = prepare_results_(full_ours_results, zero_shot_results)
-        
+        results['elapsed_sec'] = float(time.time() - start_time)
+        results['elapsed_str'] = format_time(time.time() - start_time)
+
         logger.info("Saving Zero-shot results...")
         import copy
         args_for_save = copy.deepcopy(args)
@@ -2087,6 +2089,8 @@ def main():
         )   
 
     results = prepare_results_(full_ours_results, few_ours_results)
+    results['elapsed_sec'] = float(time.time() - start_time)
+    results['elapsed_str'] = format_time(time.time() - start_time)
 
     # 저장
     logger.info("Saving results...")

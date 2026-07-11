@@ -214,6 +214,7 @@ class Model(nn.Module):
         if not getattr(self.args, 'use_lcg', False):
             return local_pred 
         else:
+            # 20260711 이게 잘못된 버전임!! # 
             if last_att is not None:
                 self._last_P_basis = 1.0 - last_att[:, 0, 1:, 1:]
                 attn = last_att[:, 0, 1:, 1:]
