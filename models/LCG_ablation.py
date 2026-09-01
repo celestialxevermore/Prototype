@@ -87,78 +87,93 @@ COORD_MODES = ("fgw", "cos", "xattn")
 # =====================================================================
 # Wall-clock timer
 # =====================================================================
-class AlignTimer:
-    """alignment 구간만 재는 타이머.
+def cuda_sync():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
-    CUDA: cuda.Event 쌍을 큐에 쌓아두고 `resolve_lag` 스텝 뒤에 elapsed_time()
-          을 읽는다. 이미 끝난 커널이라 synchronize 비용이 사실상 0 이고,
-          매 배치 sync 로 인한 total wall-clock 왜곡이 없다.
-    CPU : perf_counter.
+
+class WindowTimer:
+    """구간 측정 타이머 (측정 프로토콜 고정).
+
+      - 구간 앞뒤에 torch.cuda.synchronize() + time.perf_counter()
+      - warm-up `warmup` batch 는 버리고, 이후 `n_measure` batch 를 수집
+      - 창이 차면 자동으로 비활성 → 이후 batch 는 sync 비용 0 (총 학습시간 왜곡 방지)
+      - `rearm(phase)` 로 phase 마다 새 창을 열 수 있음 (phase 별 stats 보관)
+
+    보고값은 median (mean/p90/min/max 도 같이 남김).
     """
 
-    RECENT_MAX = 5000  # percentile 용 최근 샘플 보관 개수
-
-    def __init__(self, enabled: bool = True, resolve_lag: int = 8):
+    def __init__(self, name: str, warmup: int = 10, n_measure: int = 50,
+                 enabled: bool = True):
+        self.name = str(name)
+        self.warmup = int(warmup)
+        self.n_measure = int(n_measure)
         self.enabled = bool(enabled)
-        self.resolve_lag = int(resolve_lag)
-        self._pending = deque()
-        self.reset()
-
-    def reset(self):
-        self._pending.clear()
-        self._sum = 0.0
-        self._count = 0
-        self._recent = deque(maxlen=self.RECENT_MAX)
+        self.windows = {}          # phase -> stats dict
+        self._phase = "init"
+        self._seen = 0
+        self._samples = []
         self.last_ms = float("nan")
 
+    # 창이 아직 안 찼을 때만 True → 이때만 synchronize 가 걸린다
+    @property
+    def active(self) -> bool:
+        return self.enabled and len(self._samples) < self.n_measure
+
+    def rearm(self, phase: str):
+        """phase 전환. 이전 창은 확정 저장하고 새 창을 연다."""
+        self._flush()
+        self._phase = str(phase)
+        self._seen = 0
+        self._samples = []
+
+    def _flush(self):
+        if not self._samples:
+            return
+        xs = sorted(self._samples)
+        n = len(xs)
+        self.windows[self._phase] = {
+            "n_warmup_discarded": self.warmup,
+            "n_measured": n,
+            "median_ms": statistics.median(xs),
+            "mean_ms": sum(xs) / n,
+            "p90_ms": xs[min(n - 1, int(0.9 * (n - 1)))],
+            "min_ms": xs[0],
+            "max_ms": xs[-1],
+        }
+
     @contextlib.contextmanager
-    def measure(self, ref: torch.Tensor):
-        if not self.enabled:
+    def measure(self):
+        if not self.active:
             yield
             return
-        if torch.is_tensor(ref) and ref.is_cuda:
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            try:
-                yield
-            finally:
-                end.record()
-                self._pending.append((start, end))
-                self._drain(force=False)
-        else:
-            t0 = time.perf_counter()
-            try:
-                yield
-            finally:
-                self._push((time.perf_counter() - t0) * 1e3)
+        cuda_sync()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            cuda_sync()
+            dt = (time.perf_counter() - t0) * 1e3
+            self.last_ms = dt
+            self._seen += 1
+            if self._seen > self.warmup:      # warm-up 10 batch 폐기
+                self._samples.append(dt)
 
-    def _drain(self, force: bool = False):
-        while self._pending and (force or len(self._pending) > self.resolve_lag):
-            start, end = self._pending.popleft()
-            end.synchronize()
-            self._push(start.elapsed_time(end))
+    def report(self):
+        self._flush()
+        return {"timer": self.name, "warmup": self.warmup,
+                "n_measure": self.n_measure, "windows": dict(self.windows)}
 
-    def _push(self, ms: float):
-        ms = float(ms)
-        self.last_ms = ms
-        self._sum += ms
-        self._count += 1
-        self._recent.append(ms)
+    def reset(self):
+        self.windows = {}
+        self._phase = "init"
+        self._seen = 0
+        self._samples = []
+        self.last_ms = float("nan")
 
-    def stats(self):
-        self._drain(force=True)
-        if self._count == 0:
-            return {"n_batches": 0}
-        recent = sorted(self._recent)
-        return {
-            "n_batches": int(self._count),
-            "align_ms_mean": self._sum / self._count,
-            "align_ms_median": statistics.median(recent),
-            "align_ms_p90": recent[min(len(recent) - 1, int(0.9 * (len(recent) - 1)))],
-            "align_ms_total": self._sum,
-            "align_ms_last": self.last_ms,
-        }
+
+# 하위호환 별칭
+AlignTimer = WindowTimer
 
 
 # =====================================================================
@@ -189,9 +204,11 @@ class _BaseCoordQuantizer(nn.Module):
         self.div_reg = getattr(args, "div_reg", 0.0)
         self.ent_reg = getattr(args, "entropy_reg", 0.01)
 
-        # coordinate softmax temperature. 기본값은 baseline 과 동일한 soft_tau.
-        # (score scale 이 달라 routing 이 붕괴하면 --coord_tau 로만 조정)
-        _ct = getattr(args, "coord_tau", None)
+        # coordinate softmax temperature.
+        # 기본은 baseline(FGW) 과 **동일한 soft_tau** — "τ 그대로" 통제 조건.
+        # NOTE: main_SS.py 에 이미 --coord_tau (CoordinatorMLP 용, default 0.3) 가
+        #       있으므로 이름 충돌을 피해 `coord_align_tau` 로 override 한다.
+        _ct = getattr(args, "coord_align_tau", None)
         self.coord_tau = float(self.soft_tau) if _ct in (None, 0) else float(_ct)
 
         self.logger = logging.getLogger("my_experiment_logger")
@@ -216,10 +233,31 @@ class _BaseCoordQuantizer(nn.Module):
         self.dead_threshold = 0.05
         self.reset_noise = 0.01
 
-        self.timer = AlignTimer(
+        self.timer = WindowTimer(
+            name=f"align/{self.COORD_MODE}",
+            warmup=int(getattr(args, "coord_warmup_batches", 10)),
+            n_measure=int(getattr(args, "coord_measure_batches", 50)),
             enabled=bool(getattr(args, "coord_time_profile", True)),
-            resolve_lag=int(getattr(args, "coord_time_lag", 8)),
         )
+        self._parent_ref = None  # CLS 접근용 (weakref, submodule 등록 안 됨)
+
+    # ---------------- parent Model 참조 (cls_feat 자동 획득) ----------------
+    def attach_parent(self, model):
+        """Model.predict 가 self.x_basis 를 세팅한 뒤 quantizer 를 호출하므로,
+        parent 참조만 있으면 CLS(x_basis[:,0,:]) 를 별도 인자 없이 읽을 수 있다.
+        nn.Module 속성으로 넣으면 submodule 로 등록되어 재귀하므로 weakref 사용."""
+        import weakref
+        object.__setattr__(self, "_parent_ref", weakref.ref(model))
+
+    def _resolve_cls(self, cls_feat, source_feat):
+        if cls_feat is not None:
+            return cls_feat
+        ref = getattr(self, "_parent_ref", None)
+        parent = ref() if ref is not None else None
+        xb = getattr(parent, "x_basis", None) if parent is not None else None
+        if torch.is_tensor(xb) and xb.shape[0] == source_feat.shape[0]:
+            return xb[:, 0, :]
+        return None
 
     # ---------------- 호환용 no-op (baseline 과 동일 동작) ----------------
     def reset_dead(self, latent_graph):
@@ -292,9 +330,13 @@ class _BaseCoordQuantizer(nn.Module):
         lcg_struct_batch = lcg_struct.unsqueeze(0).expand(B, M, K, K)
 
         self.log_step += 1
+        cls_feat = self._resolve_cls(cls_feat, source_feat)
 
         # Step 2: alignment score (여기만 모드별로 다름) + wall-clock
-        with self.timer.measure(source_feat):
+        # 측정은 training forward 에서만 (backward 제외, 세 방식 일관 적용)
+        _timed = self.training and self.timer.active
+        _ctx = self.timer.measure() if _timed else contextlib.nullcontext()
+        with _ctx:
             scores = self.compute_scores(
                 source_feat=source_feat,
                 source_struct=source_struct,
@@ -345,9 +387,10 @@ class _BaseCoordQuantizer(nn.Module):
                 f"top1={top1.mean():.3f}({top1.min():.3f}~{top1.max():.3f}) | "
                 f"score gap mean={per_range.mean().item():.6f} | argmax={argmax_counts}"
             )
-            if self.timer.enabled and self.timer._count > 0:
+            if self.timer.enabled and self.timer.last_ms == self.timer.last_ms:
                 self.logger.info(
-                    f"   >>> [ALIGN-TIME/{self.COORD_MODE}] last={self.timer.last_ms:.3f} ms/batch"
+                    f"   >>> [ALIGN-TIME/{self.COORD_MODE}] last={self.timer.last_ms:.3f} ms/batch "
+                    f"(window={self.timer._phase}, collected={len(self.timer._samples)}/{self.timer.n_measure})"
                 )
 
     # ---------------- 리포팅 유틸 ----------------
@@ -366,9 +409,12 @@ class _BaseCoordQuantizer(nn.Module):
         }
 
     def timing_report(self):
-        rep = self.timer.stats()
+        rep = self.timer.report()
         rep["coord_mode"] = self.COORD_MODE
         return rep
+
+    def rearm_timer(self, phase: str):
+        self.timer.rearm(phase)
 
     def reset_timing(self):
         self.timer.reset()
@@ -512,24 +558,39 @@ if _HAS_FGW:
             super().__init__(args, *a, **kw)
             self.args = args
             self.phase2_start_epoch = getattr(self, "phase2_start_epoch", None)
-            self.timer = AlignTimer(
+            self._parent_ref = None
+            self.timer = WindowTimer(
+                name="align/fgw",
+                warmup=int(getattr(args, "coord_warmup_batches", 10)),
+                n_measure=int(getattr(args, "coord_measure_batches", 50)),
                 enabled=bool(getattr(args, "coord_time_profile", True)),
-                resolve_lag=int(getattr(args, "coord_time_lag", 8)),
             )
+            self._time_this_forward = False
 
         def compute_fgw(self, src_feat, src_str, tgt_feat, tgt_str):
-            with self.timer.measure(src_feat):
-                out = super().compute_fgw(src_feat, src_str, tgt_feat, tgt_str)
-            return out
+            # cos/xattn 과 대응되는 구간: cost matrix 구성 + scaling + FGW solve 전체
+            if self._time_this_forward and self.timer.active:
+                with self.timer.measure():
+                    return super().compute_fgw(src_feat, src_str, tgt_feat, tgt_str)
+            return super().compute_fgw(src_feat, src_str, tgt_feat, tgt_str)
 
         def forward(self, source_struct, source_feat, lcg_struct, lcg_feat, batch, cls_feat=None):
-            return super().forward(source_struct, source_feat,
-                                   lcg_struct, lcg_feat, batch)
+            # training forward 만 측정 (backward 제외) — 세 방식 일관
+            self._time_this_forward = bool(self.training)
+            try:
+                return super().forward(source_struct, source_feat,
+                                       lcg_struct, lcg_feat, batch)
+            finally:
+                self._time_this_forward = False
 
         # --- 리포팅 인터페이스 통일 ---
+        def attach_parent(self, model):  # fgw 는 CLS 불필요 (인터페이스만 맞춤)
+            return None
+
         alignment_parameters = _BaseCoordQuantizer.alignment_parameters
         param_report = _BaseCoordQuantizer.param_report
         timing_report = _BaseCoordQuantizer.timing_report
+        rearm_timer = _BaseCoordQuantizer.rearm_timer
         reset_timing = _BaseCoordQuantizer.reset_timing
         freeze_alignment = _BaseCoordQuantizer.freeze_alignment
 
@@ -617,9 +678,12 @@ def summarize_run(model, elapsed_sec=None, prefix="coord"):
         if isinstance(v, (int, float, str, bool)):
             out[f"{prefix}/{k}"] = v
     if q is not None and hasattr(q, "timing_report"):
-        for k, v in q.timing_report().items():
-            if isinstance(v, (int, float, str, bool)):
-                out[f"{prefix}/{k}"] = v
+        rep = q.timing_report()
+        out[f"{prefix}/coord_mode"] = rep.get("coord_mode", "?")
+        for phase, w in (rep.get("windows") or {}).items():
+            for k, v in w.items():
+                if isinstance(v, (int, float)):
+                    out[f"{prefix}/align_{phase}/{k}"] = v
     if elapsed_sec is not None:
         out[f"{prefix}/total_train_sec"] = float(elapsed_sec)
     return out
@@ -636,7 +700,8 @@ if __name__ == "__main__":
     a = argparse.Namespace(
         input_dim=D, n_graphs=M, n_nodes=K, struct_hidden_dim=192,
         soft_tau=0.01, tau=0.5, reg=0.01, vq_beta=0.3, entropy_reg=0.01,
-        hs_reg=0.1, alpha=0.7, coord_time_profile=True,
+        hs_reg=0.1, alpha=0.7, coord_time_profile=True, feat_distance='cosine',
+        coord_warmup_batches=1, coord_measure_batches=3,
     )
     src_feat = torch.randn(B, N, D)
     src_str = torch.rand(B, N, N)
@@ -645,10 +710,14 @@ if __name__ == "__main__":
     cls = torch.randn(B, D)
     batch = {"src_idx": 0}
 
-    for mode in ("cos", "xattn"):
+    modes = ["cos", "xattn"] + (["fgw"] if _HAS_FGW else [])
+    for mode in modes:
         a.coord_mode = mode
         q = build_quantizer(a)
-        fy, ls, pi, reg = q(src_str, src_feat, lcg_str, lcg_feat, batch, cls_feat=cls)
+        q.train()
+        q.rearm_timer("smoke")
+        for _ in range(6):
+            fy, ls, pi, reg = q(src_str, src_feat, lcg_str, lcg_feat, batch, cls_feat=cls)
         print(f"[{mode}] Fy={tuple(fy.shape)} struct={tuple(ls.shape)} "
               f"pi={tuple(pi.shape)} sum={pi.sum(1).mean():.4f} reg={float(reg):.4f}")
         print(f"[{mode}] param_report={q.param_report()}")

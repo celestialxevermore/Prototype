@@ -51,6 +51,10 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         self.source_dataset_name = source_dataset_name
         self.skip_desc = bool(getattr(args, "skip_desc", True))
         self.encode_batch_size = int(getattr(args, "encode_batch_size", 128))
+        # node-drop mode: per-sample drop never-measured nodes instead of
+        # median/mode-imputing them. NaN (num/cat) or count-stat==0 -> drop.
+        self.drop_missing = bool(getattr(args, "drop_missing", False))
+        self.count_cols_ = set()
         device_str = getattr(args, "device",
                              "cuda" if torch.cuda.is_available() else "cpu")
         self.device = torch.device(device_str)
@@ -130,6 +134,12 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         self.cat_col_names = cat_cols
         self.num_col_names = num_cols
 
+        # count-stat columns (ICU 24h aggregation): a value of 0 literally means
+        # "measured 0 times in the window" == never measured -> node dropped.
+        self.count_cols_ = set(
+            c for c in num_cols
+            if c.endswith("_count") or c.endswith("_count_24h"))
+
         # NaN imputation stats: median for num, mode for cat.
         # Without this the per-row tensors had variable length and DataLoader's
         # default collate (torch.stack) blew up on mixed-NaN batches.
@@ -187,6 +197,22 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
         X_cat.columns = self.cat_col_names
         X_num = X_.select_dtypes(exclude="object").copy()
         X_num.columns = self.num_col_names
+
+        # ---- node-drop masks (from RAW values, BEFORE imputation) ----
+        # present[i, j] == True  -> keep node j for row i.
+        # cat: drop if NaN.  num: drop if NaN/inf, or (count-stat and value==0).
+        cat_present = num_present = None
+        if self.drop_missing:
+            if len(self.cat_col_names) > 0:
+                cat_present = (~X_cat.isna()).to_numpy()
+            if len(self.num_col_names) > 0:
+                _Xr = X_num.replace([np.inf, -np.inf], np.nan)
+                _pres = ~_Xr.isna()
+                for c in self.num_col_names:
+                    if c in self.count_cols_:
+                        _pres[c] = _pres[c] & (_Xr[c] != 0)
+                num_present = _pres.to_numpy()
+
         # Impute BEFORE per-row assembly so every row has identical shape.
         if len(self.num_col_names) > 0 and self.num_medians_ is not None:
             X_num = X_num.replace([np.inf, -np.inf], np.nan)
@@ -247,35 +273,46 @@ class Table2EmbeddingTransformer(BaseEstimator, TransformerMixin):
                 "y": y_[idx].clone() if y_ is not None else torch.tensor([]),
                 "s_idx": idx,
             }
-            if len(self.cat_col_names) > 0:
+            # per-row kept columns (node-drop: subset; else: all)
+            cat_cols_here = list(self.cat_col_names)
+            num_cols_here = list(self.num_col_names)
+            if cat_present is not None:
+                cat_cols_here = [c for k, c in enumerate(self.cat_col_names)
+                                 if cat_present[idx, k]]
+            if num_present is not None:
+                num_cols_here = [c for k, c in enumerate(self.num_col_names)
+                                 if num_present[idx, k]]
+            # safety: never emit a node-less sample (would break downstream
+            # collate). Fall back to full node set for a fully-missing row.
+            if self.drop_missing and not cat_cols_here and not num_cols_here:
+                cat_cols_here = list(self.cat_col_names)
+                num_cols_here = list(self.num_col_names)
+
+            if len(self.cat_col_names) > 0 and len(cat_cols_here) > 0:
                 row = X_cat.iloc[idx]
-                if len(row) > 0:
-                    row = row.astype(str).str.replace("\n", " ", regex=True)
-                    cols_here = list(row.index)
-                    c_name = torch.stack([cat_name_emb[c] for c in cols_here], 0)
-                    c_val = torch.stack(
-                        [cat_value_emb[c][row[c]] for c in cols_here], 0)
-                    c_desc = torch.zeros_like(c_name)
-                    data.update({
-                        "cat_name_embeddings":  c_name,
-                        "cat_value_embeddings": c_val,
-                        "cat_desc_embeddings":  c_desc,
-                        "cat_desc_texts":       cols_here,
-                    })
-            if len(self.num_col_names) > 0:
+                row = row.astype(str).str.replace("\n", " ", regex=True)
+                c_name = torch.stack([cat_name_emb[c] for c in cat_cols_here], 0)
+                c_val = torch.stack(
+                    [cat_value_emb[c][row[c]] for c in cat_cols_here], 0)
+                c_desc = torch.zeros_like(c_name)
+                data.update({
+                    "cat_name_embeddings":  c_name,
+                    "cat_value_embeddings": c_val,
+                    "cat_desc_embeddings":  c_desc,
+                    "cat_desc_texts":       cat_cols_here,
+                })
+            if len(self.num_col_names) > 0 and len(num_cols_here) > 0:
                 row = X_num.iloc[idx]
-                if len(row) > 0:
-                    cols_here = list(row.index)
-                    n_name = torch.stack([num_name_emb[c] for c in cols_here], 0)
-                    x_num = torch.tensor(row.values.astype("float32"))
-                    n_prompt = x_num.view(-1, 1) * n_name
-                    n_desc = torch.zeros_like(n_name)
-                    data.update({
-                        "num_prompt_embeddings": n_prompt,
-                        "num_name_embeddings":   n_name,
-                        "num_desc_embeddings":   n_desc,
-                        "num_desc_texts":        cols_here,
-                    })
+                n_name = torch.stack([num_name_emb[c] for c in num_cols_here], 0)
+                x_num = torch.tensor(row[num_cols_here].values.astype("float32"))
+                n_prompt = x_num.view(-1, 1) * n_name
+                n_desc = torch.zeros_like(n_name)
+                data.update({
+                    "num_prompt_embeddings": n_prompt,
+                    "num_name_embeddings":   n_name,
+                    "num_desc_embeddings":   n_desc,
+                    "num_desc_texts":        num_cols_here,
+                })
             out.append(data)
 
         self.is_fitted_ = True

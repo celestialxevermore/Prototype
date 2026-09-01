@@ -136,6 +136,10 @@ def main():
                     help="(default on) skip description / label_description LLM forward")
     ap.add_argument("--use_desc", dest="skip_desc", action="store_false",
                     help="re-enable description encoding (needs metadata JSON)")
+    ap.add_argument("--drop_missing", action="store_true",
+                    help="node-drop mode: per-sample drop never-measured nodes "
+                         "(NaN or count-stat==0) instead of median/mode imputing. "
+                         "Output routed to '{llm_model}-nodrop' subfolder.")
     ap.add_argument("--encode_batch_size", type=int, default=128)
     ap.add_argument("--device", type=str, default=None,
                     help="cuda / cuda:0 / cpu (default: cuda if available)")
@@ -178,7 +182,8 @@ def main():
     print(f"[fast-embed] fit_transform done in {dt:.1f}s  "
           f"(n_rows={len(data)})", flush=True)
 
-    save_dir = os.path.join(args.output_root, args.output_subdir, args.llm_model)
+    leaf = f"{args.llm_model}-nodrop" if args.drop_missing else args.llm_model
+    save_dir = os.path.join(args.output_root, args.output_subdir, leaf)
     os.makedirs(save_dir, exist_ok=True)
     fname = (f"embedding_label_{args.dataset}.pkl" if args.label
              else f"embedding_{args.dataset}.pkl")
