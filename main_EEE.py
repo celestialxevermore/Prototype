@@ -115,7 +115,10 @@ def get_args():
                                  'heart_target_1','heart_target_2','heart_target_3','heart_target_4','myocardial',
                                  'cleveland','heart_statlog','hungarian','switzerland','breast','magic_telescope',
                                  'forest_covertype_sampled','higgs_sampled','Cardiovascular_Disease_Dataset','Heart_disease_statlog','Medicaldataset', 'heart_failure_clinical_records','cardio_SAheart', 'Erbil_Cardiovascular_Health_Dataset',
-                                 'mimic_mortality','eicu_mortality','hirid_mortality','support_mortality','zigong_mortality','sic_mortality'])
+                                 'mimic_mortality','eicu_mortality','hirid_mortality','support_mortality','zigong_mortality','sic_mortality',
+                                 'breast_c1_dfs12','breast_c1_dfs24','breast_c2_dfs12','breast_c2_dfs24',
+                                 'breast_c3_dfs12','breast_c3_dfs24','breast_c4_dfs12','breast_c4_dfs24',
+                                 'breast_c5_neoadjuvant','breast_c6_neoadjuvant'])
     parser.add_argument('--target_data', type=str, default='heart')
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--num_classes', type=int, default=2)
@@ -152,7 +155,7 @@ def get_args():
     parser.add_argument('--eps', type = float , default = 0.01)
     parser.add_argument('--reg', type = float, default = 0.01)
     parser.add_argument('--tau', type = float, default=0.5)
-    parser.add_argument('--soft_tau', type = float, default=0.01)
+    parser.add_argument('--soft_tau', type = float, default=1)
     parser.add_argument('--entropy_reg', type = float, default = 0.01)
     parser.add_argument('--lcg_div_alpha', type = float, default = 10)
     parser.add_argument('--vq_beta', type = float, default = 0.3)

@@ -202,9 +202,7 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
             "breast_c1_dfs24" : ['label', [0,1]],
             "breast_c2_dfs24" : ['label', [0,1]],
             "breast_c3_dfs24" : ['label', [0,1]],
-            "breast_c4_dfs24" : ['label', [0,1]],
-            "breast_c5_neoadjuvant" : ['label', [0,1]],
-            "breast_c6_neoadjuvant" : ['label', [0,1]]
+            "breast_c4_dfs24" : ['label', [0,1]]
         }
     
     # heart 데이터셋들은 새로운 전처리 함수로 처리

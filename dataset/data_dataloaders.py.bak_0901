@@ -194,17 +194,7 @@ def preprocessing(DATASETS : pd.DataFrame, data_name : str):
             "hirid_mortality" : ['label', [0,1]], 
             "support_mortality": ['label', [0,1]],
             "zigong_mortality": ['label',[0,1]],
-            "sic_mortality" : ['label', [0,1]],
-            "breast_c1_dfs12" : ['label', [0,1]],
-            "breast_c2_dfs12" : ['label', [0,1]],
-            "breast_c3_dfs12" : ['label', [0,1]],
-            "breast_c4_dfs12" : ['label', [0,1]],
-            "breast_c1_dfs24" : ['label', [0,1]],
-            "breast_c2_dfs24" : ['label', [0,1]],
-            "breast_c3_dfs24" : ['label', [0,1]],
-            "breast_c4_dfs24" : ['label', [0,1]],
-            "breast_c5_neoadjuvant" : ['label', [0,1]],
-            "breast_c6_neoadjuvant" : ['label', [0,1]]
+            "sic_mortality" : ['label', [0,1]]
         }
     
     # heart 데이터셋들은 새로운 전처리 함수로 처리
@@ -248,10 +238,10 @@ def ml_prepare_tabular_dataloaders(args, dataset_name, random_seed):
     y = le.fit_transform(y)
     num_classes = len(le.classes_)
 
-    # split — val 없음. 기본 0.5 (기존 프로토콜), args.test_size 로 조정 가능.
+    # ✅ 50/50 split — val 없음 (우리 프로토콜)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
-        test_size=getattr(args, 'test_size', 0.5),
+        test_size=0.5,
         random_state=args.random_seed,
         stratify=y
     )

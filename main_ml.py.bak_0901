@@ -17,7 +17,7 @@ p = psutil.Process()
 
 p.cpu_affinity(range(1, 80))
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "4")  # 외부에서 지정하면 그것을 따른다 (기본 4)
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 logger = setup_logger()
@@ -31,9 +31,7 @@ def get_args():
     parser.add_argument('--source_data', type=str, default='heart', 
                         choices=['adult','bank','blood','car','communities','credit-g',
                                 'diabetes','heart','myocardial','cleveland', 
-                                'heart_statlog','hungarian','switzerland', 'mimic_mortality','hirid_mortality','sic_mortality','eicu_mortality','support_mortality','zigong_mortality',
-                                'breast_c1_dfs12', 'breast_c2_dfs12', 'breast_c3_dfs12', 'breast_c4_dfs12',
-                                'breast_c1_dfs24', 'breast_c2_dfs24', 'breast_c3_dfs24', 'breast_c4_dfs24'])
+                                'heart_statlog','hungarian','switzerland', 'mimic_mortality','hirid_mortality','sic_mortality','eicu_mortality','support_mortality','zigong_mortality'])
     parser.add_argument('--few_shot', type=int, default=4, help='the number of shot')
     parser.add_argument('--table_path', type=str, default="/storage/personal/eungyeop/dataset/table")
     parser.add_argument('--batch_size', type=int, default=32)
@@ -42,18 +40,6 @@ def get_args():
     parser.add_argument('--learning_rate', type=float, default=0.0001)
     parser.add_argument('--train_epochs', type=int, default=200)
     parser.add_argument('--threshold', type=float, default=0.5)
-    parser.add_argument('--threshold_mode', type=str, default='fixed',
-                        choices=['fixed','quantile'],
-                        help="이진 예측 임계값 방식. 'fixed'는 --threshold 고정컷(기존 동작)."
-                             " 'quantile'은 train 양성비율 pi 만큼만 상위에서 양성으로 찍는다."
-                             " 순위 기반이라 calibration 에 무관하고, 양성이 극소수여도 F1=0 이 되지 않는다.")
-    parser.add_argument('--test_size', type=float, default=0.5,
-                        help='test 비율. 기본 0.5 는 기존 XTFormer 프로토콜. 양성이 적으면 0.2 권장.')
-    parser.add_argument('--balance', type=str, default='none', choices=['none','balanced'],
-                        help="클래스 불균형 보정. 'balanced'면 XGB/CatBoost 에 pos/neg 가중치를 준다."
-                             " LogReg/RF 는 이미 class_weight='balanced' 고정이라 이 값과 무관하다.")
-    parser.add_argument('--hp_metric', type=str, default='auc', choices=['auc','auprc'],
-                        help='HP 탐색 CV 스코어. 극단적 불균형에서는 auprc 가 더 분별력이 있다.')
     parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--base_dir', type=str, required=True)
     parser.add_argument('--baseline', nargs='*', 
@@ -92,11 +78,6 @@ def main():
         logger.info(f"[Few-shot] skipped (--skip_few)")
 
     is_binary = (len(np.unique(y_train_full)) == 2)
-
-    # threshold_mode='quantile' 에 쓸 양성비율.
-    # 반드시 full train split 기준 — few-shot 지원집합은 클래스 균형으로 뽑히므로 쓰면 안 된다.
-    args.prevalence = (float(np.mean(np.asarray(y_train_full) == 1)) if is_binary else None)
-    logger.info(f"[Threshold] mode={args.threshold_mode} | train prevalence={args.prevalence}")
 
     full_baseline_results = {}
     few_baseline_results = {}

@@ -53,19 +53,7 @@ def xgboost_benchmark(
     # ── HP 탐색: support set CV ──────────────────────────────────────────────
     n_splits = min(3, len(y_train))
     use_cv   = (len(y_train) >= 6)
-    if getattr(args, 'hp_metric', 'auc') == 'auprc':
-        scoring = 'average_precision' if is_binary else 'roc_auc_ovr_weighted'
-    else:
-        scoring = 'roc_auc' if is_binary else 'roc_auc_ovr_weighted'
-
-    # 클래스 불균형 보정 — LogReg/RF 는 class_weight='balanced' 를 이미 쓴다.
-    # XGB 의 대응물이 scale_pos_weight = n_neg / n_pos (이진에만 정의됨).
-    spw = None
-    if is_binary and getattr(args, 'balance', 'none') == 'balanced':
-        n_pos = int(np.sum(np.asarray(y_train) == 1))
-        n_neg = int(len(y_train) - n_pos)
-        spw = (n_neg / n_pos) if n_pos > 0 else None
-        print(f"[XGB] balance=balanced → scale_pos_weight={spw}")
+    scoring  = 'roc_auc' if is_binary else 'roc_auc_ovr_weighted'
 
     best_score  = -1.0
     best_params = (3, 100)   # fallback default
@@ -82,7 +70,6 @@ def xgboost_benchmark(
                     eval_metric='logloss' if is_binary else 'mlogloss',
                     verbosity=0,
                     random_state=args.random_seed,
-                    **({'scale_pos_weight': spw} if spw is not None else {}),
                 )
                 try:
                     scores = cross_val_score(
@@ -94,7 +81,7 @@ def xgboost_benchmark(
                     logging.warning(f"[XGB] CV failed (depth={max_depth}, n_est={n_est}): {e}")
                     score = -1.0
 
-                print(f"[XGB] depth={max_depth}, n_est={n_est} → CV {scoring}={score:.4f}")
+                print(f"[XGB] depth={max_depth}, n_est={n_est} → CV AUC={score:.4f}")
                 if score > best_score:
                     best_score  = score
                     best_params = (max_depth, n_est)
@@ -102,7 +89,7 @@ def xgboost_benchmark(
         print(f"[XGB] Too few samples ({len(y_train)}) for CV → using default HP")
 
     best_max_depth, best_n_est = best_params
-    print(f"[XGB] Best HP: depth={best_max_depth}, n_est={best_n_est} (CV {scoring}={best_score:.4f})")
+    print(f"[XGB] Best HP: depth={best_max_depth}, n_est={best_n_est} (CV AUC={best_score:.4f})")
     logging.info(f"[XGB] Best HP: depth={best_max_depth}, n_est={best_n_est}")
 
     # ── 최종 학습 & 테스트 평가 ─────────────────────────────────────────────
@@ -111,13 +98,10 @@ def xgboost_benchmark(
         'device': 'cuda',
         'max_depth': best_max_depth,
         'verbosity': 0,
-        'seed': args.random_seed,
     }
     if is_binary:
         base_params['objective']   = 'binary:logistic'
         base_params['eval_metric'] = 'logloss'
-        if spw is not None:
-            base_params['scale_pos_weight'] = spw
     else:
         base_params['objective']   = 'multi:softprob'
         base_params['num_class']   = num_classes
@@ -136,9 +120,7 @@ def xgboost_benchmark(
     test_loss = log_loss(y_test, y_test_pred_proba)
     test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = \
         compute_overall_accuracy(y_test_pred_proba, y_test, num_classes,
-                                 threshold=args.threshold, activation=False,
-                                 threshold_mode=getattr(args, 'threshold_mode', 'fixed'),
-                                 prevalence=getattr(args, 'prevalence', None))
+                                 threshold=0.5, activation=False)
 
     print(f"[XGB] Test → Loss:{test_loss:.4f} AUC:{test_auc:.4f} AUPRC:{test_auprc:.4f} "
           f"ACC:{test_acc:.4f} F1:{test_f1:.4f}")

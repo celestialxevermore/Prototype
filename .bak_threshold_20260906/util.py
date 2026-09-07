@@ -683,9 +683,7 @@ def save_ml_results(args, results):
             "hidden_dim": args.hidden_dim,
             "dropout_rate": args.dropout_rate,
             "few_shot": args.few_shot,
-            "threshold": args.threshold,
-            "threshold_mode": getattr(args, "threshold_mode", "fixed"),
-            "prevalence": getattr(args, "prevalence", None)
+            "threshold": args.threshold
         },
         "results": results
     }

@@ -117,9 +117,7 @@ def logistic_regression_benchmark(
     test_loss = log_loss(y_test, y_test_pred_proba)
     test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = \
         compute_overall_accuracy(y_test_pred_proba, y_test, num_classes,
-                                 threshold=args.threshold, activation=False,
-                                 threshold_mode=getattr(args, 'threshold_mode', 'fixed'),
-                                 prevalence=getattr(args, 'prevalence', None))
+                                 threshold=args.threshold, activation=False)
 
     print(f"[LR] Test → Loss:{test_loss:.4f} AUC:{test_auc:.4f} AUPRC:{test_auprc:.4f} "
           f"ACC:{test_acc:.4f} F1:{test_f1:.4f}")

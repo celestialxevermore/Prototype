@@ -61,40 +61,11 @@ def get_best_performance(test_aucs, test_precisions, test_recalls, test_f1s, all
     return best_epoch, best_auc, best_accuracy, best_precision, best_recall, best_f1
 
 
-def resolve_threshold(probs, prevalence=None, mode='fixed', threshold=0.5):
-    """이진 분류 예측 임계값을 정한다.
-
-    'fixed'    : threshold 를 그대로 쓴다 (기존 동작, 기본값 0.5).
-    'quantile' : 양성비율 prevalence(pi) 만큼만 양성으로 찍도록, test 확률의
-                 상위 round(pi * N) 번째 값을 임계값으로 쓴다.
-                 순위만 쓰므로 확률 보정(calibration)에 무관하고,
-                 양성이 극소수인 코호트에서도 예측 양성이 0 이 되지 않는다.
-                 prevalence 가 없으면 'fixed' 로 되돌아간다.
-
-    prevalence 는 반드시 full train split 의 양성비율이어야 한다.
-    few-shot 지원집합은 클래스 균형(pi=0.5)으로 뽑히므로 거기서 계산하면 안 된다.
-    """
-    if mode != 'quantile' or prevalence is None:
-        return float(threshold)
-
-    p = np.asarray(probs).ravel()
-    pi = float(prevalence)
-    if p.size == 0 or not (0.0 < pi < 1.0):
-        return float(threshold)
-
-    k = int(round(pi * p.size))
-    k = min(max(k, 1), p.size)          # 최소 1 명은 양성으로 찍는다
-    return float(np.sort(p)[::-1][k - 1])
-
-
-def compute_overall_accuracy(probs, labels, num_classes, threshold=0.5, activation=False,
-                             threshold_mode='fixed', prevalence=None):
+def compute_overall_accuracy(probs, labels, num_classes, threshold=0.5, activation=False):
     if num_classes == 2:  # 이진 분류인 경우
         if activation:
             probs = torch.sigmoid(probs).cpu().numpy()
-        thr = resolve_threshold(probs, prevalence=prevalence,
-                                mode=threshold_mode, threshold=threshold)
-        pred = (probs >= thr).astype(int)
+        pred = (probs >= threshold).astype(int)
         
         accuracy = accuracy_score(labels, pred)
         auc = roc_auc_score(labels, probs)

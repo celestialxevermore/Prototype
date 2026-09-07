@@ -123,9 +123,7 @@ def random_forest_benchmark(
 
     test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = \
         compute_overall_accuracy(y_prob, y_test, num_class,
-                                 threshold=args.threshold, activation=False,
-                                 threshold_mode=getattr(args, 'threshold_mode', 'fixed'),
-                                 prevalence=getattr(args, 'prevalence', None))
+                                 threshold=args.threshold, activation=False)
 
     print(f"[RF] Test → Loss:{test_loss:.4f} AUC:{test_auc:.4f} AUPRC:{test_auprc:.4f} "
           f"ACC:{test_acc:.4f} F1:{test_f1:.4f}")

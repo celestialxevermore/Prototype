@@ -42,11 +42,6 @@ def get_args():
     parser.add_argument('--learning_rate', type=float, default=0.0001)
     parser.add_argument('--train_epochs', type=int, default=200)
     parser.add_argument('--threshold', type=float, default=0.5)
-    parser.add_argument('--threshold_mode', type=str, default='fixed',
-                        choices=['fixed','quantile'],
-                        help="이진 예측 임계값 방식. 'fixed'는 --threshold 고정컷(기존 동작)."
-                             " 'quantile'은 train 양성비율 pi 만큼만 상위에서 양성으로 찍는다."
-                             " 순위 기반이라 calibration 에 무관하고, 양성이 극소수여도 F1=0 이 되지 않는다.")
     parser.add_argument('--test_size', type=float, default=0.5,
                         help='test 비율. 기본 0.5 는 기존 XTFormer 프로토콜. 양성이 적으면 0.2 권장.')
     parser.add_argument('--balance', type=str, default='none', choices=['none','balanced'],
@@ -92,11 +87,6 @@ def main():
         logger.info(f"[Few-shot] skipped (--skip_few)")
 
     is_binary = (len(np.unique(y_train_full)) == 2)
-
-    # threshold_mode='quantile' 에 쓸 양성비율.
-    # 반드시 full train split 기준 — few-shot 지원집합은 클래스 균형으로 뽑히므로 쓰면 안 된다.
-    args.prevalence = (float(np.mean(np.asarray(y_train_full) == 1)) if is_binary else None)
-    logger.info(f"[Threshold] mode={args.threshold_mode} | train prevalence={args.prevalence}")
 
     full_baseline_results = {}
     few_baseline_results = {}

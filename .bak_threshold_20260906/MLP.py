@@ -177,9 +177,7 @@ def mlp_benchmark(
     test_acc, test_auc, test_auprc, test_f1, test_recall, test_precision = \
         compute_overall_accuracy(
             te_probs, y_test, num_classes,   # ← 2 (binary) or C
-            threshold=args.threshold, activation=False,
-            threshold_mode=getattr(args, 'threshold_mode', 'fixed'),
-            prevalence=getattr(args, 'prevalence', None)
+            threshold=args.threshold, activation=False
         )
 
     print(f"[MLP] Test → Loss:{te_loss:.4f} AUC:{test_auc:.4f} AUPRC:{test_auprc:.4f} "
