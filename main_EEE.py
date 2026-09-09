@@ -325,6 +325,8 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
         torch.cuda.manual_seed_all(temp_seed)
     logger.info(f">>> [LCG Init] Seed reset to {temp_seed} for deterministic data sampling.")
     all_cls_tokens = [] 
+    node_pool_per_src = {}   # l2 feat_scale 계산용: 소스별 노드 임베딩 (CLS 제외)
+    NODE_CAP = 1024          # 소스당 최대 샘플 수
     model.eval()
     max_samples = 50000
     logger.info(f"[LCG Init] Starts. Strategy: {strategy}, Injection: {injection_scale}")
@@ -350,6 +352,10 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
                     x_basis = x_basis + basis_outputs.reshape(x_basis.size(0), x_basis.size(1), model.input_dim)
                 cls_token = x_basis[:, 0, :].cpu().numpy() 
                 all_cls_tokens.append(cls_token)
+                # graph_quantizer 가 실제로 쓰는 것과 동일한 텐서 (x_basis[:, 1:, :])
+                _buf = node_pool_per_src.setdefault(src_name, [])
+                if sum(b.shape[0] for b in _buf) < NODE_CAP:
+                    _buf.append(x_basis[:, 1:, :].detach().cpu())
                 if len(all_cls_tokens) * cls_token.shape[0] >= max_samples: break 
             if len(all_cls_tokens) * cls_token.shape[0] >= max_samples: break
     data_pool = np.concatenate(all_cls_tokens, axis = 0)
@@ -438,15 +444,41 @@ def init_lcg(args, model, loaders, device, save_dir, strategy='hierarchical', in
     logger.info(f">> ✅ LCG Parameters Updated. (Strategy: {strategy})")
 
     # =========================================================================
+    # l2 feat cost 정규화 상수: 방금 만든 프로토타입 노드 vs 전체 소스 노드
+    # 첫 배치(소스 1개, 128샘플) 대신 모든 소스를 한 번에 보고 정한다.
+    # =========================================================================
+    if getattr(args, 'feat_distance', 'cosine') == 'l2' and hasattr(model, 'graph_quantizer'):
+        with torch.no_grad():
+            proto_all = model.latent_graph.node_embeddings.data.reshape(M * K, D)
+            dist_parts = []
+            for src_name, bufs in node_pool_per_src.items():
+                if not bufs:
+                    continue
+                nb = torch.cat(bufs, dim=0)[:NODE_CAP].to(device)      # [n, N_s, D]
+                flat = nb.reshape(-1, D)                                # [n*N_s, D]
+                d = (torch.cdist(flat, proto_all, p=2) ** 2) / float(D)
+                dist_parts.append(d.flatten().cpu())
+                del nb, flat, d
+            if dist_parts:
+                allD = torch.cat(dist_parts)
+                q90 = torch.quantile(allD, 0.9).clamp_min(1e-8)
+                model.graph_quantizer.feat_scale.copy_(q90.to(device))
+                qs = torch.quantile(allD, torch.tensor([0.5, 0.9, 0.99, 1.0]))
+                logger.info(f">> ✅ [l2 feat_scale] q90={q90.item():.6f} "
+                            f"(pairs={allD.numel()}, q50={qs[0]:.4f} q90={qs[1]:.4f} "
+                            f"q99={qs[2]:.4f} max={qs[3]:.4f}) from {len(dist_parts)} sources")
+                del allD, dist_parts
+
+    # =========================================================================
     # Initialize adj_param from node embedding distances
     # =========================================================================
     if model.latent_graph.struct_mode == 'static':
         with torch.no_grad():
             node_emb = model.latent_graph.node_embeddings.data
             dist = torch.cdist(node_emb, node_emb, p=2) ** 2
-            for m in range(M):
-                q90 = torch.quantile(dist[m].flatten(), 0.9).clamp_min(1e-8)
-                dist[m] = (dist[m] / q90).clamp_max(1.0)
+            # 그래프별 q90은 LCG 간 스케일 차이를 지워버리므로 전체 공통 q90 하나만 사용
+            q90 = torch.quantile(dist.flatten(), 0.9).clamp_min(1e-8)
+            dist = (dist / q90).clamp_max(1.0)
             
             target = (1.0 - dist).clamp(0.01, 0.99)
             adj_init = torch.log(target / (1.0 - target))

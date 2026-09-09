@@ -128,10 +128,10 @@ def get_args():
     '''
     parser.add_argument('--num_shared_layers', type=int, default=2, help = "Number of SharedGAT layers")
     parser.add_argument('--num_basis_layers', type=int, default=2, help= 'Number of stacked BasisGAT layers.')
-    parser.add_argument('--basis_type', type=str, choices=['mul','ind'], default = 'ind')
+    parser.add_argument('--basis_type', type=str, choices=['mul','ind','sdpa','graphormer'], default = 'ind')
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--edge_type', default='mlp', choices=['mlp','normal','no_use'])
-    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2'])
+    parser.add_argument('--embed_type', default='carte', choices=['carte','carte_desc','ours','ours2','carte_d256'])
     parser.add_argument('--attn_type', default='gat_v1', choices=['gat_v1','att','gat_v2','gate'])
     # Experiments Resampling
     parser.add_argument('--support_resamples', type=int, default=1, help='How many support resamples per seed')

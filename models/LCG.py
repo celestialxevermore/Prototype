@@ -117,6 +117,8 @@ class GraphQuantizer(nn.Module):
         M = args.n_graphs 
         self.register_buffer("usage_count", torch.zeros(M))
         self.register_buffer("reset_counter", torch.tensor(0))
+        # l2 feature cost 정규화 상수. 첫 배치에서 한 번 계산 후 고정 (-1 = 아직 미계산)
+        self.register_buffer("feat_scale", torch.tensor(-1.0))
         self.dead_threshold = 0.05
         self.reset_noise = 0.01
 
@@ -155,20 +157,19 @@ class GraphQuantizer(nn.Module):
         elif self.args.feat_distance == "l2":
             dist_sq = torch.cdist(src_feat, tgt_feat, p=2) ** 2
             M_raw = dist_sq / float(D)
-            with torch.no_grad():
-                q90 = torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
-            M_cost = M_raw / q90
+            # 배치마다 q90을 다시 구하면 목적함수가 계속 움직이므로, 첫 배치 값으로 고정
+            if float(self.feat_scale) < 0:
+                with torch.no_grad():
+                    self.feat_scale.copy_(
+                        torch.quantile(M_raw.detach().flatten(), 0.9).clamp_min(1e-8)
+                    )
+            M_cost = M_raw / self.feat_scale
 
 
-        with torch.no_grad():
-            feat_mean = M_cost.detach().mean()
-            struct_mean_src = src_str.detach().mean()
-            struct_mean_tgt = tgt_str.detach().mean()
-            struct_mean = (struct_mean_src + struct_mean_tgt) / 2
-            scale_ratio = feat_mean / struct_mean.clamp_min(1e-8)
-
-        src_str_scaled = src_str * scale_ratio
-        tgt_str_scaled = tgt_str * scale_ratio
+        # struct 재스케일 제거: M_cost / src_str / tgt_str 이 모두 [0,1] 범위이므로
+        # feat vs struct 균형은 alpha 하나로만 조절한다
+        src_str_scaled = src_str
+        tgt_str_scaled = tgt_str
 
         # ====== Logging ======
         # if self.log_step % self.log_interval == 0 and src_feat.requires_grad:

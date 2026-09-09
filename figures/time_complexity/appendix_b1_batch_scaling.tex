@@ -1,0 +1,100 @@
+% ---------------------------------------------------------------------------
+% Append to Appendix B.1 (Time Complexity Analysis), after "Scaling behavior."
+% ---------------------------------------------------------------------------
+
+\begin{table}[t]
+\centering
+\caption{Per-step time and peak memory on HiRID ($p_m=283$, the widest schema in
+our benchmark) as a function of batch size $B$. Each cell is the mean over 20
+measured steps after 3 warm-up steps; one step is
+\texttt{zero\_grad}\,$\to$\,forward\,$\to$\,backward\,$\to$\,\texttt{step}, with
+device synchronization at both ends.}
+\label{tab:hirid_batch}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l cc cc cc cc cc cc cc}
+\toprule
+& \multicolumn{2}{c}{$B{=}4$} & \multicolumn{2}{c}{$B{=}8$}
+& \multicolumn{2}{c}{$B{=}16$} & \multicolumn{2}{c}{$B{=}32$}
+& \multicolumn{2}{c}{$B{=}64$} & \multicolumn{2}{c}{$B{=}128$}
+& \multicolumn{2}{c}{$B{=}256$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+\cmidrule(lr){10-11}\cmidrule(lr){12-13}\cmidrule(lr){14-15}
+Model & s/step & GB & s/step & GB & s/step & GB & s/step & GB
+      & s/step & GB & s/step & GB & s/step & GB \\
+\midrule
+CARTE    & 0.031 & 1.23 & 0.034 & 1.28 & 0.034 & 1.37 & 0.035 & 1.55 & 0.053 & 1.91 & 0.084 & 2.62  & 0.166 & 4.05  \\
+XTFormer & 0.032 & 0.58 & 0.034 & 1.10 & 0.062 & 2.13 & 0.121 & 4.17 & 0.239 & 8.27 & 0.486 & 16.46 & 0.988 & 32.84 \\
+XTab     & 0.028 & 0.12 & 0.028 & 0.22 & 0.028 & 0.42 & 0.026 & 0.82 & 0.029 & 1.61 & 0.045 & 3.21  & 0.066 & 6.39  \\
+TransTab & 0.015 & 0.16 & 0.016 & 0.25 & 0.015 & 0.43 & 0.021 & 0.79 & 0.032 & 1.51 & 0.056 & 2.95  & 0.104 & 5.83  \\
+REBASE   & 0.117 & 0.22 & 0.147 & 0.33 & 0.146 & 0.54 & 0.149 & 0.97 & 0.142 & 1.83 & 0.190 & 3.54  & 0.298 & 6.97  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/time_complexity/hirid_batch_scaling.pdf}
+\caption{Batch-size scaling on HiRID ($p_m=283$). (a) Per-step training time,
+(b) peak GPU memory, (c) training throughput. Both axes are logarithmic.
+The alignment term of REBASE is a per-step cost that does not grow with the
+batch, so it amortizes; XTFormer carries a factor of $B$ in every term of its
+budget and its throughput saturates.}
+\label{fig:hirid_batch}
+\end{figure}
+
+\textbf{Batch-size scaling.}
+Table~\ref{tab:hirid_batch} and Figure~\ref{fig:hirid_batch} sweep the batch size
+$B$ from 4 to 256 on HiRID, the widest schema in our benchmark. What REBASE
+transfers across sources is a fixed set of $K$ prototype graphs of $T$ nodes, and
+the transfer is realized by an alignment against those prototypes. The alignment
+is solved by a fixed number of sequential solver iterations, each consisting of
+the two matrix products of Eq.~(7); with $K=T=12$ the operands are far below the
+saturation point of the device, so wall-clock time is governed by the iteration
+count rather than by the amount of work inside an iteration. The alignment
+therefore behaves as a per-step cost that is nearly flat in $B$ until the
+operands become large enough to matter: REBASE moves from 0.117 s/step at
+$B{=}4$ to 0.298 s/step at $B{=}256$, a $2.5\times$ increase for a $64\times$
+larger batch, and throughput rises from 34 to 859 rows/s over the same range.
+The transformer baselines show the opposite profile — a negligible per-step term
+and a cost essentially proportional to $B$ (TransTab $6.9\times$, CARTE
+$5.4\times$ across the sweep) — so the gap closes as the batch grows. At $B{=}4$
+REBASE is $7.8\times$ slower than TransTab; at $B{=}256$ it is $2.9\times$, and
+within $1.8\times$ of CARTE. The regime in which the alignment overhead is
+visible is the small-batch regime, which is not the regime in which these models
+are trained.
+
+\textbf{Why XTFormer is the outlier.}
+XTFormer is the only baseline that exceeds our cost at every batch size beyond
+16, reaching $0.486$ s/step and $16.46$ GB at $B{=}128$ — $2.6\times$ the time
+and $4.6\times$ the memory of REBASE — and it grows $31\times$ across the sweep,
+the steepest slope in the table. The reason is the object it transfers. XTFormer
+composes a prediction from $n_f$ shared basis functions and adapts to a table by
+positioning a coordinate in that basis; as noted in Section~2, the coordinate is
+assigned to each feature independently. This has a cost consequence that mirrors
+the modeling one. Because the coordinate is attached to a feature rather than to
+a table, the basis cannot be collapsed into one shared map before the forward
+pass: either the $n_f$ basis functions are evaluated separately and combined at
+every feature token, or the collapse produces a distinct $d\times d$ map per
+feature and the weight sharing along the sequence is lost. Under either reading
+the token-wise part of a block costs $n_f$ times a standard transformer block, in
+compute and in stored activations alike, and the official configuration uses
+$n_f=4$. The coordinate positioning protocol compounds this. It fixes an order
+over the columns and lets a feature token attend only to its predecessors, which
+is what allows one trunk to accept schemas of arbitrary width, but it requires
+the dense $p_m \times p_m$ score matrix and a mask of the same shape to be formed
+for each of the $h$ attention heads; with $h=32$ at $d=256$ this single map holds
+$B h p_m^2$ entries, 1.22 GB at $B{=}128$ and $p_m{=}283$, against 0.04 GB for the
+single-head map REBASE forms at the same width. Fitting $a B p_m + b B p_m^2$ to
+the measured memory across the six ICU sources at $B{=}128$ yields $R^2=1.00$
+($R^2=0.995$ for time), and the quadratic term accounts for $79\%$ of the
+16.46 GB at $p_m{=}283$: the cost is set by the masked attention over the full
+column sequence, not by the tokenizer or the basis composition. Crucially, both
+terms of that budget are per instance, so every term carries a factor of $B$ and
+there is nothing to amortize; XTFormer's throughput saturates near 260 rows/s
+beyond $B{=}16$ (Figure~\ref{fig:hirid_batch}c) while REBASE continues to improve.
+Extrapolating the fit, a single 48 GB device is exhausted at $B \approx 373$ on
+HiRID, whereas REBASE reaches $B{=}256$ at 6.97 GB. The contrast is structural:
+REBASE pays once per step to align a $p_m \times T$ plan against a fixed basis of
+graphs, whereas XTFormer re-derives a per-feature coordinate and a full
+$p_m \times p_m$ interaction map for every instance in the batch.
